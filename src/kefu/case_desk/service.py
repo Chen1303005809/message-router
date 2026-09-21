@@ -515,6 +515,20 @@ class CaseDesk:
                 restored += 1
         return restored
 
+    def get_delivery_markdown_content(self, delivery_id: UUID) -> str | None:
+        """Read the persisted Markdown body used by a callback-bound reply."""
+        with self._session_factory() as session:
+            items = session.scalars(
+                select(DeliveryItem)
+                .where(DeliveryItem.delivery_id == delivery_id)
+                .order_by(DeliveryItem.position.asc())
+            ).all()
+            for item in items:
+                content = item.payload_json.get("content")
+                if item.kind is PartKind.TEXT and isinstance(content, str):
+                    return content
+        return None
+
     def recover_deferred_deliveries(self) -> int:
         """Restore passive placeholders left by a worker that stopped mid-reply."""
         restored = 0
@@ -1296,15 +1310,23 @@ class CaseDesk:
             SourcePart(kind=part.kind, text=part.text, media_id=part.media_id)
             for part in self._entry_parts(session, entry.id)
         )
-        rendered = build_formal_bundle(
-            case_ref=case.case_ref,
-            case_title=case.title,
-            speaker_name=_original_speaker_name(entry),
-            parts=entry_parts,
-            side=entry.side,
-            history_url=f"{self._web_base_url}/events/{case.case_ref}",
-            mention_userid=self._user_wecom_userid(session, case.current_developer_id),
-        )
+        try:
+            rendered = build_formal_bundle(
+                case_ref=case.case_ref,
+                case_title=case.title,
+                speaker_name=_original_speaker_name(entry),
+                assignee_name=(
+                    self._user_name(session, case.current_developer_id)
+                    if entry.side is EntrySide.CONSULT
+                    else self._user_name(session, case.current_consultant_id)
+                )
+                or "未指定",
+                parts=entry_parts,
+                side=entry.side,
+                history_url=f"{self._web_base_url}/events/{case.case_ref}",
+            )
+        except ValueError as error:
+            raise ValidationError("去除 @ 提及后，正式消息必须保留文字内容") from error
         return self._create_delivery(
             session,
             entry_id=entry.id,

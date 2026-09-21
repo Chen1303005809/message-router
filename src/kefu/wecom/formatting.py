@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from kefu.case_desk.markers import format_case_marker
 from kefu.persistence.models import EntrySide, PartKind
+
+_ANGLE_MENTION_RE = re.compile(r"<\s*[@＠][\w.-]+\s*>")
+_AT_MENTION_RE = re.compile(r"(?<![\w.+-])[@＠][\w.-]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,10 +32,10 @@ def build_formal_bundle(
     case_ref: str,
     case_title: str,
     speaker_name: str,
+    assignee_name: str,
     parts: Iterable[SourcePart],
     side: EntrySide,
     history_url: str,
-    mention_userid: str | None = None,
 ) -> tuple[RenderedDeliveryItem, ...]:
     """Render a decorated, quoteable message, attachments, and history card.
 
@@ -42,22 +46,27 @@ def build_formal_bundle(
     source_parts = tuple(parts)
     marker = format_case_marker(case_ref)
     text_parts = [
-        source_part.text
+        _strip_at_mentions(source_part.text).strip()
         for source_part in source_parts
         if source_part.kind is PartKind.TEXT and source_part.text is not None
     ]
     if not text_parts or not any(part.strip() for part in text_parts):
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
-    normalized_mention = mention_userid.strip() if mention_userid else ""
     speaker_side = "咨询侧" if side is EntrySide.CONSULT else "研发侧"
+    assignee_side = "研发" if side is EntrySide.CONSULT else "咨询"
+    speaker_label = "转发人" if side is EntrySide.CONSULT else "发送人"
+    message_heading = "咨询侧转发" if side is EntrySide.CONSULT else "研发侧回复"
     content = (
-        f"事件标题：{case_title}\n"
-        f"发言人：{speaker_name}（{speaker_side}）\n\n"
-        f"{message_text}\n\n{marker}"
+        f"# {case_title}\n\n"
+        f"## 处理责任\n"
+        f"指定{assignee_side}经办人：**{assignee_name}**\n\n"
+        f"## 消息内容\n"
+        f"### {message_heading}\n"
+        f"{message_text}\n\n"
+        f'<font color="comment">{speaker_label}：{speaker_name}（{speaker_side}）'
+        f" · 事件编号：{marker}</font>"
     )
-    if side is EntrySide.CONSULT and normalized_mention:
-        content = f"<@{normalized_mention}>\n{content}"
     rendered: list[RenderedDeliveryItem] = [
         RenderedDeliveryItem(
             kind=PartKind.TEXT,
@@ -75,6 +84,12 @@ def build_formal_bundle(
             )
     rendered.append(_history_card(case_ref, case_title, speaker_name, "发言人", history_url))
     return tuple(rendered)
+
+
+def _strip_at_mentions(text: str) -> str:
+    """Remove visible WeCom @ mentions while preserving email addresses."""
+    without_markup_mentions = _ANGLE_MENTION_RE.sub("", text)
+    return _AT_MENTION_RE.sub("", without_markup_mentions)
 
 
 def build_notice_bundle(

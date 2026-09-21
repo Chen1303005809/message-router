@@ -10,7 +10,6 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from kefu.case_desk.errors import CaseDeskError
-from kefu.case_desk.markers import format_case_marker
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
 from kefu.media.storage import (
@@ -28,7 +27,6 @@ from kefu.wecom.transport import (
     InboundEvent,
     InboundImagePart,
     InboundReply,
-    InboundTextPart,
     LongConnectionWeComAdapter,
     ReplyAction,
     WeComTransport,
@@ -210,11 +208,16 @@ async def _release_deferred_callback(
             await _restore_deferred_deliveries(relay, decision.delivery_ids)
         return
     try:
+        if not decision.delivery_ids:
+            raise RuntimeError("咨询正式消息缺少持久化投递，无法回复研发群")
+        markdown_content = await asyncio.to_thread(
+            relay.get_delivery_markdown_content, decision.delivery_ids[0]
+        )
+        if not isinstance(markdown_content, str) or not markdown_content.strip():
+            raise RuntimeError("咨询正式消息缺少 Markdown 正文，无法回复研发群")
         await transport.reply(
             pending.event,
-            InboundReply(
-                text=f"{_consultant_reply_text(event)}\n\n{format_case_marker(decision.case_ref)}"
-            ),
+            InboundReply(text=markdown_content),
         )
     except Exception:
         if suppress_group_delivery and decision.delivery_ids:
@@ -261,13 +264,6 @@ async def _acknowledge_deferred_reply(
         await asyncio.to_thread(deferred_replies.acknowledge, pending)
     except Exception:
         logger.exception("failed to acknowledge deferred passive reply req_id=%s", pending.req_id)
-
-
-def _consultant_reply_text(event: InboundEvent) -> str:
-    text = "\n".join(
-        part.text for part in event.parts if isinstance(part, InboundTextPart) and part.text.strip()
-    ).strip()
-    return text or "咨询侧已回复。"
 
 
 def _reply_for_decision(decision: RelayDecision, web_base_url: str) -> InboundReply | None:

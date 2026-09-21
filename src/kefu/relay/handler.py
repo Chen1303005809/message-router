@@ -332,6 +332,10 @@ class Relay:
         """Restore deliveries when the passive callback cannot be sent."""
         return self._case_desk.restore_deferred_deliveries(delivery_ids)
 
+    def get_delivery_markdown_content(self, delivery_id: UUID) -> str | None:
+        """Return the persisted Markdown body for a formal message delivery."""
+        return self._case_desk.get_delivery_markdown_content(delivery_id)
+
 
 def _requested_team_binding(parts: Sequence[InboundPart]) -> tuple[TeamKind, str] | None:
     """Parse explicit development-team or consultation-queue binding commands."""

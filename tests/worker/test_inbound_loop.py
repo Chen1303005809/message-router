@@ -71,7 +71,7 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
         sender_userid="consult-a",
         chatid=None,
         chattype="single",
-        parts=(InboundTextPart("咨询侧确认内容"),),
+        parts=(InboundTextPart("@测试机器人 咨询侧确认内容"),),
         quote_content=marker,
         metadata={"wecom_raw_frame": {"headers": {"req_id": "callback-consult-1"}}},
     )
@@ -79,10 +79,11 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
     transport.push_inbound(group_event)
     transport.push_inbound(consultant_event)
     deferred_replies = DeferredPassiveReplyStore(desk_context.session_factory, ttl_seconds=60)
+    relay = Relay(desk_context.session_factory, desk_context.desk)
 
     asyncio.run(
         _inbound_loop(
-            relay=Relay(desk_context.session_factory, desk_context.desk),
+            relay=relay,
             transport=transport,
             web_base_url="https://events.example.test",
             deferred_replies=deferred_replies,
@@ -94,7 +95,15 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
     replied_event, reply = transport.replies[0]
     assert replied_event.msgid == group_event.msgid
     assert replied_event.metadata == group_event.metadata
-    assert reply == InboundReply(text=f"咨询侧确认内容\n\n{marker}")
+    decision = relay.handle(consultant_event)
+    assert decision.idempotent is True
+    assert decision.delivery_ids
+    persisted_content = relay.get_delivery_markdown_content(decision.delivery_ids[0])
+    assert persisted_content is not None
+    assert reply == InboundReply(text=persisted_content)
+    assert "指定研发经办人：**研发甲**" in reply.text
+    assert "转发人：咨询甲（咨询侧）" in reply.text
+    assert "@测试机器人" not in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
     assert all(
@@ -137,10 +146,11 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
     transport = FakeWeComAdapter()
     transport.push_inbound(group_event)
     transport.push_inbound(consultant_event)
+    relay = Relay(desk_context.session_factory, desk_context.desk)
 
     asyncio.run(
         _inbound_loop(
-            relay=Relay(desk_context.session_factory, desk_context.desk),
+            relay=relay,
             transport=transport,
             web_base_url="https://events.example.test",
             deferred_replies=DeferredPassiveReplyStore(
@@ -153,7 +163,11 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
     replied_event, reply = transport.replies[0]
     assert replied_event.msgid == group_event.msgid
     assert replied_event.metadata == group_event.metadata
-    assert reply == InboundReply(text=f"咨询侧释放无引用测试\n\n{marker}")
+    decision = relay.handle(consultant_event)
+    assert decision.delivery_ids
+    assert reply.text == relay.get_delivery_markdown_content(decision.delivery_ids[0])
+    assert "指定研发经办人：**研发甲**" in reply.text
+    assert "转发人：咨询甲（咨询侧）" in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
     assert all(
@@ -217,4 +231,12 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
 
     assert len(deferred_replies) == 0
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
-    assert any(message.destination_type is DeliveryDestination.CHAT for message in transport.sent)
+    group_markdown = next(
+        message.payload["content"]
+        for message in transport.sent
+        if message.destination_type is DeliveryDestination.CHAT
+        and "content" in message.payload
+    )
+    assert "指定研发经办人：**研发甲**" in str(group_markdown)
+    assert "转发人：咨询甲（咨询侧）" in str(group_markdown)
+    assert parse_quoted_case_ref(str(group_markdown)) == created.case_ref

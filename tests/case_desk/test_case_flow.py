@@ -20,7 +20,7 @@ from kefu.case_desk.contracts import (
     TransferDeveloper,
     TransferDevTeam,
 )
-from kefu.case_desk.errors import Conflict, Forbidden
+from kefu.case_desk.errors import Conflict, Forbidden, ValidationError
 from kefu.persistence.models import (
     CaseEntryKind,
     Delivery,
@@ -32,6 +32,7 @@ from kefu.persistence.models import (
     WaitingOn,
 )
 from kefu.relay.delivery import DeliveryWorker
+from kefu.relay.references import parse_quoted_case_ref
 from kefu.wecom.transport import FakeWeComAdapter
 from tests.conftest import DeskContext
 
@@ -102,9 +103,16 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
     marker = f"〔KF·{result.case_ref}〕"
     content = adapter.sent[0].payload["content"]
     assert content == (
-        f"<@dev-a>\n事件标题：登录失败\n发言人：咨询甲（咨询侧）\n\n"
-        f"第一段文字\n第二段文字\n\n{marker}"
+        "# 登录失败\n\n"
+        "## 处理责任\n"
+        "指定研发经办人：**研发甲**\n\n"
+        "## 消息内容\n"
+        "### 咨询侧转发\n"
+        "第一段文字\n第二段文字\n\n"
+        f'<font color="comment">转发人：咨询甲（咨询侧） · 事件编号：{marker}</font>'
     )
+    assert "<@" not in str(content)
+    assert parse_quoted_case_ref(str(content)) == result.case_ref
     assert str(content).count(marker) == 1
     card = adapter.sent[-1].payload["template_card"]
     assert card["main_title"]["title"] == "登录失败"
@@ -123,7 +131,8 @@ def test_developer_can_reply_without_becoming_current_handler(desk_context: Desk
     created = create_case(desk_context)
     initial_adapter = deliver(desk_context)
     initial_content = initial_adapter.sent[0].payload["content"]
-    assert str(initial_content).startswith("<@dev-a>\n")
+    assert "指定研发经办人：**研发甲**" in str(initial_content)
+    assert "<@" not in str(initial_content)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
     posted = desk_context.desk.execute(
         PostFormalMessage(
@@ -146,10 +155,44 @@ def test_developer_can_reply_without_becoming_current_handler(desk_context: Desk
         message.payload["content"] for message in adapter.sent if "content" in message.payload
     )
     assert response_content == (
-        f"事件标题：登录失败\n发言人：研发乙（研发侧）\n\n"
-        f"已定位到权限配置\n\n〔KF·{created.case_ref}〕"
+        "# 登录失败\n\n"
+        "## 处理责任\n"
+        "指定咨询经办人：**咨询甲**\n\n"
+        "## 消息内容\n"
+        "### 研发侧回复\n"
+        "已定位到权限配置\n\n"
+        f'<font color="comment">发送人：研发乙（研发侧） · '
+        f'事件编号：〔KF·{created.case_ref}〕</font>'
     )
     assert "<@" not in str(response_content)
+    assert parse_quoted_case_ref(str(response_content)) == created.case_ref
+
+
+def test_formal_forward_strips_at_mentions_but_keeps_email_addresses(
+    desk_context: DeskContext,
+) -> None:
+    create_case(
+        desk_context,
+        parts=(TextPart("@测试机器人 @研发甲 请排查，联系 qa@example.test"),),
+    )
+
+    adapter = deliver(desk_context)
+    content = str(adapter.sent[0].payload["content"])
+
+    assert "@测试机器人" not in content
+    assert "@研发甲" not in content
+    assert "qa@example.test" in content
+
+
+def test_formal_forward_rejects_when_at_mentions_are_the_only_text(
+    desk_context: DeskContext,
+) -> None:
+    with pytest.raises(ValidationError, match="去除 @ 提及后"):
+        create_case(
+            desk_context,
+            parts=(TextPart("@测试机器人"),),
+            source_msgid="only-at-mention",
+        )
 
 
 def test_handover_keeps_timeline_and_close_requires_consult_authority(
@@ -239,8 +282,14 @@ def test_image_first_bundle_still_uses_one_event_card(desk_context: DeskContext)
     ]
     content = adapter.sent[0].payload["content"]
     assert content == (
-        f"<@dev-a>\n事件标题：登录失败\n发言人：咨询甲（咨询侧）\n\n"
-        f"图片后的补充说明\n\n〔KF·{created.case_ref}〕"
+        "# 登录失败\n\n"
+        "## 处理责任\n"
+        "指定研发经办人：**研发甲**\n\n"
+        "## 消息内容\n"
+        "### 咨询侧转发\n"
+        "图片后的补充说明\n\n"
+        f'<font color="comment">转发人：咨询甲（咨询侧） · '
+        f'事件编号：〔KF·{created.case_ref}〕</font>'
     )
     assert str(content).count(f"〔KF·{created.case_ref}〕") == 1
 
