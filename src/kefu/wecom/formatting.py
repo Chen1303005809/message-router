@@ -1,0 +1,128 @@
+"""Keep WeCom-facing text and marker formatting outside domain transitions."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from uuid import UUID, uuid4
+
+from kefu.case_desk.markers import format_case_marker
+from kefu.persistence.models import EntrySide, PartKind
+
+
+@dataclass(frozen=True, slots=True)
+class SourcePart:
+    kind: PartKind
+    text: str | None = None
+    media_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedDeliveryItem:
+    kind: PartKind
+    payload: dict[str, object]
+
+
+def build_formal_bundle(
+    *,
+    case_ref: str,
+    case_title: str,
+    speaker_name: str,
+    parts: Iterable[SourcePart],
+    side: EntrySide,
+    history_url: str,
+    mention_userid: str | None = None,
+) -> tuple[RenderedDeliveryItem, ...]:
+    """Render a decorated, quoteable message, attachments, and history card.
+
+    The marker remains in ordinary message text for reliable reply association.
+    The template card provides an internal H5 navigation action without a
+    Markdown URL that WeCom may open in an external browser.
+    """
+    source_parts = tuple(parts)
+    marker = format_case_marker(case_ref)
+    text_parts = [
+        source_part.text
+        for source_part in source_parts
+        if source_part.kind is PartKind.TEXT and source_part.text is not None
+    ]
+    if not text_parts or not any(part.strip() for part in text_parts):
+        raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
+    message_text = "\n".join(text_parts)
+    normalized_mention = mention_userid.strip() if mention_userid else ""
+    speaker_side = "咨询侧" if side is EntrySide.CONSULT else "研发侧"
+    content = (
+        f"事件标题：{case_title}\n"
+        f"发言人：{speaker_name}（{speaker_side}）\n\n"
+        f"{message_text}\n\n{marker}"
+    )
+    if side is EntrySide.CONSULT and normalized_mention:
+        content = f"<@{normalized_mention}>\n{content}"
+    rendered: list[RenderedDeliveryItem] = [
+        RenderedDeliveryItem(
+            kind=PartKind.TEXT,
+            payload={"content": content},
+        )
+    ]
+    for source_part in source_parts:
+        if source_part.kind is PartKind.IMAGE:
+            assert source_part.media_id is not None
+            rendered.append(
+                RenderedDeliveryItem(
+                    kind=PartKind.IMAGE,
+                    payload={"media_id": str(source_part.media_id)},
+                )
+            )
+    rendered.append(_history_card(case_ref, case_title, speaker_name, "发言人", history_url))
+    return tuple(rendered)
+
+
+def build_notice_bundle(
+    *,
+    case_ref: str,
+    case_title: str,
+    operator_name: str,
+    content: str,
+    history_url: str,
+) -> tuple[RenderedDeliveryItem, ...]:
+    """Decorate a system notice and provide the same internal history action."""
+    marker = format_case_marker(case_ref)
+    return (
+        RenderedDeliveryItem(
+            kind=PartKind.TEXT,
+            payload={
+                "content": (
+                    f"事件标题：{case_title}\n操作人：{operator_name}\n\n"
+                    f"{content}\n\n{marker}"
+                )
+            },
+        ),
+        _history_card(case_ref, case_title, operator_name, "操作人", history_url),
+    )
+
+
+def _history_card(
+    case_ref: str,
+    case_title: str,
+    actor_name: str,
+    actor_label: str,
+    history_url: str,
+) -> RenderedDeliveryItem:
+    marker = format_case_marker(case_ref)
+    action = {"type": 1, "title": "查看事件历史", "url": history_url}
+    return RenderedDeliveryItem(
+        kind=PartKind.TEXT,
+        payload={
+            "template_card": {
+                "card_type": "text_notice",
+                "main_title": {
+                    "title": case_title[:26],
+                    "desc": f"{actor_label}：{actor_name}"[:30],
+                },
+                "sub_title_text": f"{marker} · 点击查看完整事件时间线",
+                "jump_list": [action],
+                "card_action": {"type": 1, "url": history_url},
+                "task_id": f"kefu_history_{uuid4().hex}",
+            }
+        },
+    )

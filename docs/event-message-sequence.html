@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>事件协作时序图</title>
+  <style>
+    :root {
+      color-scheme:light dark;
+      --page:#f3f7fc; --surface:#fff; --ink:#15243a; --muted:#60718a; --line:#c6d3e3;
+      --consult:#1876d2; --consult-soft:#e8f2ff; --hub:#7354c9; --hub-soft:#f1edff;
+      --dev:#138169; --dev-soft:#e7f7f1; --total:#cf7022; --total-soft:#fff2e6;
+      --danger:#c8484e; --danger-soft:#fff0f1;
+    }
+    @media (prefers-color-scheme:dark) { :root {
+      --page:#101725; --surface:#182334; --ink:#eaf0fb; --muted:#adbbd0; --line:#3b4c65;
+      --consult:#68b8ff; --consult-soft:#183756; --hub:#b79cff; --hub-soft:#35285d;
+      --dev:#65d5b6; --dev-soft:#183e39; --total:#ffad69; --total-soft:#4f3623;
+      --danger:#ff9498; --danger-soft:#502a31;
+    }}
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1480px,calc(100% - 32px)); margin:0 auto; padding:28px 0 42px; }
+    header { display:flex; align-items:end; justify-content:space-between; gap:24px; margin:0 4px 18px; }
+    h1 { margin:0; font-size:clamp(24px,3vw,36px); letter-spacing:-.035em; }
+    p { margin:7px 0 0; color:var(--muted); font-size:14px; }
+    .tag { color:var(--hub); font-size:12px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+    .canvas { overflow-x:auto; border:1px solid var(--line); border-radius:18px; background:var(--surface); box-shadow:0 16px 42px color-mix(in srgb,var(--ink) 10%,transparent); }
+    svg { display:block; min-width:1060px; width:100%; height:auto; fill:var(--ink); }
+    text { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .t-title { font-size:17px; font-weight:750; } .t-label { font-size:13px; font-weight:720; } .t-small { font-size:12px; } .t-xs { font-size:10.5px; } .t-code { font:11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .box { fill:var(--surface); stroke:var(--line); stroke-width:1.2; } .consult { fill:var(--consult-soft); stroke:var(--consult); stroke-width:1.45; } .hub { fill:var(--hub-soft); stroke:var(--hub); stroke-width:1.45; } .dev { fill:var(--dev-soft); stroke:var(--dev); stroke-width:1.45; } .total { fill:var(--total-soft); stroke:var(--total); stroke-width:1.45; } .danger { fill:var(--danger-soft); stroke:var(--danger); stroke-width:1.45; }
+    .dashed { stroke-dasharray:6 5; } .dotted { stroke-dasharray:2.5 5; }
+    .a { fill:none; stroke:var(--ink); stroke-width:1.7; marker-end:url(#a); } .a-consult { fill:none; stroke:var(--consult); stroke-width:1.85; marker-end:url(#a-consult); } .a-hub { fill:none; stroke:var(--hub); stroke-width:1.85; marker-end:url(#a-hub); } .a-dev { fill:none; stroke:var(--dev); stroke-width:1.85; marker-end:url(#a-dev); } .a-total { fill:none; stroke:var(--total); stroke-width:1.85; marker-end:url(#a-total); } .a-danger { fill:none; stroke:var(--danger); stroke-width:1.55; marker-end:url(#a-danger); }
+    footer { margin:14px 4px 0; color:var(--muted); font-size:12px; }
+    @media (max-width:720px) { main { width:calc(100% - 18px); padding-top:16px; } header { display:block; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="tag">03 · 时序图</div>
+        <h1>咨询与研发如何依次完成一次沟通</h1>
+        <p>机器人把收到的用户消息作为引用对象回传给对侧；接收方只需引用机器人消息，即可无歧义地续接同一事件。</p>
+      </div>
+      <p>总群不含机器人，只承担问题入口与最终答案出口。</p>
+    </header>
+
+    <div class="canvas">
+      <svg viewBox="0 0 1320 1120" role="img" aria-labelledby="title desc">
+        <title id="title">事件化机器人协作时序</title>
+        <desc id="desc">咨询在总群提出问题后，在咨询内部群发送未引用消息，机器人自动创建事件，并把咨询消息作为引用发送给研发内部群。研发引用机器人消息回复，机器人读取事件编号并更新最新对接人，再引用研发消息回传。后续双方都通过引用继续同一事件。</desc>
+        <defs>
+          <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--ink)"/></marker>
+          <marker id="a-consult" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--consult)"/></marker>
+          <marker id="a-hub" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--hub)"/></marker>
+          <marker id="a-dev" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--dev)"/></marker>
+          <marker id="a-total" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--total)"/></marker>
+          <marker id="a-danger" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--danger)"/></marker>
+        </defs>
+
+        <rect x="20" y="20" width="1280" height="1080" rx="18" fill="var(--hub-soft)" opacity=".22"/>
+
+        <!-- Participant headers -->
+        <g>
+          <rect x="44" y="53" width="118" height="60" rx="12" class="consult"/>
+          <text x="103" y="79" text-anchor="middle" class="t-label">咨询人员</text><text x="103" y="99" text-anchor="middle" class="t-xs" fill="var(--muted)">咨询 A</text>
+          <rect x="214" y="53" width="118" height="60" rx="12" class="total"/>
+          <text x="273" y="79" text-anchor="middle" class="t-label">总群</text><text x="273" y="99" text-anchor="middle" class="t-xs" fill="var(--danger)">无机器人</text>
+          <rect x="384" y="53" width="124" height="60" rx="12" class="consult"/>
+          <text x="446" y="79" text-anchor="middle" class="t-label">咨询内部群</text><text x="446" y="99" text-anchor="middle" class="t-xs" fill="var(--consult)">有机器人</text>
+          <rect x="558" y="53" width="124" height="60" rx="12" class="hub"/>
+          <text x="620" y="79" text-anchor="middle" class="t-label">机器人</text><text x="620" y="99" text-anchor="middle" class="t-xs" fill="var(--hub)">事件中继</text>
+          <rect x="732" y="53" width="124" height="60" rx="12" class="dev"/>
+          <text x="794" y="79" text-anchor="middle" class="t-label">研发内部群</text><text x="794" y="99" text-anchor="middle" class="t-xs" fill="var(--dev)">有机器人</text>
+          <rect x="906" y="53" width="118" height="60" rx="12" class="dev"/>
+          <text x="965" y="79" text-anchor="middle" class="t-label">研发人员</text><text x="965" y="99" text-anchor="middle" class="t-xs" fill="var(--muted)">研发 B</text>
+          <rect x="1074" y="53" width="130" height="60" rx="12" class="hub"/>
+          <text x="1139" y="79" text-anchor="middle" class="t-label">事件记录</text><text x="1139" y="99" text-anchor="middle" class="t-xs" fill="var(--hub)">事件 #7Q2K</text>
+        </g>
+
+        <!-- Lifelines -->
+        <g stroke="var(--line)" stroke-width="1.2" stroke-dasharray="6 5">
+          <line x1="103" y1="114" x2="103" y2="1062"/><line x1="273" y1="114" x2="273" y2="1062"/>
+          <line x1="446" y1="114" x2="446" y2="1062"/><line x1="620" y1="114" x2="620" y2="1062"/>
+          <line x1="794" y1="114" x2="794" y2="1062"/><line x1="965" y1="114" x2="965" y2="1062"/>
+          <line x1="1139" y1="114" x2="1139" y2="1062"/>
+        </g>
+
+        <!-- 1: total source -->
+        <text x="43" y="150" class="t-small" fill="var(--total)">① 总群保留问题</text>
+        <path d="M103 180 H273" class="a-total"/>
+        <text x="183" y="172" text-anchor="middle" class="t-small">@目标研发提出问题</text>
+        <path d="M273 205 H965" class="a dashed"/>
+        <text x="615" y="197" text-anchor="middle" class="t-xs" fill="var(--muted)">研发看到原问题；机器人不会收到或记录它</text>
+
+        <!-- 2: bare message -> initial event -->
+        <text x="43" y="250" class="t-small" fill="var(--consult)">② 无引用消息自动开事件</text>
+        <path d="M103 280 H446" class="a-consult"/>
+        <text x="270" y="272" text-anchor="middle" class="t-small">发送问题详情 + 目标研发部门（无引用）</text>
+        <path d="M446 309 H620" class="a-consult"/>
+        <text x="529" y="301" text-anchor="middle" class="t-small">@机器人</text>
+        <path d="M620 338 H1139" class="a-hub"/>
+        <text x="875" y="330" text-anchor="middle" class="t-small">创建事件 #7Q2K，并把咨询 A 记为最新对接人</text>
+
+        <!-- 3: quote-forward -->
+        <text x="43" y="386" class="t-small" fill="var(--dev)">③ 机器人引用首条消息并转发</text>
+        <path d="M620 416 H794" class="a-hub"/>
+        <text x="707" y="408" text-anchor="middle" class="t-small">引用咨询消息 + 事件编号</text>
+        <path d="M794 445 H965" class="a-dev"/>
+        <text x="875" y="437" text-anchor="middle" class="t-small">提醒研发 B / 研发组</text>
+
+        <!-- Internal loop -->
+        <rect x="722" y="470" width="320" height="146" rx="13" class="box dashed"/>
+        <text x="744" y="500" class="t-label">loop · 研发组内部协同</text>
+        <path d="M965 531 H794" class="a-dev"/>
+        <text x="884" y="523" text-anchor="middle" class="t-small">排查、修复、联调、多人讨论</text>
+        <path d="M794 561 H965" class="a-dev"/>
+        <text x="875" y="553" text-anchor="middle" class="t-small">内部进展</text>
+        <text x="744" y="595" class="t-xs" fill="var(--danger)">没有 @机器人：消息不出群，也不写入事件。</text>
+
+        <!-- 4: developer quote -->
+        <text x="43" y="663" class="t-small" fill="var(--dev)">④ 研发引用机器人消息，正式回复</text>
+        <path d="M965 692 H620" class="a-dev"/>
+        <text x="793" y="684" text-anchor="middle" class="t-small">引用机器人消息 + @机器人：修复结果</text>
+        <path d="M620 721 H1139" class="a-hub"/>
+        <text x="875" y="713" text-anchor="middle" class="t-small">找到引用对应的事件；把研发 B 记为最新对接人；追加沟通记录</text>
+
+        <!-- 5: bot quote-forward to consultant -->
+        <text x="43" y="770" class="t-small" fill="var(--hub)">⑤ 机器人引用研发回复，回传咨询群</text>
+        <path d="M620 800 H446" class="a-hub"/>
+        <text x="533" y="792" text-anchor="middle" class="t-small">引用研发回复 + 事件编号</text>
+        <path d="M446 829 H103" class="a-consult"/>
+        <text x="279" y="821" text-anchor="middle" class="t-small">咨询看到结果及可继续引用的机器人消息</text>
+
+        <!-- 6: continuation loop -->
+        <rect x="42" y="861" width="668" height="83" rx="13" class="consult" opacity=".72"/>
+        <text x="65" y="891" class="t-label">⑥ 咨询补充 / 继续同一事件</text>
+        <text x="65" y="916" class="t-small" fill="var(--muted)">咨询 A 引用机器人刚发的 〔事件 #7Q2K〕消息 → 机器人找到原事件、更新最新对接人，再引用这条补充消息回发研发群。</text>
+        <path d="M103 975 H620" class="a-consult dashed"/>
+        <text x="357" y="967" text-anchor="middle" class="t-xs" fill="var(--consult)">这个循环可重复；不需要记忆事件编号或新建临时群</text>
+
+        <!-- invalid and final -->
+        <rect x="750" y="861" width="454" height="83" rx="13" class="danger" opacity=".73"/>
+        <text x="773" y="891" class="t-label">异常：引用的消息里没有事件编号</text>
+        <text x="773" y="916" class="t-small" fill="var(--muted)">机器人不猜测归属；提示用户改为引用机器人带 〔事件编号〕的消息。</text>
+
+        <text x="43" y="1025" class="t-small" fill="var(--total)">⑦ 总群只收最终答案</text>
+        <path d="M965 1053 H273" class="a-total dashed"/>
+        <text x="623" y="1045" text-anchor="middle" class="t-small">研发引用总群中的原问题，手动发送最终答案；机器人不参与</text>
+      </svg>
+    </div>
+    <footer>只有两种清晰入口：没有引用的消息会成为新事件；引用带事件编号的机器人消息会继续原事件。</footer>
+  </main>
+</body>
+</html>

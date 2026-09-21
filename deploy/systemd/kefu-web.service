@@ -1,0 +1,26 @@
+[Unit]
+Description=Kefu H5 event center
+Wants=network-online.target
+Requires=kefu-migrate.service
+After=network-online.target kefu-migrate.service
+
+[Service]
+Type=simple
+User=kefu
+Group=kefu
+WorkingDirectory=/opt/kefu/current
+EnvironmentFile=/etc/kefu/web.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/kefu/current/src
+ExecStart=/opt/kefu/venv/bin/uvicorn kefu.web.app:app --host 127.0.0.1 --port 18000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/kefu /var/lib/kefu
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

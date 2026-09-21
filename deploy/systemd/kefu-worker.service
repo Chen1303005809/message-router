@@ -1,0 +1,28 @@
+[Unit]
+Description=Kefu WeCom bot worker
+Wants=network-online.target
+Requires=kefu-migrate.service
+After=network-online.target kefu-migrate.service
+RequiresMountsFor=/opt/kefu/current /var/lib/kefu
+
+[Service]
+Type=simple
+User=kefu
+Group=kefu
+WorkingDirectory=/opt/kefu/current
+EnvironmentFile=/etc/kefu/worker.env
+EnvironmentFile=/etc/kefu/web.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/kefu/current/src
+ExecStart=/opt/kefu/venv/bin/kefu-worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/kefu /var/lib/kefu
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

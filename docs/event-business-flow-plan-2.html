@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>方案二：总群直接建立事件</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page:#f2f6fb; --surface:#ffffff; --surface-2:#f8fafc; --ink:#17253a; --muted:#64748a; --line:#c9d5e3;
+      --consult:#2478cf; --consult-soft:#e9f3ff; --bot:#7354c9; --bot-soft:#f1edff;
+      --dev:#16816a; --dev-soft:#e7f7f1; --total:#cf7022; --total-soft:#fff2e6;
+      --success:#13805d; --success-soft:#e5f7ef; --quiet:#eef2f6; --shadow:rgba(25,44,72,.10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page:#101725; --surface:#182334; --surface-2:#202d40; --ink:#edf3fc; --muted:#adbbd0; --line:#3b4c65;
+        --consult:#68b8ff; --consult-soft:#183756; --bot:#b79cff; --bot-soft:#35285d;
+        --dev:#65d5b6; --dev-soft:#183e39; --total:#ffad69; --total-soft:#4f3623;
+        --success:#63d5ae; --success-soft:#183c35; --quiet:#263448; --shadow:rgba(0,0,0,.28);
+      }
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1500px,calc(100% - 32px)); margin:0 auto; padding:26px 0 38px; }
+    header { display:flex; align-items:flex-end; justify-content:space-between; gap:28px; margin:0 4px 17px; }
+    h1 { margin:0; font-size:clamp(25px,3vw,38px); line-height:1.16; letter-spacing:-.035em; }
+    header p { margin:7px 0 0; color:var(--muted); font-size:14px; }
+    .tag { margin-bottom:6px; color:var(--bot); font-size:12px; font-weight:800; letter-spacing:.1em; }
+    .summary { max-width:470px; text-align:right; line-height:1.6; }
+    .canvas { overflow-x:auto; border:1px solid var(--line); border-radius:19px; background:var(--surface); box-shadow:0 17px 46px var(--shadow); }
+    svg { display:block; width:100%; min-width:1080px; height:auto; fill:var(--ink); }
+    text { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .panel { fill:var(--surface-2); stroke:var(--line); stroke-width:1.2; }
+    .box { fill:var(--surface); stroke:var(--line); stroke-width:1.2; }
+    .total { fill:var(--total-soft); stroke:var(--total); stroke-width:1.4; }
+    .consult { fill:var(--consult-soft); stroke:var(--consult); stroke-width:1.4; }
+    .bot { fill:var(--bot-soft); stroke:var(--bot); stroke-width:1.4; }
+    .dev { fill:var(--dev-soft); stroke:var(--dev); stroke-width:1.4; }
+    .success { fill:var(--success-soft); stroke:var(--success); stroke-width:1.4; }
+    .quiet { fill:var(--quiet); stroke:var(--line); stroke-width:1.1; }
+    .dashed { stroke-dasharray:6 5; }
+    .dotted { stroke-dasharray:2.5 5; }
+    .title { font-size:18px; font-weight:780; }
+    .lane-title { font-size:16px; font-weight:780; }
+    .label { font-size:13px; font-weight:740; }
+    .body { font-size:12px; }
+    .small { font-size:10.5px; fill:var(--muted); }
+    .tiny { font-size:9.5px; fill:var(--muted); }
+    .step { font-size:13px; font-weight:820; fill:#fff; }
+    .arrow-total { fill:none; stroke:var(--total); stroke-width:1.9; marker-end:url(#arrow-total); }
+    .arrow-bot { fill:none; stroke:var(--bot); stroke-width:1.9; marker-end:url(#arrow-bot); }
+    .arrow-consult { fill:none; stroke:var(--consult); stroke-width:1.9; marker-end:url(#arrow-consult); }
+    .arrow-dev { fill:none; stroke:var(--dev); stroke-width:1.9; marker-end:url(#arrow-dev); }
+    footer { margin:13px 5px 0; color:var(--muted); font-size:12px; }
+    @media (max-width:720px) {
+      main { width:calc(100% - 18px); padding-top:16px; }
+      header { display:block; }
+      .summary { max-width:none; text-align:left; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="tag">方案二 · 业务流程图</div>
+        <h1>总群发问时，机器人直接建立事件</h1>
+        <p>咨询同时 @机器人与部门负责人，机器人按预先登记的关系，把问题送到唯一正确的研发群。</p>
+      </div>
+      <p class="summary">关键变化：不再等待研发回内部群认领。<br>问题发布、事件建立、研发群定位在同一时刻完成。</p>
+    </header>
+
+    <div class="canvas">
+      <svg viewBox="0 0 1360 950" role="img" aria-labelledby="flow-title flow-desc">
+        <title id="flow-title">总群中有机器人时的事件协作业务流程</title>
+        <desc id="flow-desc">开始前登记部门负责人与研发内部群的对应关系。咨询在总群同时艾特机器人与目标部门负责人并发布问题。机器人同时读取原问题与负责人，直接建立事件，再根据负责人找到对应研发群。研发收到事件并作出首轮回复后，机器人把回复转发到咨询群。后续咨询与研发都在各自内部群引用机器人消息沟通，内部排查不外发，最终研发回总群引用原问题并回复答案。</desc>
+        <defs>
+          <marker id="arrow-total" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--total)"/></marker>
+          <marker id="arrow-bot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--bot)"/></marker>
+          <marker id="arrow-consult" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--consult)"/></marker>
+          <marker id="arrow-dev" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--dev)"/></marker>
+        </defs>
+
+        <!-- One-time setup -->
+        <rect x="18" y="18" width="1324" height="104" rx="16" class="panel dashed"/>
+        <circle cx="51" cy="51" r="19" fill="var(--muted)"/>
+        <text x="51" y="56" text-anchor="middle" class="step">0</text>
+        <text x="80" y="48" class="title">开始前只登记一次</text>
+        <text x="80" y="71" class="body">告诉机器人：每位部门负责人对应哪个研发内部群</text>
+        <text x="80" y="93" class="small">人员可以调整，只需同步更新这份对应关系。</text>
+
+        <rect x="385" y="39" width="272" height="62" rx="12" class="total"/>
+        <rect x="398" y="52" width="104" height="36" rx="8" class="box"/>
+        <text x="450" y="75" text-anchor="middle" class="small" fill="var(--total)">@订单负责人</text>
+        <path d="M502 70H540" class="arrow-bot"/>
+        <rect x="540" y="52" width="104" height="36" rx="8" class="dev"/>
+        <text x="592" y="75" text-anchor="middle" class="small" fill="var(--dev)">订单研发群</text>
+
+        <rect x="678" y="39" width="272" height="62" rx="12" class="box"/>
+        <rect x="691" y="52" width="104" height="36" rx="8" class="box"/>
+        <text x="743" y="75" text-anchor="middle" class="small">@支付负责人</text>
+        <path d="M795 70H833" class="arrow-bot"/>
+        <rect x="833" y="52" width="104" height="36" rx="8" class="box"/>
+        <text x="885" y="75" text-anchor="middle" class="small">支付研发群</text>
+
+        <rect x="971" y="39" width="272" height="62" rx="12" class="box"/>
+        <rect x="984" y="52" width="104" height="36" rx="8" class="box"/>
+        <text x="1036" y="75" text-anchor="middle" class="small">@履约负责人</text>
+        <path d="M1088 70H1126" class="arrow-bot"/>
+        <rect x="1126" y="52" width="104" height="36" rx="8" class="box"/>
+        <text x="1178" y="75" text-anchor="middle" class="small">履约研发群</text>
+        <text x="1287" y="76" class="label" fill="var(--muted)">……</text>
+
+        <!-- Total group and direct trigger -->
+        <rect x="18" y="140" width="1324" height="170" rx="16" class="total" opacity=".72"/>
+        <text x="43" y="169" class="lane-title" fill="var(--total)">总群 · 咨询 + 全体研发 + 机器人</text>
+        <text x="43" y="188" class="small">机器人能看到原问题，也能看到被指定的部门负责人。</text>
+
+        <circle cx="66" cy="229" r="19" fill="var(--total)"/>
+        <text x="66" y="234" text-anchor="middle" class="step">1</text>
+        <rect x="96" y="207" width="572" height="76" rx="13" class="box"/>
+        <text x="119" y="230" class="small">咨询人员</text>
+        <text x="119" y="253" class="label" fill="var(--total)">@机器人　@订单负责人</text>
+        <text x="330" y="253" class="body">客户订单一直提交失败，请协助处理。</text>
+        <text x="119" y="273" class="tiny">一次发送，同时完成“通知机器人”和“指定负责部门”。</text>
+
+        <path d="M668 245H735" class="arrow-total"/>
+        <rect x="735" y="207" width="557" height="76" rx="13" class="bot"/>
+        <circle cx="768" cy="242" r="17" fill="var(--bot)"/>
+        <text x="768" y="247" text-anchor="middle" class="step">2</text>
+        <text x="801" y="232" class="label" fill="var(--bot)">机器人获得关键信息，并直接建立事件</text>
+        <text x="801" y="254" class="body">原问题 ＋ @订单负责人 → 建立〔事件 #7Q2K〕</text>
+        <text x="801" y="274" class="tiny">同时记住咨询发问人，并按登记关系锁定订单研发群。</text>
+
+        <!-- Three working spaces -->
+        <rect x="18" y="330" width="300" height="510" rx="16" class="consult" opacity=".24"/>
+        <rect x="338" y="330" width="342" height="510" rx="16" class="bot" opacity=".20"/>
+        <rect x="700" y="330" width="642" height="510" rx="16" class="dev" opacity=".22"/>
+        <text x="40" y="360" class="lane-title" fill="var(--consult)">唯一的咨询内部群</text>
+        <text x="360" y="360" class="lane-title" fill="var(--bot)">机器人 / 事件中心</text>
+        <text x="722" y="360" class="lane-title" fill="var(--dev)">对应的研发内部群</text>
+        <text x="1196" y="360" class="small" fill="var(--dev)">本例：订单研发群</text>
+
+        <path d="M1014 283V387" class="arrow-total"/>
+        <text x="1027" y="325" class="tiny" fill="var(--total)">按登记关系直接送达</text>
+
+        <!-- First delivery and first R&D reply -->
+        <rect x="729" y="387" width="583" height="119" rx="13" class="dev"/>
+        <circle cx="754" cy="411" r="17" fill="var(--dev)"/>
+        <text x="754" y="416" text-anchor="middle" class="step">3A</text>
+        <text x="781" y="416" class="label">事件到达订单研发群，研发作出首轮回复</text>
+        <text x="754" y="447" class="body" fill="var(--dev)">〔事件 #7Q2K〕客户订单一直提交失败，请协助处理。</text>
+        <text x="754" y="470" class="body">研发引用并 @机器人：“已收到，请补充失败订单时间。”</text>
+        <text x="754" y="492" class="tiny">其他研发群不会收到；首位回复人记为研发侧当前对接人。</text>
+
+        <path d="M729 451H653" class="arrow-dev"/>
+        <rect x="365" y="387" width="288" height="119" rx="13" class="bot"/>
+        <circle cx="389" cy="411" r="17" fill="var(--bot)"/>
+        <text x="389" y="416" text-anchor="middle" class="step">3B</text>
+        <text x="415" y="416" class="label">把研发回复转发到咨询</text>
+        <text x="389" y="447" class="body" fill="var(--bot)">沿用同一事件 〔#7Q2K〕</text>
+        <text x="389" y="470" class="small">带上研发的首轮回复</text>
+        <text x="389" y="491" class="small">由此建立咨询侧沟通入口</text>
+
+        <path d="M365 451H292" class="arrow-bot"/>
+        <rect x="44" y="395" width="248" height="111" rx="13" class="consult"/>
+        <text x="66" y="421" class="label">咨询群收到研发回复</text>
+        <text x="66" y="448" class="body" fill="var(--consult)">〔事件 #7Q2K〕研发已收到</text>
+        <text x="66" y="470" class="small">请补充失败订单的时间范围</text>
+        <text x="66" y="491" class="tiny">后续引用这条消息即可继续沟通。</text>
+
+        <!-- Consultation to R&D -->
+        <rect x="44" y="548" width="248" height="102" rx="13" class="consult"/>
+        <circle cx="67" cy="572" r="17" fill="var(--consult)"/>
+        <text x="67" y="577" text-anchor="middle" class="step">4</text>
+        <text x="93" y="577" class="label">咨询补充或追问</text>
+        <text x="67" y="607" class="body" fill="var(--consult)">引用机器人的事件消息</text>
+        <text x="67" y="629" class="small">本次发送者成为最新咨询对接人</text>
+
+        <path d="M292 599H365" class="arrow-consult"/>
+        <rect x="365" y="548" width="288" height="102" rx="13" class="bot"/>
+        <circle cx="389" cy="572" r="17" fill="var(--bot)"/>
+        <text x="389" y="577" text-anchor="middle" class="step">5</text>
+        <text x="415" y="577" class="label">按事件继续转发</text>
+        <text x="389" y="607" class="body" fill="var(--bot)">从引用中找到 〔#7Q2K〕</text>
+        <text x="389" y="629" class="small">目的地始终是订单研发群</text>
+
+        <path d="M653 599H729" class="arrow-bot"/>
+        <rect x="729" y="548" width="270" height="102" rx="13" class="dev"/>
+        <text x="752" y="577" class="label">订单研发群收到补充</text>
+        <text x="752" y="607" class="body">机器人带着同一事件编号转发</text>
+        <text x="752" y="629" class="small">消息不会流向其他研发群</text>
+
+        <path d="M999 599H1025" class="arrow-dev"/>
+        <rect x="1025" y="548" width="287" height="102" rx="13" class="box dotted"/>
+        <circle cx="1049" cy="572" r="17" fill="var(--dev)"/>
+        <text x="1049" y="577" text-anchor="middle" class="step">6</text>
+        <text x="1075" y="577" class="label">研发内部协同</text>
+        <text x="1049" y="607" class="body">排查 · 修复 · 联调 · 多人讨论</text>
+        <text x="1049" y="629" class="small">不 @机器人时，不转发到咨询群</text>
+
+        <!-- R&D answer back to consultation -->
+        <rect x="1025" y="690" width="287" height="102" rx="13" class="dev"/>
+        <circle cx="1049" cy="714" r="17" fill="var(--dev)"/>
+        <text x="1049" y="719" text-anchor="middle" class="step">7</text>
+        <text x="1075" y="719" class="label">研发正式回复</text>
+        <text x="1049" y="749" class="body" fill="var(--dev)">引用事件消息并 @机器人</text>
+        <text x="1049" y="771" class="small">回复人更新为研发侧最新对接人</text>
+        <path d="M1168 650V690" class="arrow-dev"/>
+
+        <path d="M1025 741H653" class="arrow-dev"/>
+        <rect x="365" y="690" width="288" height="102" rx="13" class="bot"/>
+        <text x="389" y="719" class="label">机器人把结果送回咨询群</text>
+        <text x="389" y="749" class="body" fill="var(--bot)">继续沿用 〔事件 #7Q2K〕</text>
+        <text x="389" y="771" class="small">回复、追问都在同一事件中往返</text>
+
+        <path d="M365 741H292" class="arrow-bot"/>
+        <rect x="44" y="690" width="248" height="102" rx="13" class="consult"/>
+        <text x="67" y="719" class="label">咨询群收到进展或结果</text>
+        <text x="67" y="749" class="body" fill="var(--consult)">需要继续时，再引用机器人消息</text>
+        <text x="67" y="771" class="small">无需创建临时群，也无需找研发个人</text>
+
+        <!-- Final answer returns to the total group -->
+        <rect x="18" y="858" width="1324" height="72" rx="15" class="total"/>
+        <circle cx="50" cy="894" r="19" fill="var(--total)"/>
+        <text x="50" y="899" text-anchor="middle" class="step">8</text>
+        <text x="82" y="889" class="label">问题解决后，研发回总群引用最初的问题，只回复最终答案</text>
+        <text x="82" y="912" class="small">排查、修复、联调等过程仍只留在内部群；总群保持简洁。</text>
+        <path d="M1168 792V841H1030V858" class="arrow-total dashed"/>
+        <rect x="909" y="876" width="387" height="35" rx="11" class="box"/>
+        <text x="1102" y="899" text-anchor="middle" class="body">引用原问题：“已修复库存锁问题，请客户重试。”</text>
+      </svg>
+    </div>
+    <footer>核心规则：咨询在总群同时 @机器人和部门负责人；机器人用事前登记的对应关系直接建事件并锁定研发群，后续流程继续沿同一事件往返。</footer>
+  </main>
+</body>
+</html>

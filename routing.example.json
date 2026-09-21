@@ -1,0 +1,21 @@
+{
+  "global_admin": {
+    "wecom_userid": "event-center-admin",
+    "display_name": "事件中心总管理员"
+  },
+  "users": [
+    {"wecom_userid": "consultant-a", "display_name": "咨询甲"},
+    {"wecom_userid": "developer-a", "display_name": "研发甲"},
+    {"wecom_userid": "developer-b", "display_name": "研发乙"}
+  ],
+  "teams": [
+    {"key": "consult", "kind": "consult_queue", "name": "试点咨询队列"},
+    {"key": "platform", "kind": "dev", "name": "平台研发组"}
+  ],
+  "memberships": [
+    {"team": "consult", "wecom_userid": "consultant-a", "role": "admin"},
+    {"team": "platform", "wecom_userid": "developer-a", "role": "member"},
+    {"team": "platform", "wecom_userid": "developer-b", "role": "admin"}
+  ],
+  "channels": []
+}

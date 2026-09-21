@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kefu}
+      POSTGRES_USER: ${POSTGRES_USER:-kefu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-kefu-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-please}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >-
+      /bin/sh -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}
+      && mc mb --ignore-existing local/$${S3_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-kefu-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-please}
+      S3_BUCKET: ${S3_BUCKET:-kefu-media}
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kefu}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-kefu}
+      OBJECT_STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-kefu-media}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-kefu-minio}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-please}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  web:
+    build: .
+    command: ["uvicorn", "kefu.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kefu}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-kefu}
+      OBJECT_STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-kefu-media}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-kefu-minio}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-please}
+      WECOM_TRANSPORT: ${WECOM_TRANSPORT:-fake}
+      AUTH_MODE: ${AUTH_MODE:-development}
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:8000}
+      WECOM_CORP_ID: ${WECOM_CORP_ID:-}
+      WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
+      WECOM_CORP_SECRET: ${WECOM_CORP_SECRET:-}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      INITIAL_ADMIN_WECOM_USERID: ${INITIAL_ADMIN_WECOM_USERID:-}
+      INITIAL_ADMIN_DISPLAY_NAME: ${INITIAL_ADMIN_DISPLAY_NAME:-事件中心总管理员}
+      ADMIN_BOOTSTRAP_TOKEN: ${ADMIN_BOOTSTRAP_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+
+  bot-worker:
+    build: .
+    command: ["kefu-worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kefu}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-kefu}
+      OBJECT_STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-kefu-media}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-kefu-minio}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-please}
+      WECOM_TRANSPORT: ${WECOM_TRANSPORT:-fake}
+      WECOM_BOT_ID: ${WECOM_BOT_ID:-}
+      WECOM_BOT_SECRET: ${WECOM_BOT_SECRET:-}
+      WECOM_BOT_MENTION_NAME: ${WECOM_BOT_MENTION_NAME:-}
+      WECOM_REQUIRE_GROUP_MENTION: ${WECOM_REQUIRE_GROUP_MENTION:-true}
+      WECOM_LONG_CONNECTION_URL: ${WECOM_LONG_CONNECTION_URL:-}
+      WECOM_CONNECT_TIMEOUT_SECONDS: ${WECOM_CONNECT_TIMEOUT_SECONDS:-20}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  minio-data:

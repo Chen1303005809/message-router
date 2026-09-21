@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>机器人中转方案的五个沟通问题</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page:#eef3f9; --surface:#ffffff; --surface-2:#f7f9fc; --ink:#172338; --muted:#68778c; --line:#ccd6e2;
+      --consult:#2878d0; --consult-soft:#e9f3ff; --dev:#168169; --dev-soft:#e7f7f1;
+      --total:#cf6d25; --total-soft:#fff1e5; --bot:#7654c8; --bot-soft:#f1edff;
+      --danger:#ca4851; --danger-soft:#fff0f1; --warn:#bd7912; --warn-soft:#fff7df;
+      --on-accent:#ffffff; --shadow:rgba(26,42,68,.10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page:#0f1725; --surface:#182335; --surface-2:#202d40; --ink:#edf3fc; --muted:#adbbce; --line:#3c4c63;
+        --consult:#69b7ff; --consult-soft:#173654; --dev:#67d5b6; --dev-soft:#173d37;
+        --total:#ffad6b; --total-soft:#4c3422; --bot:#b99fff; --bot-soft:#35285d;
+        --danger:#ff969b; --danger-soft:#502a31; --warn:#ffd27b; --warn-soft:#4b3a1d;
+        --on-accent:#ffffff; --shadow:rgba(0,0,0,.28);
+      }
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1500px,calc(100% - 32px)); margin:0 auto; padding:24px 0 36px; }
+    header { display:flex; align-items:flex-end; justify-content:space-between; gap:28px; margin:0 4px 16px; }
+    h1 { margin:0; font-size:clamp(25px,3vw,38px); line-height:1.16; letter-spacing:-.035em; }
+    header p { margin:7px 0 0; color:var(--muted); font-size:14px; }
+    .tag { margin-bottom:6px; color:var(--danger); font-size:12px; font-weight:800; letter-spacing:.11em; }
+    .summary { max-width:470px; text-align:right; line-height:1.6; }
+    .canvas { overflow-x:auto; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:0 18px 48px var(--shadow); }
+    svg { display:block; width:100%; min-width:1160px; height:auto; fill:var(--ink); }
+    text { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .panel { fill:var(--surface-2); stroke:var(--line); stroke-width:1.2; }
+    .box { fill:var(--surface); stroke:var(--line); stroke-width:1.15; }
+    .consult { fill:var(--consult-soft); stroke:var(--consult); stroke-width:1.35; }
+    .dev { fill:var(--dev-soft); stroke:var(--dev); stroke-width:1.35; }
+    .total { fill:var(--total-soft); stroke:var(--total); stroke-width:1.35; }
+    .bot { fill:var(--bot-soft); stroke:var(--bot); stroke-width:1.35; }
+    .danger { fill:var(--danger-soft); stroke:var(--danger); stroke-width:1.35; }
+    .warn { fill:var(--warn-soft); stroke:var(--warn); stroke-width:1.35; }
+    .title { font-size:17px; font-weight:790; }
+    .subtitle { font-size:11.5px; fill:var(--muted); }
+    .label { font-size:12.5px; font-weight:740; }
+    .body { font-size:11.5px; }
+    .small { font-size:10.5px; fill:var(--muted); }
+    .tiny { font-size:9.5px; fill:var(--muted); }
+    .num { font-size:17px; font-weight:850; fill:var(--on-accent); }
+    .arrow-bot { fill:none; stroke:var(--bot); stroke-width:1.9; marker-end:url(#arrow-bot); }
+    .arrow-red { fill:none; stroke:var(--danger); stroke-width:1.9; marker-end:url(#arrow-red); }
+    .arrow-muted { fill:none; stroke:var(--muted); stroke-width:1.55; marker-end:url(#arrow-muted); }
+    .flow-line { fill:none; stroke:var(--consult); stroke-width:1.3; opacity:.62; }
+    .dash { stroke-dasharray:6 5; }
+    .strike { stroke:var(--danger); stroke-width:3.1; stroke-linecap:round; }
+    footer { margin:13px 5px 0; color:var(--muted); font-size:12px; }
+    @media (max-width:720px) {
+      main { width:calc(100% - 18px); padding-top:16px; }
+      header { display:block; }
+      .summary { max-width:none; text-align:left; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="tag">沟通体验风险总览</div>
+        <h1>群聊减少了，但人的识别与阅读成本被集中放大</h1>
+        <p>机器人可以搬运消息，却无法完整替代人类在群聊中的表达、提醒、引用与上下文判断。</p>
+      </div>
+      <p class="summary">五个问题从“单条消息怎么发”，一路累积到“整个咨询群的信息量失控”。</p>
+    </header>
+
+    <div class="canvas">
+      <svg viewBox="0 0 1440 1240" role="img" aria-labelledby="risk-title risk-desc">
+        <title id="risk-title">机器人中转方案的五个沟通问题</title>
+        <desc id="risk-desc">图中展示五类问题：图文混排会被拆成多条消息；机器人不能主动艾特和引用，人员只能肉眼寻找事件编号；研发认领后咨询群突然收到编号，难以对应总群原问题；卡片与聊天记录不可用，只能发送带重复编号的 Markdown；原先分散在五个群的十个问题，会把所有面向咨询的沟通集中到一个咨询群。</desc>
+        <defs>
+          <marker id="arrow-bot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--bot)"/></marker>
+          <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--danger)"/></marker>
+          <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker>
+          <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="var(--surface)" stop-opacity="0"/>
+            <stop offset="1" stop-color="var(--surface)" stop-opacity=".96"/>
+          </linearGradient>
+        </defs>
+
+        <!-- 1. Text and image splitting -->
+        <rect x="22" y="22" width="684" height="318" rx="18" class="panel"/>
+        <circle cx="60" cy="60" r="21" fill="var(--danger)"/>
+        <text x="60" y="66" text-anchor="middle" class="num">1</text>
+        <text x="95" y="59" class="title">一条图文回复，被拆成多条消息</text>
+        <text x="95" y="80" class="subtitle">机器人只能发纯文字或纯图片，不能把说明与截图放在同一条消息里。</text>
+
+        <text x="55" y="113" class="label">原本想发：一条完整回复</text>
+        <rect x="55" y="126" width="225" height="145" rx="14" class="consult"/>
+        <text x="75" y="151" class="small" fill="var(--consult)">处理结果</text>
+        <text x="75" y="174" class="body">已修复，请按下图顺序操作：</text>
+        <rect x="75" y="191" width="83" height="61" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <circle cx="96" cy="211" r="8" fill="var(--total)" opacity=".62"/>
+        <path d="M82 242l19-18 13 11 16-17 19 24z" fill="var(--consult)" opacity=".42"/>
+        <rect x="171" y="191" width="83" height="61" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <rect x="183" y="203" width="58" height="8" rx="4" fill="var(--bot)" opacity=".38"/>
+        <rect x="183" y="219" width="48" height="6" rx="3" fill="var(--line)"/>
+        <rect x="183" y="233" width="55" height="6" rx="3" fill="var(--line)"/>
+
+        <path d="M280 199H315" class="arrow-bot"/>
+        <circle cx="342" cy="199" r="26" class="bot"/>
+        <text x="342" y="195" text-anchor="middle" class="small" fill="var(--bot)">自动</text>
+        <text x="342" y="211" text-anchor="middle" class="small" fill="var(--bot)">拆分</text>
+        <path d="M368 199H402" class="arrow-bot"/>
+
+        <text x="402" y="113" class="label">实际收到：三条独立消息</text>
+        <rect x="402" y="126" width="252" height="45" rx="11" class="bot"/>
+        <circle cx="421" cy="148" r="11" fill="var(--danger)"/>
+        <text x="421" y="152" text-anchor="middle" class="tiny" fill="var(--on-accent)">1</text>
+        <text x="441" y="145" class="small" fill="var(--bot)">〔事件 #7Q2K〕</text>
+        <text x="441" y="161" class="tiny">已修复，请按下图操作……</text>
+        <rect x="402" y="180" width="119" height="76" rx="11" class="bot"/>
+        <circle cx="421" cy="199" r="11" fill="var(--danger)"/>
+        <text x="421" y="203" text-anchor="middle" class="tiny" fill="var(--on-accent)">2</text>
+        <path d="M430 243l18-19 14 12 17-17 23 24z" fill="var(--consult)" opacity=".52"/>
+        <rect x="535" y="180" width="119" height="76" rx="11" class="bot"/>
+        <circle cx="554" cy="199" r="11" fill="var(--danger)"/>
+        <text x="554" y="203" text-anchor="middle" class="tiny" fill="var(--on-accent)">3</text>
+        <rect x="568" y="214" width="67" height="7" rx="3.5" fill="var(--bot)" opacity=".38"/>
+        <rect x="568" y="230" width="57" height="6" rx="3" fill="var(--line)"/>
+        <rect x="82" y="286" width="596" height="34" rx="17" class="danger"/>
+        <text x="380" y="307" text-anchor="middle" class="small" fill="var(--danger)">说明与图片失去天然绑定：内容越多，拆分越多，先后关系越难确认</text>
+
+        <!-- 2. No mention, no proactive quote -->
+        <rect x="734" y="22" width="684" height="318" rx="18" class="panel"/>
+        <circle cx="772" cy="60" r="21" fill="var(--danger)"/>
+        <text x="772" y="66" text-anchor="middle" class="num">2</text>
+        <text x="807" y="59" class="title">不能提醒、不能挂上下文，只能人工找编号</text>
+        <text x="807" y="80" class="subtitle">机器人无法主动 @人，也无法主动引用原消息；事件定位落到每个参与者身上。</text>
+
+        <rect x="766" y="110" width="178" height="58" rx="12" class="danger"/>
+        <circle cx="791" cy="139" r="13" fill="none" stroke="var(--danger)" stroke-width="1.8"/>
+        <text x="791" y="144" text-anchor="middle" class="label" fill="var(--danger)">@</text>
+        <path d="M781 149l20-20" class="strike"/>
+        <text x="816" y="135" class="label" fill="var(--danger)">不能主动 @人</text>
+        <text x="816" y="153" class="tiny">没有定向提醒</text>
+        <rect x="766" y="179" width="178" height="58" rx="12" class="danger"/>
+        <path d="M782 194h27v21h-27zM787 215l-5 7 13-7" fill="none" stroke="var(--danger)" stroke-width="1.7" stroke-linejoin="round"/>
+        <path d="M779 190l34 36" class="strike"/>
+        <text x="816" y="204" class="label" fill="var(--danger)">不能主动引用</text>
+        <text x="816" y="222" class="tiny">没有原消息上下文</text>
+        <rect x="766" y="252" width="178" height="50" rx="12" class="warn"/>
+        <circle cx="793" cy="277" r="10" fill="none" stroke="var(--warn)" stroke-width="1.7"/>
+        <circle cx="793" cy="277" r="3" fill="var(--warn)"/>
+        <path d="M779 277c6-10 22-10 28 0-6 10-22 10-28 0" fill="none" stroke="var(--warn)" stroke-width="1.7"/>
+        <text x="816" y="274" class="label">人肉搜索</text>
+        <text x="816" y="291" class="tiny">找编号 → 判断 → 手动引用</text>
+
+        <rect x="972" y="105" width="400" height="197" rx="14" class="consult"/>
+        <text x="994" y="129" class="label" fill="var(--consult)">咨询内部群 · 新消息不断</text>
+        <rect x="993" y="142" width="290" height="28" rx="8" class="box"/>
+        <text x="1007" y="160" class="tiny">〔#A18F〕客户又补了一张截图……</text>
+        <rect x="1022" y="177" width="326" height="40" rx="9" class="warn"/>
+        <text x="1037" y="193" class="tiny" fill="var(--warn)">目标消息 〔#7Q2K〕</text>
+        <text x="1037" y="209" class="small">研发：请确认失败时间范围</text>
+        <rect x="993" y="224" width="330" height="28" rx="8" class="box"/>
+        <text x="1007" y="242" class="tiny">〔#C04M〕环境已经恢复，请重试……</text>
+        <rect x="1038" y="259" width="310" height="28" rx="8" class="box"/>
+        <text x="1052" y="277" class="tiny">〔#K52P〕附件已收到，正在核对……</text>
+        <rect x="972" y="222" width="400" height="80" fill="url(#fade)"/>
+        <rect x="1192" y="262" width="151" height="27" rx="13" fill="var(--danger)"/>
+        <text x="1267" y="280" text-anchor="middle" class="small" fill="var(--on-accent)">↓ 还有 27 条新消息</text>
+        <path d="M1178 246C1148 224 1123 215 1091 210" class="arrow-red dash"/>
+        <text x="1136" y="203" class="tiny" fill="var(--danger)">目标被淹没</text>
+        <path d="M944 277C968 266 987 247 1022 210" class="arrow-muted dash"/>
+
+        <!-- 3. Claim starts away from consultation -->
+        <rect x="22" y="360" width="684" height="318" rx="18" class="panel"/>
+        <circle cx="60" cy="398" r="21" fill="var(--danger)"/>
+        <text x="60" y="404" text-anchor="middle" class="num">3</text>
+        <text x="95" y="397" class="title">研发认领了，咨询却只看到一个陌生编号</text>
+        <text x="95" y="418" class="subtitle">认领发生在研发侧；第一条转发若只有回复而没有原问题，咨询无法建立对应关系。</text>
+
+        <rect x="49" y="447" width="181" height="151" rx="13" class="total"/>
+        <text x="68" y="472" class="label" fill="var(--total)">① 总群</text>
+        <rect x="68" y="486" width="143" height="67" rx="10" class="box"/>
+        <text x="81" y="504" class="tiny">咨询</text>
+        <text x="81" y="523" class="body">“客户登录失败，</text>
+        <text x="81" y="540" class="body">请研发协助。”</text>
+        <text x="68" y="578" class="tiny">机器人不在这里</text>
+
+        <path d="M230 522H268" class="arrow-muted"/>
+        <rect x="268" y="447" width="181" height="151" rx="13" class="dev"/>
+        <text x="287" y="472" class="label" fill="var(--dev)">② 研发内部群</text>
+        <rect x="287" y="486" width="143" height="67" rx="10" class="bot"/>
+        <text x="300" y="504" class="tiny">研发 @机器人</text>
+        <text x="300" y="523" class="body">“我来处理，</text>
+        <text x="300" y="540" class="body">请补一份日志。”</text>
+        <text x="287" y="578" class="tiny" fill="var(--dev)">此时建立 #7Q2K</text>
+
+        <path d="M449 522H487" class="arrow-bot"/>
+        <rect x="487" y="447" width="181" height="151" rx="13" class="consult"/>
+        <text x="506" y="472" class="label" fill="var(--consult)">③ 咨询内部群</text>
+        <rect x="506" y="486" width="143" height="67" rx="10" class="bot"/>
+        <text x="519" y="504" class="tiny">机器人</text>
+        <text x="519" y="523" class="body">〔事件 #7Q2K〕</text>
+        <text x="519" y="540" class="body">“请补一份日志。”</text>
+        <text x="506" y="578" class="tiny" fill="var(--danger)">“这是之前哪件事？”</text>
+
+        <path d="M140 608V625H345" fill="none" stroke="var(--danger)" stroke-width="1.7" stroke-dasharray="5 5"/>
+        <path d="M365 625H578V608" fill="none" stroke="var(--danger)" stroke-width="1.7" stroke-dasharray="5 5"/>
+        <path d="M345 617l12 16m8-16l-12 16" class="strike"/>
+        <rect x="96" y="635" width="498" height="27" rx="13" class="danger"/>
+        <text x="345" y="653" text-anchor="middle" class="small" fill="var(--danger)">原问题没有跟过来：编号与总群问题之间的可见连接断了</text>
+
+        <!-- 4. Poor readability and output format limits -->
+        <rect x="734" y="360" width="684" height="318" rx="18" class="panel"/>
+        <circle cx="772" cy="398" r="21" fill="var(--danger)"/>
+        <text x="772" y="404" text-anchor="middle" class="num">4</text>
+        <text x="807" y="397" class="title">可读的格式发不了，能发的格式又满是编号</text>
+        <text x="807" y="418" class="subtitle">卡片放不下复杂结果，聊天记录不能发送，最后只能退回到 Markdown。</text>
+
+        <rect x="760" y="451" width="178" height="151" rx="13" class="danger"/>
+        <text x="779" y="476" class="label">卡片消息</text>
+        <rect x="779" y="489" width="140" height="80" rx="9" class="box"/>
+        <rect x="793" y="503" width="51" height="8" rx="4" fill="var(--total)" opacity=".45"/>
+        <rect x="793" y="522" width="106" height="6" rx="3" fill="var(--line)"/>
+        <rect x="793" y="537" width="91" height="6" rx="3" fill="var(--line)"/>
+        <rect x="793" y="552" width="62" height="6" rx="3" fill="var(--line)"/>
+        <line x1="769" y1="586" x2="928" y2="463" class="strike"/>
+        <text x="849" y="589" text-anchor="middle" class="small" fill="var(--danger)">文字有上限</text>
+
+        <rect x="954" y="451" width="178" height="151" rx="13" class="danger"/>
+        <text x="973" y="476" class="label">聊天记录</text>
+        <rect x="973" y="491" width="122" height="27" rx="8" class="box"/>
+        <circle cx="989" cy="504" r="6" fill="var(--consult)"/>
+        <rect x="1002" y="501" width="77" height="6" rx="3" fill="var(--line)"/>
+        <rect x="991" y="527" width="122" height="27" rx="8" class="box"/>
+        <circle cx="1007" cy="540" r="6" fill="var(--dev)"/>
+        <rect x="1020" y="537" width="77" height="6" rx="3" fill="var(--line)"/>
+        <line x1="963" y1="586" x2="1122" y2="463" class="strike"/>
+        <text x="1043" y="589" text-anchor="middle" class="small" fill="var(--danger)">机器人不能发</text>
+
+        <rect x="1148" y="451" width="244" height="151" rx="13" class="warn"/>
+        <text x="1167" y="476" class="label">Markdown 文本</text>
+        <rect x="1167" y="489" width="206" height="79" rx="9" class="box"/>
+        <text x="1179" y="507" class="tiny" fill="var(--bot)">〔#7Q2K〕</text><text x="1237" y="507" class="tiny">已修复，请重试……</text>
+        <line x1="1179" y1="515" x2="1361" y2="515" stroke="var(--line)"/>
+        <text x="1179" y="533" class="tiny" fill="var(--bot)">〔#A18F〕</text><text x="1237" y="533" class="tiny">请补充截图……</text>
+        <line x1="1179" y1="541" x2="1361" y2="541" stroke="var(--line)"/>
+        <text x="1179" y="559" class="tiny" fill="var(--bot)">〔#7Q2K〕</text><text x="1237" y="559" class="tiny">已经部署……</text>
+        <text x="1270" y="589" text-anchor="middle" class="small" fill="var(--warn)">只能用它，但编号反复出现</text>
+
+        <rect x="785" y="621" width="555" height="35" rx="17" class="danger"/>
+        <text x="1062" y="643" text-anchor="middle" class="small" fill="var(--danger)">正文被编号切碎；双方看到的每条机器人消息都带编号，阅读负担持续累积</text>
+
+        <!-- 5. Concentration of all consultation-facing messages -->
+        <rect x="22" y="698" width="1396" height="456" rx="18" class="panel"/>
+        <circle cx="60" cy="738" r="21" fill="var(--danger)"/>
+        <text x="60" y="744" text-anchor="middle" class="num">5</text>
+        <text x="95" y="737" class="title">原来分散在 5 个群里的信息，现在全部涌进 1 个咨询群</text>
+        <text x="95" y="758" class="subtitle">群聊数量看似减少，但十个问题产生的所有“发给咨询人员”的协调消息，一个都没有减少。</text>
+
+        <rect x="51" y="783" width="402" height="330" rx="15" class="consult" opacity=".42"/>
+        <text x="74" y="811" class="label" fill="var(--consult)">过去：10 个问题分散在 5 个协作群</text>
+        <text x="74" y="831" class="small">每个群大约承接 2 个问题，各自消化消息</text>
+
+        <rect x="73" y="849" width="348" height="43" rx="10" class="box"/>
+        <text x="88" y="875" class="small">协作群 1</text>
+        <rect x="176" y="858" width="98" height="25" rx="12" class="consult"/><text x="225" y="875" text-anchor="middle" class="tiny">问题 01 ···</text>
+        <rect x="286" y="858" width="98" height="25" rx="12" class="dev"/><text x="335" y="875" text-anchor="middle" class="tiny">问题 02 ···</text>
+
+        <rect x="73" y="902" width="348" height="43" rx="10" class="box"/>
+        <text x="88" y="928" class="small">协作群 2</text>
+        <rect x="176" y="911" width="98" height="25" rx="12" class="consult"/><text x="225" y="928" text-anchor="middle" class="tiny">问题 03 ···</text>
+        <rect x="286" y="911" width="98" height="25" rx="12" class="dev"/><text x="335" y="928" text-anchor="middle" class="tiny">问题 04 ···</text>
+
+        <rect x="73" y="955" width="348" height="43" rx="10" class="box"/>
+        <text x="88" y="981" class="small">协作群 3</text>
+        <rect x="176" y="964" width="98" height="25" rx="12" class="consult"/><text x="225" y="981" text-anchor="middle" class="tiny">问题 05 ···</text>
+        <rect x="286" y="964" width="98" height="25" rx="12" class="dev"/><text x="335" y="981" text-anchor="middle" class="tiny">问题 06 ···</text>
+
+        <rect x="73" y="1008" width="348" height="43" rx="10" class="box"/>
+        <text x="88" y="1034" class="small">协作群 4</text>
+        <rect x="176" y="1017" width="98" height="25" rx="12" class="consult"/><text x="225" y="1034" text-anchor="middle" class="tiny">问题 07 ···</text>
+        <rect x="286" y="1017" width="98" height="25" rx="12" class="dev"/><text x="335" y="1034" text-anchor="middle" class="tiny">问题 08 ···</text>
+
+        <rect x="73" y="1061" width="348" height="43" rx="10" class="box"/>
+        <text x="88" y="1087" class="small">协作群 5</text>
+        <rect x="176" y="1070" width="98" height="25" rx="12" class="consult"/><text x="225" y="1087" text-anchor="middle" class="tiny">问题 09 ···</text>
+        <rect x="286" y="1070" width="98" height="25" rx="12" class="dev"/><text x="335" y="1087" text-anchor="middle" class="tiny">问题 10 ···</text>
+
+        <path d="M453 870C520 870 554 884 626 925" class="flow-line"/>
+        <path d="M453 923C520 923 554 924 626 938" class="flow-line"/>
+        <path d="M453 976C520 976 554 966 626 951" class="flow-line"/>
+        <path d="M453 1029C520 1029 554 1008 626 964" class="flow-line"/>
+        <path d="M453 1082C520 1082 554 1044 626 977" class="flow-line"/>
+        <circle cx="666" cy="951" r="40" class="bot"/>
+        <rect x="643" y="936" width="46" height="32" rx="8" fill="none" stroke="var(--bot)" stroke-width="2"/>
+        <circle cx="656" cy="951" r="3" fill="var(--bot)"/><circle cx="676" cy="951" r="3" fill="var(--bot)"/>
+        <path d="M655 960h22M666 936v-10" fill="none" stroke="var(--bot)" stroke-width="2" stroke-linecap="round"/>
+        <text x="666" y="1010" text-anchor="middle" class="small" fill="var(--bot)">统一转发</text>
+        <path d="M706 951H790" class="arrow-bot"/>
+        <text x="748" y="936" text-anchor="middle" class="tiny" fill="var(--bot)">全部汇入</text>
+
+        <rect x="790" y="783" width="576" height="330" rx="15" class="danger" opacity=".70"/>
+        <text x="813" y="811" class="label" fill="var(--danger)">现在：唯一咨询群承接全部 10 个问题</text>
+        <text x="813" y="831" class="small">每个问题还会产生多轮进展、补充、追问与结果</text>
+
+        <rect x="814" y="850" width="250" height="42" rx="10" class="box"/>
+        <text x="830" y="867" class="tiny" fill="var(--bot)">〔#01〕问题 01</text><text x="830" y="883" class="tiny">● ● ● 多轮消息</text>
+        <rect x="1080" y="850" width="250" height="42" rx="10" class="box"/>
+        <text x="1096" y="867" class="tiny" fill="var(--bot)">〔#02〕问题 02</text><text x="1096" y="883" class="tiny">● ● ● 多轮消息</text>
+        <rect x="814" y="901" width="250" height="42" rx="10" class="box"/>
+        <text x="830" y="918" class="tiny" fill="var(--bot)">〔#03〕问题 03</text><text x="830" y="934" class="tiny">● ● ● 多轮消息</text>
+        <rect x="1080" y="901" width="250" height="42" rx="10" class="box"/>
+        <text x="1096" y="918" class="tiny" fill="var(--bot)">〔#04〕问题 04</text><text x="1096" y="934" class="tiny">● ● ● 多轮消息</text>
+        <rect x="814" y="952" width="250" height="42" rx="10" class="box"/>
+        <text x="830" y="969" class="tiny" fill="var(--bot)">〔#05〕问题 05</text><text x="830" y="985" class="tiny">● ● ● 多轮消息</text>
+        <rect x="1080" y="952" width="250" height="42" rx="10" class="box"/>
+        <text x="1096" y="969" class="tiny" fill="var(--bot)">〔#06〕问题 06</text><text x="1096" y="985" class="tiny">● ● ● 多轮消息</text>
+        <rect x="814" y="1003" width="250" height="42" rx="10" class="box"/>
+        <text x="830" y="1020" class="tiny" fill="var(--bot)">〔#07〕问题 07</text><text x="830" y="1036" class="tiny">● ● ● 多轮消息</text>
+        <rect x="1080" y="1003" width="250" height="42" rx="10" class="box"/>
+        <text x="1096" y="1020" class="tiny" fill="var(--bot)">〔#08〕问题 08</text><text x="1096" y="1036" class="tiny">● ● ● 多轮消息</text>
+        <rect x="814" y="1054" width="250" height="42" rx="10" class="box"/>
+        <text x="830" y="1071" class="tiny" fill="var(--bot)">〔#09〕问题 09</text><text x="830" y="1087" class="tiny">● ● ● 多轮消息</text>
+        <rect x="1080" y="1054" width="250" height="42" rx="10" class="box"/>
+        <text x="1096" y="1071" class="tiny" fill="var(--bot)">〔#10〕问题 10</text><text x="1096" y="1087" class="tiny">● ● ● 多轮消息</text>
+        <rect x="894" y="1119" width="368" height="24" rx="12" fill="var(--danger)"/>
+        <text x="1078" y="1135" text-anchor="middle" class="small" fill="var(--on-accent)">所有信息在同一个群里竞争注意力</text>
+
+        <!-- Conclusion -->
+        <rect x="22" y="1172" width="1396" height="49" rx="14" fill="var(--danger)"/>
+        <text x="720" y="1202" text-anchor="middle" font-size="15" font-weight="800" fill="var(--on-accent)">减少临时群，并不等于减少沟通复杂度：复杂度从“群太多”转移成了“一个群里消息太多、太碎、太难找”</text>
+      </svg>
+    </div>
+    <footer>五类风险：图文拆分、人工对号、上下文断裂、格式受限、咨询群信息集中。</footer>
+  </main>
+</body>
+</html>

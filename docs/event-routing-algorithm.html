@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>事件识别与消息转发流程图</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page:#f3f7fc; --surface:#fff; --ink:#15243a; --muted:#60718a; --line:#c6d3e3;
+      --consult:#1876d2; --consult-soft:#e8f2ff; --hub:#7354c9; --hub-soft:#f1edff;
+      --dev:#138169; --dev-soft:#e7f7f1; --total:#cf7022; --total-soft:#fff2e6;
+      --danger:#c8484e; --danger-soft:#fff0f1;
+    }
+    @media (prefers-color-scheme: dark) { :root {
+      --page:#101725; --surface:#182334; --ink:#eaf0fb; --muted:#adbbd0; --line:#3b4c65;
+      --consult:#68b8ff; --consult-soft:#183756; --hub:#b79cff; --hub-soft:#35285d;
+      --dev:#65d5b6; --dev-soft:#183e39; --total:#ffad69; --total-soft:#4f3623;
+      --danger:#ff9498; --danger-soft:#502a31;
+    }}
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1480px,calc(100% - 32px)); margin:0 auto; padding:28px 0 42px; }
+    header { display:flex; align-items:end; justify-content:space-between; gap:24px; margin:0 4px 18px; }
+    h1 { margin:0; font-size:clamp(24px,3vw,36px); letter-spacing:-.035em; }
+    p { margin:7px 0 0; color:var(--muted); font-size:14px; }
+    .tag { color:var(--hub); font-size:12px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+    .canvas { overflow-x:auto; border:1px solid var(--line); border-radius:18px; background:var(--surface); box-shadow:0 16px 42px color-mix(in srgb,var(--ink) 10%,transparent); }
+    svg { display:block; min-width:1060px; width:100%; height:auto; fill:var(--ink); }
+    text { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .t-title { font-size:17px; font-weight:750; } .t-label { font-size:13px; font-weight:720; } .t-small { font-size:12px; } .t-xs { font-size:10.5px; } .t-code { font:11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .box { fill:var(--surface); stroke:var(--line); stroke-width:1.2; } .consult { fill:var(--consult-soft); stroke:var(--consult); stroke-width:1.45; } .hub { fill:var(--hub-soft); stroke:var(--hub); stroke-width:1.45; } .dev { fill:var(--dev-soft); stroke:var(--dev); stroke-width:1.45; } .total { fill:var(--total-soft); stroke:var(--total); stroke-width:1.45; } .danger { fill:var(--danger-soft); stroke:var(--danger); stroke-width:1.45; }
+    .dashed { stroke-dasharray:6 5; } .dotted { stroke-dasharray:2.5 5; }
+    .a { fill:none; stroke:var(--ink); stroke-width:1.7; marker-end:url(#a); } .a-consult { fill:none; stroke:var(--consult); stroke-width:1.85; marker-end:url(#a-consult); } .a-hub { fill:none; stroke:var(--hub); stroke-width:1.85; marker-end:url(#a-hub); } .a-dev { fill:none; stroke:var(--dev); stroke-width:1.85; marker-end:url(#a-dev); } .a-danger { fill:none; stroke:var(--danger); stroke-width:1.55; marker-end:url(#a-danger); }
+    footer { margin:14px 4px 0; color:var(--muted); font-size:12px; }
+    @media (max-width:720px) { main { width:calc(100% - 18px); padding-top:16px; } header { display:block; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="tag">02 · 判断流程图</div>
+        <h1>机器人如何判断新事件和后续消息</h1>
+        <p>引用是继续旧事件的唯一入口；不带引用的消息不需要人工初始化，直接创建一个新事件。</p>
+      </div>
+      <p>机器人每次转发都保留事件编号，并引用用户刚刚发送的消息。</p>
+    </header>
+
+    <div class="canvas">
+      <svg viewBox="0 0 1280 1010" role="img" aria-labelledby="title desc">
+        <title id="title">通过引用中的事件编号识别事件并自动更新对接人的流程</title>
+        <desc id="desc">机器人收到内部群消息后，先判断是否有引用。没有引用则自动创建事件并打标；有引用则读取其中的事件编号。有效编号会定位并更新已有事件，本次发送者自动成为最新对接人。机器人引用本次用户消息，将内容转发到对侧群。</desc>
+        <defs>
+          <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--ink)"/></marker>
+          <marker id="a-consult" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--consult)"/></marker>
+          <marker id="a-hub" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--hub)"/></marker>
+          <marker id="a-dev" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--dev)"/></marker>
+          <marker id="a-danger" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--danger)"/></marker>
+        </defs>
+
+        <rect x="22" y="20" width="1236" height="970" rx="18" fill="var(--hub-soft)" opacity=".22"/>
+        <text x="48" y="53" class="t-title">机器人处理一条收到的消息</text>
+        <text x="48" y="75" class="t-small" fill="var(--muted)">消息可以来自咨询内部群或研发内部群；总群不在接收范围内。</text>
+
+        <!-- Input -->
+        <g>
+          <rect x="450" y="104" width="380" height="67" rx="34" class="box"/>
+          <text x="640" y="134" text-anchor="middle" class="t-label">收到一条 @机器人的内部群消息</text>
+          <text x="640" y="155" text-anchor="middle" class="t-xs" fill="var(--muted)">记录发送人、所在群、消息内容和引用内容</text>
+        </g>
+        <path d="M640 171 V207" class="a"/>
+
+        <!-- Quote decision -->
+        <polygon points="640,207 765,270 640,333 515,270" class="box" stroke="var(--hub)" stroke-width="1.6"/>
+        <text x="640" y="264" text-anchor="middle" class="t-label">引用部分存在吗？</text>
+        <text x="640" y="285" text-anchor="middle" class="t-xs" fill="var(--muted)">是否在回复某条消息</text>
+        <text x="780" y="254" class="t-xs" fill="var(--hub)">有</text>
+        <text x="480" y="254" class="t-xs" fill="var(--total)">无</text>
+
+        <!-- No quote: new event branch -->
+        <path d="M515 270 H299" class="a-consult"/>
+        <g>
+          <rect x="55" y="211" width="244" height="117" rx="13" class="consult"/>
+          <text x="78" y="242" class="t-label">A · 自动新建事件</text>
+          <text x="78" y="267" class="t-small" fill="var(--muted)">没有引用不是“漏操作”</text>
+          <text x="78" y="290" class="t-label" fill="var(--consult)">生成事件编号：#7Q2K</text>
+          <text x="78" y="314" class="t-xs" fill="var(--consult)">把本次发送者记为最新对接人</text>
+        </g>
+        <path d="M177 328 V363 H429" class="a-consult"/>
+
+        <!-- Event data -->
+        <g>
+          <rect x="429" y="342" width="422" height="124" rx="13" class="hub"/>
+          <text x="453" y="373" class="t-label">建立一条可供后续引用的机器人消息</text>
+          <text x="453" y="400" class="t-label" fill="var(--hub)">消息带有 〔事件 #7Q2K〕</text>
+          <text x="453" y="425" class="t-small" fill="var(--muted)">写入首条消息、创建者、来源侧、最新对接人和时间线。</text>
+          <text x="453" y="448" class="t-xs" fill="var(--hub)">后续用户无需输入事件号，只需引用机器人消息。</text>
+        </g>
+
+        <!-- quote decision branch -->
+        <path d="M765 270 H927" class="a-hub"/>
+        <g>
+          <polygon points="1051,199 1175,270 1051,341 927,270" class="box" stroke="var(--hub)" stroke-width="1.6"/>
+          <text x="1051" y="263" text-anchor="middle" class="t-label">引用中含有效</text>
+          <text x="1051" y="284" text-anchor="middle" class="t-label">事件编号吗？</text>
+          <text x="1188" y="254" class="t-xs" fill="var(--dev)">是</text>
+          <text x="1065" y="190" class="t-xs" fill="var(--danger)">否</text>
+        </g>
+
+        <!-- invalid quote -->
+        <path d="M1051 199 V177" class="a-danger"/>
+        <g>
+          <rect x="920" y="100" width="250" height="77" rx="13" class="danger"/>
+          <text x="943" y="130" class="t-label">拒绝续接</text>
+          <text x="943" y="154" class="t-xs" fill="var(--muted)">提示：请引用机器人带事件编号的消息</text>
+        </g>
+
+        <!-- valid quote -->
+        <path d="M1175 270 H1214 V418 H1209" class="a-dev"/>
+        <g>
+          <rect x="862" y="373" width="347" height="93" rx="13" class="hub"/>
+          <text x="885" y="404" class="t-label">B · 定位并更新既有事件</text>
+          <text x="885" y="430" class="t-small" fill="var(--hub)">读取引用中的编号，找到事件 #7Q2K</text>
+          <text x="885" y="452" class="t-xs" fill="var(--hub)">把本次发送者更新为最新对接人</text>
+        </g>
+
+        <!-- merge branches -->
+        <path d="M640 466 V507" class="a-hub"/>
+        <path d="M1034 466 V487 H720 V507" class="a-hub"/>
+
+        <!-- persist & route -->
+        <g>
+          <rect x="404" y="507" width="472" height="106" rx="13" class="hub"/>
+          <text x="430" y="538" class="t-label">C · 追加消息、对接人与状态到事件时间线</text>
+          <text x="430" y="564" class="t-small" fill="var(--muted)">新事件写入第一条记录；旧事件追加本次沟通。</text>
+          <text x="430" y="590" class="t-small" fill="var(--hub)">同时记住消息内容、本次发送者、发送时间和最新进展。</text>
+        </g>
+        <path d="M640 613 V655" class="a-hub"/>
+
+        <!-- target group -->
+        <g>
+          <rect x="470" y="655" width="340" height="112" rx="13" class="box" stroke="var(--dev)" stroke-width="1.6"/>
+          <text x="640" y="688" text-anchor="middle" class="t-label">选择要送达的群</text>
+          <text x="640" y="718" text-anchor="middle" class="t-small" fill="var(--consult)">咨询消息 → 当前负责的研发群</text>
+          <text x="640" y="744" text-anchor="middle" class="t-small" fill="var(--dev)">研发消息 → 咨询群</text>
+        </g>
+        <path d="M640 767 V814" class="a-dev"/>
+
+        <!-- Bot quote-forward -->
+        <g>
+          <rect x="370" y="814" width="540" height="104" rx="13" class="dev"/>
+          <text x="640" y="846" text-anchor="middle" class="t-label">D · 机器人向对侧群回复（引用当前用户的这条消息）</text>
+          <text x="640" y="872" text-anchor="middle" class="t-small" fill="var(--dev)">机器人引用这条用户消息，并附上 〔事件 #7Q2K〕</text>
+          <text x="640" y="895" text-anchor="middle" class="t-small" fill="var(--muted)">引用链保留上下文；事件编号让接收方能够继续引用，无需手工填写任何编号。</text>
+        </g>
+
+        <!-- Invariants -->
+        <g>
+          <rect x="55" y="550" width="294" height="231" rx="13" class="box dotted"/>
+          <text x="79" y="582" class="t-label">关键判定规则</text>
+          <text x="79" y="615" class="t-small" fill="var(--total)">1. 无引用 → 新事件</text>
+          <text x="79" y="646" class="t-small" fill="var(--hub)">2. 引用了有效事件编号 → 继续旧事件</text>
+          <text x="79" y="677" class="t-small" fill="var(--danger)">3. 引用里没有编号 → 请重新引用</text>
+          <text x="79" y="714" class="t-xs" fill="var(--muted)">这使“继续已有事件”只能经由引用发生，</text>
+          <text x="79" y="733" class="t-xs" fill="var(--muted)">同时让任何无上下文的首条消息自动开单。</text>
+          <text x="79" y="760" class="t-xs" fill="var(--muted)">机器人不需要、也不能监听总群。</text>
+        </g>
+
+        <g>
+          <rect x="931" y="578" width="278" height="172" rx="13" class="box dotted"/>
+          <text x="954" y="609" class="t-label">系统持续记住</text>
+          <text x="954" y="639" class="t-small" fill="var(--hub)">事件编号</text>
+          <text x="954" y="662" class="t-small" fill="var(--dev)">当前负责的研发部门</text>
+          <text x="954" y="685" class="t-small" fill="var(--consult)">最新对接人</text>
+          <text x="954" y="708" class="t-small">完整沟通过程与当前进展</text>
+          <text x="954" y="733" class="t-xs" fill="var(--muted)">人员变动不改变事件编号或部门归属。</text>
+        </g>
+      </svg>
+    </div>
+    <footer>机器人只根据“是否引用”和“引用中的事件编号”决定新建、继续或提示重试，不从聊天内容中猜测事件归属。</footer>
+  </main>
+</body>
+</html>

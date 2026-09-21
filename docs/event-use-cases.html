@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>事件协作用例图</title>
+  <style>
+    :root {
+      color-scheme:light dark;
+      --page:#f3f7fc; --surface:#fff; --ink:#15243a; --muted:#60718a; --line:#c6d3e3;
+      --consult:#1876d2; --consult-soft:#e8f2ff; --hub:#7354c9; --hub-soft:#f1edff;
+      --dev:#138169; --dev-soft:#e7f7f1; --total:#cf7022; --total-soft:#fff2e6;
+      --danger:#c8484e; --danger-soft:#fff0f1;
+    }
+    @media (prefers-color-scheme:dark) { :root {
+      --page:#101725; --surface:#182334; --ink:#eaf0fb; --muted:#adbbd0; --line:#3b4c65;
+      --consult:#68b8ff; --consult-soft:#183756; --hub:#b79cff; --hub-soft:#35285d;
+      --dev:#65d5b6; --dev-soft:#183e39; --total:#ffad69; --total-soft:#4f3623;
+      --danger:#ff9498; --danger-soft:#502a31;
+    }}
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    main { width:min(1480px,calc(100% - 32px)); margin:0 auto; padding:28px 0 42px; }
+    header { display:flex; align-items:end; justify-content:space-between; gap:24px; margin:0 4px 18px; }
+    h1 { margin:0; font-size:clamp(24px,3vw,36px); letter-spacing:-.035em; }
+    p { margin:7px 0 0; color:var(--muted); font-size:14px; }
+    .tag { color:var(--hub); font-size:12px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+    .canvas { overflow-x:auto; border:1px solid var(--line); border-radius:18px; background:var(--surface); box-shadow:0 16px 42px color-mix(in srgb,var(--ink) 10%,transparent); }
+    svg { display:block; min-width:1060px; width:100%; height:auto; fill:var(--ink); }
+    text { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+    .t-title { font-size:17px; font-weight:750; } .t-label { font-size:13px; font-weight:720; } .t-small { font-size:12px; } .t-xs { font-size:10.5px; }
+    .box { fill:var(--surface); stroke:var(--line); stroke-width:1.2; } .consult { fill:var(--consult-soft); stroke:var(--consult); stroke-width:1.45; } .hub { fill:var(--hub-soft); stroke:var(--hub); stroke-width:1.45; } .dev { fill:var(--dev-soft); stroke:var(--dev); stroke-width:1.45; } .total { fill:var(--total-soft); stroke:var(--total); stroke-width:1.45; } .danger { fill:var(--danger-soft); stroke:var(--danger); stroke-width:1.45; }
+    .dashed { stroke-dasharray:6 5; } .dotted { stroke-dasharray:2.5 5; }
+    .flow { fill:none; stroke:var(--hub); stroke-width:1.45; stroke-dasharray:5 4; marker-end:url(#flow); }
+    footer { margin:14px 4px 0; color:var(--muted); font-size:12px; }
+    @media (max-width:720px) { main { width:calc(100% - 18px); padding-top:16px; } header { display:block; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="tag">04 · 用例图</div>
+        <h1>每个角色负责什么</h1>
+        <p>发送没有引用的新消息，系统会自动建立事件；继续已有事件时，咨询和研发都引用机器人消息。</p>
+      </div>
+      <p>机器人不在总群，且不会用自然语言猜测旧事件归属。</p>
+    </header>
+
+    <div class="canvas">
+      <svg viewBox="0 0 1320 900" role="img" aria-labelledby="title desc">
+        <title id="title">事件协作机器人用例图</title>
+        <desc id="desc">咨询人员、研发人员和团队管理员在机器人系统中的主要操作。未引用消息自动成为新事件；继续已有事件时必须引用带事件编号的机器人消息。系统自动识别事件、更新最新对接人、记录过程并把消息转发到对侧群。</desc>
+        <defs>
+          <marker id="flow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--hub)"/></marker>
+        </defs>
+
+        <!-- System boundary -->
+        <rect x="280" y="42" width="760" height="816" rx="18" class="box" stroke="var(--hub)" stroke-width="1.7"/>
+        <text x="310" y="77" class="t-title" fill="var(--hub)">机器人 / 事件中继与追踪系统</text>
+        <text x="310" y="99" class="t-small" fill="var(--muted)">系统只存在于咨询内部群和各研发组内部群。</text>
+
+        <!-- People and external group -->
+        <g transform="translate(66 147)">
+          <circle cx="58" cy="25" r="16" class="consult"/>
+          <path d="M58 42v45M30 59h56M58 87l-26 34M58 87l26 34" fill="none" stroke="var(--consult)" stroke-width="2.6" stroke-linecap="round"/>
+          <text x="58" y="149" text-anchor="middle" class="t-label">咨询人员</text>
+          <text x="58" y="170" text-anchor="middle" class="t-xs" fill="var(--muted)">提出问题 / 补充信息</text>
+        </g>
+        <g transform="translate(66 632)">
+          <circle cx="58" cy="25" r="16" class="total"/>
+          <path d="M58 42v45M30 59h56M58 87l-26 34M58 87l26 34" fill="none" stroke="var(--total)" stroke-width="2.6" stroke-linecap="round"/>
+          <text x="58" y="149" text-anchor="middle" class="t-label">团队管理员</text>
+          <text x="58" y="170" text-anchor="middle" class="t-xs" fill="var(--muted)">维护部门与群的对应关系</text>
+        </g>
+        <g transform="translate(1136 147)">
+          <circle cx="58" cy="25" r="16" class="dev"/>
+          <path d="M58 42v45M30 59h56M58 87l-26 34M58 87l26 34" fill="none" stroke="var(--dev)" stroke-width="2.6" stroke-linecap="round"/>
+          <text x="58" y="149" text-anchor="middle" class="t-label">研发人员</text>
+          <text x="58" y="170" text-anchor="middle" class="t-xs" fill="var(--muted)">处理问题 / 正式回复</text>
+        </g>
+        <g>
+          <rect x="1092" y="730" width="196" height="84" rx="13" class="total"/>
+          <text x="1190" y="760" text-anchor="middle" class="t-label">总群（无机器人）</text>
+          <text x="1190" y="784" text-anchor="middle" class="t-xs" fill="var(--muted)">只保留原问题与最终答案</text>
+        </g>
+
+        <!-- Human-facing use cases -->
+        <g>
+          <ellipse cx="455" cy="184" rx="146" ry="42" class="consult"/>
+          <text x="455" y="179" text-anchor="middle" class="t-label">发送一条新的问题消息</text>
+          <text x="455" y="201" text-anchor="middle" class="t-xs" fill="var(--muted)">没有引用，系统自动开新事件</text>
+
+          <ellipse cx="795" cy="184" rx="143" ry="42" class="hub"/>
+          <text x="795" y="179" text-anchor="middle" class="t-label">建立事件并生成编号</text>
+          <text x="795" y="201" text-anchor="middle" class="t-xs" fill="var(--hub)">例如：事件 #7Q2K</text>
+
+          <ellipse cx="897" cy="304" rx="123" ry="40" class="dev"/>
+          <text x="897" y="299" text-anchor="middle" class="t-label">送到对应研发群</text>
+          <text x="897" y="321" text-anchor="middle" class="t-xs" fill="var(--muted)">按当前负责部门送达</text>
+
+          <ellipse cx="455" cy="354" rx="157" ry="43" class="consult"/>
+          <text x="455" y="349" text-anchor="middle" class="t-label">引用机器人消息继续沟通</text>
+          <text x="455" y="371" text-anchor="middle" class="t-xs" fill="var(--muted)">咨询和研发都遵守同一规则</text>
+
+          <ellipse cx="785" cy="432" rx="142" ry="42" class="hub"/>
+          <text x="785" y="427" text-anchor="middle" class="t-label">找到引用对应的事件</text>
+          <text x="785" y="449" text-anchor="middle" class="t-xs" fill="var(--hub)">读取机器人消息里的事件编号</text>
+
+          <ellipse cx="495" cy="554" rx="145" ry="42" class="hub"/>
+          <text x="495" y="549" text-anchor="middle" class="t-label">更新最新对接人</text>
+          <text x="495" y="571" text-anchor="middle" class="t-xs" fill="var(--muted)">本次发送者自动成为新对接人</text>
+
+          <ellipse cx="819" cy="554" rx="145" ry="42" class="hub"/>
+          <text x="819" y="549" text-anchor="middle" class="t-label">记录完整沟通过程</text>
+          <text x="819" y="571" text-anchor="middle" class="t-xs" fill="var(--muted)">保留消息、人员、时间和进展</text>
+
+          <ellipse cx="662" cy="680" rx="179" ry="43" class="dev"/>
+          <text x="662" y="675" text-anchor="middle" class="t-label">引用本次发言，转发到对侧内部群</text>
+          <text x="662" y="697" text-anchor="middle" class="t-xs" fill="var(--dev)">转发消息继续带着事件编号</text>
+
+          <ellipse cx="455" cy="789" rx="154" ry="40" class="total"/>
+          <text x="455" y="784" text-anchor="middle" class="t-label">维护研发部门与群的对应关系</text>
+          <text x="455" y="806" text-anchor="middle" class="t-xs" fill="var(--muted)">团队换人或换群时仍能继续送达</text>
+
+          <ellipse cx="875" cy="789" rx="125" ry="40" class="danger"/>
+          <text x="875" y="784" text-anchor="middle" class="t-label">提示用户重新引用</text>
+          <text x="875" y="806" text-anchor="middle" class="t-xs" fill="var(--danger)">引用中找不到事件编号时</text>
+
+          <ellipse cx="1190" cy="624" rx="116" ry="40" class="total"/>
+          <text x="1190" y="619" text-anchor="middle" class="t-label">发布最终答案</text>
+          <text x="1190" y="641" text-anchor="middle" class="t-xs" fill="var(--total)">研发引用总群原问题</text>
+        </g>
+
+        <!-- Direct participation lines; each ends at the intended use case edge. -->
+        <g fill="none" stroke="var(--line)" stroke-width="1.55">
+          <path d="M152 206 H260 V184 H309"/>
+          <path d="M152 206 H245 V354 H298"/>
+          <path d="M1166 206 H1075 V354 H612"/>
+          <path d="M1222 206 H1308 V624 H1306"/>
+          <path d="M152 691 H245 V789 H301"/>
+          <path d="M1190 664 V730"/>
+        </g>
+
+        <!-- Automatic system flow; arrows meet node borders and do not cross labels. -->
+        <g>
+          <path d="M601 184 H652" class="flow"/>
+          <path d="M795 226 V248 H897 V264" class="flow"/>
+          <path d="M612 354 H680 V375 H785 V390" class="flow"/>
+          <path d="M785 474 V490 H495 V512" class="flow"/>
+          <path d="M640 554 H674" class="flow"/>
+          <path d="M819 596 V616 H662 V637" class="flow"/>
+          <path d="M927 432 H1018 V789 H1000" class="flow"/>
+        </g>
+        <text x="620" y="173" class="t-xs" fill="var(--hub)">自动</text>
+        <text x="814" y="245" class="t-xs" fill="var(--hub)">自动</text>
+        <text x="643" y="343" class="t-xs" fill="var(--hub)">自动</text>
+        <text x="641" y="483" class="t-xs" fill="var(--hub)">自动</text>
+        <text x="650" y="543" class="t-xs" fill="var(--hub)">同时</text>
+        <text x="718" y="613" class="t-xs" fill="var(--hub)">自动</text>
+        <text x="950" y="454" class="t-xs" fill="var(--danger)">找不到编号时</text>
+      </svg>
+    </div>
+    <footer>总群只保留原问题和最终答案；创建事件、持续沟通、自动换对接人和跨群转发都发生在机器人可见的内部群。</footer>
+  </main>
+</body>
+</html>
