@@ -56,10 +56,9 @@ def build_formal_bundle(
     speaker_label = "转发人" if side is EntrySide.CONSULT else "发送人"
     content = (
         f"## {case_title}\n\n"
-        f"> *指定经办人：{assignee_name}*\n\n"
-        f"#### 反馈内容\n\n"
+        f"> 指定经办人：{assignee_name}\n\n"
         f"**{message_text}**\n\n\n"
-        f"{speaker_label}：{speaker_name}  事件编号：{marker}"
+        f"> {speaker_label}：{speaker_name}  事件编号：{marker}"
     )
     rendered: list[RenderedDeliveryItem] = [
         RenderedDeliveryItem(

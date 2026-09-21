@@ -523,8 +523,8 @@ def create_app(
             f'<a class="{"active" if state == value else ""}" '
             f'href="{_event_filter_url(events_path, value, priority)}">{label}</a>'
             for value, label in (
-                ("mine", "待咨询处理"),
-                ("dev", "待研发"),
+                ("mine", _waiting_on_label(WaitingOn.CONSULT)),
+                ("dev", _waiting_on_label(WaitingOn.DEV)),
                 ("open", "全部进行中"),
                 ("closed", "已关闭"),
             )
@@ -554,8 +554,8 @@ def create_app(
             f'<article class="overview-card"><span>{label}</span><strong>{count}</strong></article>'
             for label, count in (
                 ("全部进行中", overview.open_count),
-                ("待咨询处理", overview.waiting_consult_count),
-                ("等待研发", overview.waiting_dev_count),
+                (_waiting_on_label(WaitingOn.CONSULT), overview.waiting_consult_count),
+                (_waiting_on_label(WaitingOn.DEV), overview.waiting_dev_count),
                 ("已关闭", overview.closed_count),
             )
         )
@@ -633,10 +633,10 @@ def create_app(
               <label>事件标题 <input name="title" required maxlength="512"></label>
             </div>
             <div class="form-row">
-              <label>咨询队列 <select name="consult_queue_id" required>{queue_options}</select></label>
+              <label>咨询团队 <select name="consult_queue_id" required>{queue_options}</select></label>
               <label>研发处理人 <select name="developer_id" required>{developer_options}</select></label>
             </div>
-            <p class="muted">默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可由咨询人员调整。</p>
+            <p class="muted">默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可由咨询处理人调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
         </main>
@@ -679,7 +679,7 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
         if not queues:
-            raise _http_error(Forbidden("你没有可用于创建事件的咨询队列权限"))
+            raise _http_error(Forbidden("你没有可用于创建事件的咨询团队权限"))
         queue_options = "".join(
             f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
         )
@@ -712,8 +712,8 @@ def create_app(
                   <option value="severe">严重</option>
                 </select>
               </label>
-              <label>咨询队列 <select name="consult_queue_id" required>
-                <option value="" disabled selected>选择咨询队列</option>{queue_options}
+              <label>咨询团队 <select name="consult_queue_id" required>
+                <option value="" disabled selected>选择咨询团队</option>{queue_options}
               </select></label>
             </div>
             <label>研发处理人 <select name="developer_id" required>
@@ -754,7 +754,7 @@ def create_app(
 
             queues = desk.list_consult_queues(actor)
             if consult_queue_id not in {queue.id for queue in queues}:
-                raise Forbidden("你不属于所选咨询队列")
+                raise Forbidden("你不属于所选咨询团队")
             developers = desk.list_developers(actor)
             if developer_id not in {developer.id for developer in developers}:
                 raise Forbidden("所选研发处理人不可用")
@@ -846,10 +846,10 @@ def create_app(
               <div><span>客户 / 企业</span><strong>{escape(case.customer_name or '未录入')}</strong></div>
               <div><span>联系人</span><strong>{escape(case.customer_contact_name or '未填写')}</strong></div>
               <div><span>联系方式</span><strong>{escape(case.customer_contact_method or '未填写')}</strong></div>
-              <div><span>所属咨询队列</span><strong>{escape(case.consult_queue_name)}</strong></div>
-              <div><span>当前咨询经办人</span><strong>{escape(case.current_consultant_name or '未指定')}</strong></div>
-              <div><span>当前研发责任团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
-              <div><span>研发处理人</span><strong>{escape(case.current_developer_name or '未指定')}</strong></div>
+              <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
+              <div><span>当前咨询处理人</span><strong>{escape(case.current_consultant_name or '未指定')}</strong></div>
+              <div><span>研发团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
+              <div><span>当前研发处理人</span><strong>{escape(case.current_developer_name or '未指定')}</strong></div>
               <div><span>创建时间</span><strong>{_format_datetime(case.created_at)}</strong></div>
               <div><span>截止时间</span><strong>{_format_datetime(case.deadline)}</strong></div>
               <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
@@ -1188,27 +1188,27 @@ def _admin_dashboard(
     ) or '<p class="empty">没有匹配的成员。</p>'
     team_cards = "".join(
         _admin_team_card(team, users=visible_users, path_for=path_for) for team in teams
-    ) or '<p class="empty">还没有团队，请先创建咨询队列或研发责任团队。</p>'
+    ) or '<p class="empty">还没有团队，请先创建咨询团队或研发团队。</p>'
     return f"""
     <header class="topbar admin-topbar">
       <div>
         <div class="eyebrow">H5 事件管理中心</div>
         <h1>组织与授权</h1>
-        <p class="muted">总管理员：{escape(actor.user_id.hex[:8])} · 统一管理咨询和研发经办人</p>
+        <p class="muted">总管理员：{escape(actor.user_id.hex[:8])} · 统一管理咨询处理人和研发处理人</p>
       </div>
       <nav><a href="{events_path}">返回事件中心</a><a class="active" href="{admin_path}">管理设置</a></nav>
     </header>
     <main class="admin-main">
       <section class="hero-banner">
         <div><span class="status-dot"></span><strong>权限配置已启用</strong>
-          <p>先录入企业微信成员，再将成员加入咨询队列或研发责任团队；角色为“管理员”的成员可以处理本团队的交接和群绑定。</p>
+          <p>先录入企业微信成员，再将成员加入咨询团队或研发团队；角色为“管理员”的成员可以处理本团队的交接和群绑定。</p>
         </div>
         <span class="badge badge-blue">总管理员</span>
       </section>
 
       <section class="stats-grid">
         <div class="stat-card"><span>在岗成员</span><strong>{overview.active_user_count}</strong><small>共 {overview.user_count} 个身份</small></div>
-        <div class="stat-card"><span>咨询队列</span><strong>{overview.consult_queue_count}</strong><small>按队列隔离可见范围</small></div>
+        <div class="stat-card"><span>咨询团队</span><strong>{overview.consult_queue_count}</strong><small>按团队隔离可见范围</small></div>
         <div class="stat-card"><span>研发团队</span><strong>{overview.dev_team_count}</strong><small>{escape(initialized_label)}</small></div>
         <div class="stat-card"><span>总管理员</span><strong>{overview.global_admin_count}</strong><small>至少保留 1 名在岗管理员</small></div>
       </section>
@@ -1216,7 +1216,7 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">用企业微信 userid 建立登录身份。成员加入团队后，才能成为咨询经办人或研发处理人。</p>
+          <p class="panel-intro">用企业微信 userid 建立登录身份。成员加入团队后，才能成为咨询处理人或研发处理人。</p>
           <form class="search-form" method="get" action="{admin_path}">
             <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>
@@ -1236,11 +1236,11 @@ def _admin_dashboard(
 
         <div class="panel" id="teams">
           <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>团队与授权</h2></div><span class="count-pill">{overview.team_count}</span></div>
-          <p class="panel-intro">咨询队列负责咨询侧可见范围和咨询群通知；研发责任团队负责研发群路由和研发处理人授权。</p>
+          <p class="panel-intro">咨询团队负责事件归属和咨询侧可见范围，并可绑定咨询群接收通知；研发团队负责研发处理人授权和研发群消息路由。</p>
           <details class="add-box" open>
             <summary>＋ 新增团队</summary>
             <form method="post" action="{path_for('/admin/teams')}" class="form-grid team-create-form">
-              <label>团队类型<select name="kind"><option value="consult_queue">咨询队列</option><option value="dev">研发责任团队</option></select></label>
+              <label>团队类型<select name="kind"><option value="consult_queue">{_team_kind_label(TeamKind.CONSULT_QUEUE)}</option><option value="dev">{_team_kind_label(TeamKind.DEV)}</option></select></label>
               <label>团队名称<input name="name" required maxlength="256" placeholder="例如 平台研发组"></label>
               <button class="primary" type="submit">创建团队</button>
             </form>
@@ -1364,7 +1364,7 @@ def _admin_team_member_row(
 
 
 def _team_kind_label(kind: TeamKind) -> str:
-    return "咨询队列" if kind is TeamKind.CONSULT_QUEUE else "研发责任团队"
+    return "咨询团队" if kind is TeamKind.CONSULT_QUEUE else "研发团队"
 
 
 def _role_label(role: MembershipRole) -> str:
@@ -1461,7 +1461,14 @@ def _http_error(error: CaseDeskError) -> HTTPException:
         status = 409
     elif isinstance(error, (RoutingUnavailable, AuthenticationError)):
         status = 409 if isinstance(error, RoutingUnavailable) else 401
-    return HTTPException(status_code=status, detail=str(error))
+    detail = str(error)
+    for old, new in (
+        ("研发责任团队", "研发团队"),
+        ("咨询队列", "咨询团队"),
+        ("咨询经办人", "咨询处理人"),
+    ):
+        detail = detail.replace(old, new)
+    return HTTPException(status_code=status, detail=detail)
 
 
 _WORKBENCH_CSS = """
@@ -1822,12 +1829,21 @@ def _lifecycle_badge(lifecycle: LifecycleStatus) -> str:
 
 
 def _waiting_badge(waiting: WaitingOn) -> str:
-    label, color = {
-        WaitingOn.CONSULT: ("待咨询", "waiting-consult"),
-        WaitingOn.DEV: ("待研发", "waiting-dev"),
-        WaitingOn.NONE: ("无待处理动作", "waiting-none"),
+    label = _waiting_on_label(waiting)
+    color = {
+        WaitingOn.CONSULT: "waiting-consult",
+        WaitingOn.DEV: "waiting-dev",
+        WaitingOn.NONE: "waiting-none",
     }[waiting]
     return f'<span class="status-badge {color}">{label}</span>'
+
+
+def _waiting_on_label(waiting: WaitingOn) -> str:
+    return {
+        WaitingOn.CONSULT: "待咨询处理",
+        WaitingOn.DEV: "待研发处理",
+        WaitingOn.NONE: "无待处理动作",
+    }[waiting]
 
 
 def _deadline_badge(status: DeadlineStatus | None) -> str:
@@ -1852,7 +1868,7 @@ def _priority_badge(priority: CasePriority) -> str:
 def _entry_kind_label(kind: CaseEntryKind) -> str:
     return {
         CaseEntryKind.FORMAL_MESSAGE: "正式沟通",
-        CaseEntryKind.TRANSFER_CONSULTANT: "咨询经办人变更",
+        CaseEntryKind.TRANSFER_CONSULTANT: "咨询处理人变更",
         CaseEntryKind.TRANSFER_DEVELOPER: "研发处理人变更",
         CaseEntryKind.TRANSFER_DEV_TEAM: "研发团队变更",
         CaseEntryKind.CLOSED: "事件关闭",
@@ -1896,7 +1912,7 @@ def _entry_description(entry: EntryView) -> str:
         return "；".join(descriptions) or "事件资料已更新"
     if entry.kind is CaseEntryKind.TRANSFER_CONSULTANT:
         return (
-            f"咨询经办人由 {metadata.get('from_consultant') or '未指定'} "
+            f"咨询处理人由 {metadata.get('from_consultant') or '未指定'} "
             f"调整为 {metadata.get('to_consultant') or '未指定'}"
         )
     if entry.kind is CaseEntryKind.TRANSFER_DEVELOPER:
@@ -1910,7 +1926,7 @@ def _entry_description(entry: EntryView) -> str:
         from_developer = metadata.get("from_developer") or "未指定"
         to_developer = metadata.get("to_developer") or "未指定"
         return (
-            f"研发责任团队由 {from_team} 调整为 {to_team}；"
+            f"研发团队由 {from_team} 调整为 {to_team}；"
             f"研发处理人由 {from_developer} 调整为 {to_developer}"
         )
     if entry.kind is CaseEntryKind.CLOSED:
@@ -1941,7 +1957,7 @@ def _render_delivery_badges(deliveries: tuple[Any, ...] | list[Any], entry_side:
         if delivery.destination_type is DeliveryDestination.CHAT:
             target = "咨询群" if entry_side is EntrySide.DEV else "研发群"
         else:
-            target = "咨询经办人" if entry_side is EntrySide.DEV else "咨询侧"
+            target = "咨询处理人" if entry_side is EntrySide.DEV else "咨询侧"
         label, color = {
             DeliveryStatus.PENDING: ("投递中", "delivery-pending"),
             DeliveryStatus.SENT: ("已送达", "delivery-sent"),
@@ -2119,9 +2135,9 @@ def _lifecycle_forms(
     return f"""
     <form method="post" action="{reopen_path}">
       <input type="hidden" name="version" value="{version}">
-      <label>重新打开后等待
-        <select name="waiting_on"><option value="dev">研发</option>
-          <option value="consult">咨询</option></select>
+      <label>重新打开后由谁处理
+        <select name="waiting_on"><option value="dev">待研发处理</option>
+          <option value="consult">待咨询处理</option></select>
       </label>
       <button type="submit">重新打开</button>
     </form>
