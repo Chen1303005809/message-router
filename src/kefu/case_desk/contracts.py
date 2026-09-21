@@ -15,6 +15,7 @@ from uuid import UUID
 from kefu.persistence.models import (
     CaseEntryKind,
     CasePriority,
+    CaseStatus,
     DeadlineStatus,
     DeliveryDestination,
     DeliveryItemStatus,
@@ -145,6 +146,13 @@ class CloseCase:
 
 
 @dataclass(frozen=True, slots=True)
+class SetCaseStatus:
+    case_ref: str
+    expected_version: int
+    status: CaseStatus
+
+
+@dataclass(frozen=True, slots=True)
 class ReopenCase:
     case_ref: str
     expected_version: int
@@ -189,6 +197,7 @@ type Command = (
     | TransferDeveloper
     | TransferDevTeam
     | CloseCase
+    | SetCaseStatus
     | ReopenCase
     | CorrectEntry
     | DeliveryItemSucceeded
@@ -248,6 +257,7 @@ class CaseView:
     customer_contact_name: str | None
     customer_contact_method: str | None
     priority: CasePriority
+    status: CaseStatus
     lifecycle_status: LifecycleStatus
     waiting_on: WaitingOn
     deadline: datetime
@@ -265,6 +275,7 @@ class CaseView:
     updated_at: datetime
     version: int
     can_edit_metadata: bool
+    can_change_consult_status: bool
     can_extend_deadline: bool
     entries: tuple[EntryView, ...]
     deliveries: tuple[DeliveryView, ...]
@@ -276,6 +287,7 @@ class CaseSummary:
     title: str
     customer_name: str
     priority: CasePriority
+    status: CaseStatus
     lifecycle_status: LifecycleStatus
     waiting_on: WaitingOn
     deadline: datetime

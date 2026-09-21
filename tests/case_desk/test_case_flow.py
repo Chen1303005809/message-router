@@ -15,6 +15,7 @@ from kefu.case_desk.contracts import (
     ImagePart,
     PostFormalMessage,
     ReopenCase,
+    SetCaseStatus,
     TextPart,
     TransferConsultant,
     TransferDeveloper,
@@ -23,6 +24,7 @@ from kefu.case_desk.contracts import (
 from kefu.case_desk.errors import Conflict, Forbidden, ValidationError
 from kefu.persistence.models import (
     CaseEntryKind,
+    CaseStatus,
     Delivery,
     DeliveryItem,
     DeliveryStatus,
@@ -81,6 +83,7 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
     )
     before = desk_context.desk.get_case(result.case_ref or "", actor(desk_context, "consult_a"))
     assert before.lifecycle_status is LifecycleStatus.OPEN
+    assert before.status is CaseStatus.PENDING_CONFIRMATION
     assert before.waiting_on is WaitingOn.CONSULT
     assert [part.kind for part in before.entries[0].parts] == [
         PartKind.TEXT,
@@ -225,7 +228,79 @@ def test_handover_keeps_timeline_and_close_requires_consult_authority(
     )
     closed = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_b"))
     assert closed.lifecycle_status is LifecycleStatus.CLOSED
+    assert closed.status is CaseStatus.CLOSED
     assert closed.waiting_on is WaitingOn.NONE
+
+
+def test_workflow_statuses_are_authorized_and_recorded_in_timeline(
+    desk_context: DeskContext,
+) -> None:
+    created = create_case(desk_context)
+    current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_b"))
+
+    unchanged = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=current.version,
+            status=CaseStatus.PENDING_CONFIRMATION,
+        ),
+        actor(desk_context, "dev_b"),
+    )
+    assert unchanged.idempotent is True
+    assert unchanged.entry_id is None
+
+    started = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=current.version,
+            status=CaseStatus.IN_PROGRESS,
+        ),
+        actor(desk_context, "dev_b"),
+    )
+    processing = desk_context.desk.get_case(
+        created.case_ref or "", actor(desk_context, "consult_a")
+    )
+    assert processing.status is CaseStatus.IN_PROGRESS
+    assert processing.entries[-1].kind is CaseEntryKind.STATUS_CHANGED
+    assert processing.entries[-1].metadata == {
+        "from_status": CaseStatus.PENDING_CONFIRMATION.value,
+        "to_status": CaseStatus.IN_PROGRESS.value,
+    }
+
+    with pytest.raises(Forbidden):
+        desk_context.desk.execute(
+            SetCaseStatus(
+                case_ref=created.case_ref or "",
+                expected_version=started.case_version or 0,
+                status=CaseStatus.WAITING_CUSTOMER,
+            ),
+            actor(desk_context, "dev_b"),
+        )
+
+    waiting_customer = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=started.case_version or 0,
+            status=CaseStatus.WAITING_CUSTOMER,
+        ),
+        actor(desk_context, "consult_a"),
+    )
+    suspended = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=waiting_customer.case_version or 0,
+            status=CaseStatus.SUSPENDED,
+        ),
+        actor(desk_context, "dev_a"),
+    )
+    case = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
+    assert case.status is CaseStatus.SUSPENDED
+    assert [entry.kind for entry in case.entries[-3:]] == [
+        CaseEntryKind.STATUS_CHANGED,
+        CaseEntryKind.STATUS_CHANGED,
+        CaseEntryKind.STATUS_CHANGED,
+    ]
+    assert suspended.case_version == case.version
 
 
 def test_versions_and_source_msgids_prevent_duplicate_business_entries(
@@ -391,6 +466,7 @@ def test_reopen_requires_explicit_next_side(desk_context: DeskContext) -> None:
     )
     reopened = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
     assert reopened.lifecycle_status is LifecycleStatus.OPEN
+    assert reopened.status is CaseStatus.IN_PROGRESS
     assert reopened.waiting_on is WaitingOn.DEV
 
 

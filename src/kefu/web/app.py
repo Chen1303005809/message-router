@@ -29,8 +29,8 @@ from kefu.admin.service import (
     initialize_global_admin,
 )
 from kefu.case_desk.contracts import (
-    AdjustCaseDeadline,
     Actor,
+    AdjustCaseDeadline,
     CaseFilter,
     CloseCase,
     CreateCase,
@@ -39,6 +39,7 @@ from kefu.case_desk.contracts import (
     PostFormalMessage,
     ReopenCase,
     SetCaseApproachingWindow,
+    SetCaseStatus,
     TextPart,
     TransferConsultant,
     TransferDeveloper,
@@ -68,6 +69,7 @@ from kefu.persistence.models import (
     MIN_DEADLINE_INCREMENT_MINUTES,
     CaseEntryKind,
     CasePriority,
+    CaseStatus,
     DeadlineStatus,
     DeliveryDestination,
     DeliveryStatus,
@@ -824,6 +826,19 @@ def create_app(
             for entry in case.entries
         )
         events_path = external_path("/events")
+        message_form = _message_form(
+            case.case_ref,
+            case.version,
+            case.lifecycle_status,
+            external_path,
+            show_side=can_use_side_selector,
+        )
+        lifecycle_forms = _lifecycle_forms(case, external_path)
+        action_panel = (
+            f'<section class="action-panel panel">{message_form}{lifecycle_forms}</section>'
+            if message_form or lifecycle_forms
+            else ""
+        )
         body = f"""
         <main class="case-main">
           <a class="back-link" href="{events_path}">← 返回事件工作台</a>
@@ -831,7 +846,7 @@ def create_app(
             <div><div class="eyebrow">事件编号 〔KF·{escape(case.case_ref)}〕</div>
               <h1>{escape(case.title)}</h1></div>
             <div class="case-state-badges">
-              {_lifecycle_badge(case.lifecycle_status)}
+              {_case_status_badge(case.status)}
               {_waiting_badge(case.waiting_on)}
               {_deadline_badge(case.deadline_status)}
               {_priority_badge(case.priority)}
@@ -855,14 +870,12 @@ def create_app(
           </section>
           {_deadline_controls(case, external_path)}
           {_metadata_form(case, external_path)}
+          {_case_status_controls(case, external_path)}
           <section class="timeline-section">
             <div class="section-heading"><h2>事件时间线</h2><span>{len(case.entries)} 条记录</span></div>
             <div class="timeline">{entries}</div>
           </section>
-          <section class="action-panel panel">
-            {_message_form(case.case_ref, case.version, case.lifecycle_status, external_path, show_side=can_use_side_selector)}
-            {_lifecycle_forms(case.case_ref, case.version, case.lifecycle_status, external_path)}
-          </section>
+          {action_panel}
         </main>
         """
         return HTMLResponse(_page(case.title, body, body_class="case-detail-page"))
@@ -968,6 +981,25 @@ def create_app(
                     approaching_window_minutes=_half_hour_hours_to_minutes(
                         _required(form, "approaching_hours"), "临近期限提醒时间"
                     ),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+
+    @app.post("/events/{case_ref}/status", include_in_schema=False)
+    async def set_event_status(request: Request, case_ref: str) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await _urlencoded_form(request)
+        try:
+            desk.execute(
+                SetCaseStatus(
+                    case_ref=case_ref,
+                    expected_version=int(_required(form, "version")),
+                    status=CaseStatus(_required(form, "status")),
                 ),
                 actor,
             )
@@ -1558,6 +1590,10 @@ h2 { color: #23344f; }
 }
 .status-open { color: #075985; background: #e0f2fe; }
 .status-closed, .waiting-none { color: #58667b; background: #edf0f4; }
+.case-status-pending { color: #805000; background: #fff2cc; }
+.case-status-progress { color: #087a54; background: #e5f7ef; }
+.case-status-feedback { color: #155eef; background: #eaf1ff; }
+.case-status-suspended { color: #6941c6; background: #f2edff; }
 .waiting-consult { color: #155eef; background: #eaf1ff; }
 .waiting-dev { color: #067647; background: #e5f7ef; }
 .deadline-approaching { color: #9a5b00; background: #fff2cc; }
@@ -1585,6 +1621,18 @@ h2 { color: #23344f; }
 .deadline-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .deadline-control-grid form { min-width: 0; margin: 0; }
 .deadline-control-grid p { margin: 5px 0 10px; font-size: 12px; }
+.status-controls { margin-top: 12px; padding: 18px 20px; }
+.status-controls-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 5px; }
+.status-controls-heading h2 { margin: 0; font-size: 16px; }
+.status-controls-help { margin: 5px 0 12px; color: var(--muted); font-size: 12px; }
+.status-control-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.status-control-actions form { margin: 0; }
+.status-control-actions button { min-height: 38px; padding: 7px 12px; border: 1px solid #d2dceb; color: #34445d; background: #fff; font-size: 13px; font-weight: 700; }
+.status-control-actions button:hover:not(:disabled) { border-color: #8eabed; color: var(--blue); background: var(--blue-soft); }
+.status-control-actions button:disabled { cursor: default; opacity: .8; }
+.status-control-actions button.is-current { border-color: #b6c9f3; color: var(--blue); background: var(--blue-soft); }
+.status-control-actions button.is-close { border-color: #e6b6b2; color: var(--red); }
+.status-closed-note { margin: 0; color: var(--muted); font-size: 13px; }
 .metadata-editor { margin-top: 12px; padding: 0 16px; }
 .metadata-editor summary { padding: 13px 0; cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 700; }
 .metadata-editor form { border-top: 1px solid var(--line); padding: 6px 0 14px; }
@@ -1658,7 +1706,7 @@ button.primary { background: var(--blue); }
   .priority-filters a { padding: 5px 7px; font-size: 12px; }
   .case-card { padding: 14px; }
   .case-meta-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .case-overview, .source-panel, .create-form, .action-panel, .deadline-controls { padding: 15px; }
+  .case-overview, .source-panel, .create-form, .action-panel, .deadline-controls, .status-controls { padding: 15px; }
   .entry { padding: 11px 12px; }
   .entry-heading { flex-direction: column; gap: 2px; }
   .entry-heading time { font-size: 10px; }
@@ -1828,12 +1876,25 @@ def _duration_label(minutes: int) -> str:
     return "".join(parts) or "0分钟"
 
 
-def _lifecycle_badge(lifecycle: LifecycleStatus) -> str:
-    if lifecycle is LifecycleStatus.CLOSED:
-        label, color = "已关闭", "status-closed"
-    else:
-        label, color = "进行中", "status-open"
-    return f'<span class="status-badge {color}">{label}</span>'
+def _case_status_label(status: CaseStatus) -> str:
+    return {
+        CaseStatus.PENDING_CONFIRMATION: "待确定",
+        CaseStatus.IN_PROGRESS: "处理中",
+        CaseStatus.WAITING_CUSTOMER: "待客户反馈",
+        CaseStatus.CLOSED: "关闭",
+        CaseStatus.SUSPENDED: "挂起",
+    }[status]
+
+
+def _case_status_badge(status: CaseStatus) -> str:
+    color = {
+        CaseStatus.PENDING_CONFIRMATION: "case-status-pending",
+        CaseStatus.IN_PROGRESS: "case-status-progress",
+        CaseStatus.WAITING_CUSTOMER: "case-status-feedback",
+        CaseStatus.CLOSED: "status-closed",
+        CaseStatus.SUSPENDED: "case-status-suspended",
+    }[status]
+    return f'<span class="status-badge {color}">{_case_status_label(status)}</span>'
 
 
 def _waiting_badge(waiting: WaitingOn) -> str:
@@ -1881,6 +1942,7 @@ def _entry_kind_label(kind: CaseEntryKind) -> str:
         CaseEntryKind.TRANSFER_DEV_TEAM: "研发团队变更",
         CaseEntryKind.CLOSED: "事件关闭",
         CaseEntryKind.REOPENED: "事件重新打开",
+        CaseEntryKind.STATUS_CHANGED: "状态变更",
         CaseEntryKind.CORRECTION: "消息纠错",
         CaseEntryKind.CASE_METADATA_UPDATED: "事件资料变更",
     }[kind]
@@ -1942,7 +2004,14 @@ def _entry_description(entry: EntryView) -> str:
     if entry.kind is CaseEntryKind.REOPENED:
         waiting = metadata.get("waiting_on")
         next_step = "研发" if waiting == WaitingOn.DEV.value else "咨询"
-        return f"事件重新打开，下一步由{next_step}处理"
+        return f"事件重新打开并进入“处理中”，下一步由{next_step}处理"
+    if entry.kind is CaseEntryKind.STATUS_CHANGED:
+        try:
+            previous = CaseStatus(str(metadata.get("from_status")))
+            updated = CaseStatus(str(metadata.get("to_status")))
+        except ValueError:
+            return "事件状态已更新"
+        return f"事件状态由“{_case_status_label(previous)}”变更为“{_case_status_label(updated)}”"
     if entry.kind is CaseEntryKind.CORRECTION:
         target = metadata.get("corrected_to_case_ref") or metadata.get("corrected_from_case_ref")
         return f"消息关联已更正{f'，目标事件 {target}' if target else ''}"
@@ -2101,6 +2170,71 @@ def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     """
 
 
+def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
+    current_status = _case_status_badge(case.status)
+    if case.lifecycle_status is LifecycleStatus.CLOSED:
+        reopen_note = (
+            "事件已关闭。如需继续处理，请使用下方“重新打开”。"
+            if case.can_change_consult_status
+            else "事件已关闭。如需继续处理，请联系当前咨询处理人或咨询队列管理员。"
+        )
+        return f"""
+        <section class="status-controls panel" aria-label="事件状态操作">
+          <div class="status-controls-heading"><h2>事件状态</h2>{current_status}</div>
+          <p class="status-closed-note">{reopen_note}</p>
+        </section>
+        """
+
+    status_action = path_for(f"/events/{escape(case.case_ref)}/status")
+    close_action = path_for(f"/events/{escape(case.case_ref)}/close")
+    options = (
+        (CaseStatus.PENDING_CONFIRMATION, "待确定", status_action, True, ""),
+        (CaseStatus.IN_PROGRESS, "处理中", status_action, True, ""),
+        (
+            CaseStatus.WAITING_CUSTOMER,
+            "待客户反馈",
+            status_action,
+            case.can_change_consult_status,
+            "",
+        ),
+        (
+            CaseStatus.CLOSED,
+            "确认客户侧闭环并关闭",
+            close_action,
+            case.can_change_consult_status,
+            "is-close",
+        ),
+        (CaseStatus.SUSPENDED, "挂起", status_action, True, ""),
+    )
+    buttons: list[str] = []
+    for status, label, action, allowed, extra_class in options:
+        if not allowed:
+            continue
+        if case.status is status:
+            buttons.append(
+                f'<button type="button" class="is-current" aria-pressed="true" disabled>'
+                f"{label} · 当前</button>"
+            )
+            continue
+        status_field = (
+            f'<input type="hidden" name="status" value="{status.value}">'
+            if status is not CaseStatus.CLOSED
+            else ""
+        )
+        buttons.append(
+            f'<form method="post" action="{action}">'
+            f'<input type="hidden" name="version" value="{case.version}">{status_field}'
+            f'<button type="submit" class="{extra_class.strip()}">{label}</button></form>'
+        )
+    return f"""
+    <section class="status-controls panel" aria-label="事件状态操作">
+      <div class="status-controls-heading"><h2>事件状态</h2>{current_status}</div>
+      <p class="status-controls-help">待确定为默认状态；开始受理后选“处理中”，等待客户回复选“待客户反馈”，暂时无法推进时选“挂起”。<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在事件时间线。</p>
+      <div class="status-control-actions">{"".join(buttons)}</div>
+    </section>
+    """
+
+
 def _message_form(
     case_ref: str,
     version: int,
@@ -2131,21 +2265,16 @@ def _message_form(
     """
 
 
-def _lifecycle_forms(
-    case_ref: str, version: int, lifecycle: LifecycleStatus, path_for: Callable[[str], str]
-) -> str:
-    if lifecycle is LifecycleStatus.OPEN:
-        close_path = path_for(f"/events/{escape(case_ref)}/close")
-        return f"""
-        <form method="post" action="{close_path}">
-          <input type="hidden" name="version" value="{version}">
-          <button type="submit">确认客户侧闭环并关闭</button>
-        </form>
-        """
-    reopen_path = path_for(f"/events/{escape(case_ref)}/reopen")
+def _lifecycle_forms(case: Any, path_for: Callable[[str], str]) -> str:
+    if (
+        case.lifecycle_status is LifecycleStatus.OPEN
+        or not case.can_change_consult_status
+    ):
+        return ""
+    reopen_path = path_for(f"/events/{escape(case.case_ref)}/reopen")
     return f"""
     <form method="post" action="{reopen_path}">
-      <input type="hidden" name="version" value="{version}">
+      <input type="hidden" name="version" value="{case.version}">
       <label>重新打开后由谁处理
         <select name="waiting_on"><option value="dev">待研发处理</option>
           <option value="consult">待咨询处理</option></select>
@@ -2161,6 +2290,7 @@ def _summary_json(summary: Any) -> dict[str, Any]:
         "title": summary.title,
         "customer_name": summary.customer_name,
         "priority": summary.priority.value,
+        "status": summary.status.value,
         "lifecycle_status": summary.lifecycle_status.value,
         "waiting_on": summary.waiting_on.value,
         "deadline": summary.deadline.isoformat(),
@@ -2181,7 +2311,7 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
         f'<a class="case-card" href="{case_path}">'
         f'<div class="case-card-top"><strong class="case-card-title">{title}</strong>'
         f'<div class="case-card-badges">{_priority_badge(summary.priority)}'
-        f"{_lifecycle_badge(summary.lifecycle_status)}{_waiting_badge(summary.waiting_on)}"
+        f"{_case_status_badge(summary.status)}{_waiting_badge(summary.waiting_on)}"
         f"{_deadline_badge(summary.deadline_status)}</div></div>"
         f'<div class="case-customer">客户 / 企业：{customer_name}</div>'
         f'<div class="case-card-meta"><span class="case-ref">〔KF·{case_ref}〕</span>'
@@ -2201,6 +2331,7 @@ def _case_json(case: Any) -> dict[str, Any]:
         "customer_contact_name": case.customer_contact_name,
         "customer_contact_method": case.customer_contact_method,
         "priority": case.priority.value,
+        "status": case.status.value,
         "lifecycle_status": case.lifecycle_status.value,
         "waiting_on": case.waiting_on.value,
         "deadline": case.deadline.isoformat(),
@@ -2213,6 +2344,7 @@ def _case_json(case: Any) -> dict[str, Any]:
         "current_dev_team_name": case.current_dev_team_name,
         "current_developer_name": case.current_developer_name,
         "can_edit_metadata": case.can_edit_metadata,
+        "can_change_consult_status": case.can_change_consult_status,
         "can_extend_deadline": case.can_extend_deadline,
         "version": case.version,
         "entries": [

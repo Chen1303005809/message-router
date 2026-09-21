@@ -11,7 +11,14 @@ from sqlalchemy import select
 from kefu.case_desk.contracts import Actor, CreateCase, TextPart
 from kefu.config import Settings
 from kefu.media.storage import InMemoryObjectStorage, MediaIngestor
-from kefu.persistence.models import DeliveryItem, MessageDraft, MessageDraftPart, PartKind
+from kefu.persistence.models import (
+    CaseEntryKind,
+    CaseStatus,
+    DeliveryItem,
+    MessageDraft,
+    MessageDraftPart,
+    PartKind,
+)
 from kefu.web.app import create_app
 from kefu.web.auth import WebAuthenticator
 from kefu.wecom.transport import InboundImagePart
@@ -80,6 +87,92 @@ def test_h5_lists_events_renders_detail_and_posts_formal_message(desk_context: D
         created.case_ref or "", Actor(desk_context.users["consult_a"])
     )
     assert updated.entries[-1].parts[0].text == "通过 H5 补充信息"
+
+
+def test_h5_status_buttons_follow_permissions_and_update_timeline(
+    desk_context: DeskContext,
+) -> None:
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="状态流转验收",
+            consult_queue_id=desk_context.teams["consult"],
+            developer_id=desk_context.users["dev_a"],
+            parts=(TextPart("等待状态跟进"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    app = create_app(session_factory=desk_context.session_factory, settings=settings())
+    client = TestClient(app)
+    consult_headers = {"X-WeCom-UserId": "consult-a"}
+    developer_headers = {"X-WeCom-UserId": "dev-a"}
+
+    detail = client.get(f"/events/{created.case_ref}", headers=consult_headers)
+    assert detail.status_code == 200
+    assert detail.text.index('aria-label="事件状态操作"') < detail.text.index("事件时间线")
+    assert 'name="status" value="in_progress"' in detail.text
+    assert 'name="status" value="waiting_customer"' in detail.text
+    assert f'action="/events/{created.case_ref}/close"' in detail.text
+
+    developer_case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["dev_a"])
+    )
+    forbidden = client.post(
+        f"/events/{created.case_ref}/status",
+        headers=developer_headers,
+        data={"version": str(developer_case.version), "status": "waiting_customer"},
+    )
+    assert forbidden.status_code == 403
+
+    started = client.post(
+        f"/events/{created.case_ref}/status",
+        headers=developer_headers,
+        data={"version": str(developer_case.version), "status": "in_progress"},
+        follow_redirects=False,
+    )
+    assert started.status_code == 303
+    in_progress = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_a"])
+    )
+    assert in_progress.status is CaseStatus.IN_PROGRESS
+    assert in_progress.entries[-1].kind is CaseEntryKind.STATUS_CHANGED
+
+    waiting = client.post(
+        f"/events/{created.case_ref}/status",
+        headers=consult_headers,
+        data={"version": str(in_progress.version), "status": "waiting_customer"},
+        follow_redirects=False,
+    )
+    assert waiting.status_code == 303
+    waiting_case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_a"])
+    )
+    assert waiting_case.status is CaseStatus.WAITING_CUSTOMER
+    detail_api = client.get(f"/api/events/{created.case_ref}", headers=consult_headers)
+    assert detail_api.json()["status"] == CaseStatus.WAITING_CUSTOMER.value
+
+    closed = client.post(
+        f"/events/{created.case_ref}/close",
+        headers=consult_headers,
+        data={"version": str(waiting_case.version)},
+        follow_redirects=False,
+    )
+    assert closed.status_code == 303
+    closed_case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_a"])
+    )
+    assert closed_case.status is CaseStatus.CLOSED
+
+    reopened = client.post(
+        f"/events/{created.case_ref}/reopen",
+        headers=consult_headers,
+        data={"version": str(closed_case.version), "waiting_on": "dev"},
+        follow_redirects=False,
+    )
+    assert reopened.status_code == 303
+    reopened_case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_a"])
+    )
+    assert reopened_case.status is CaseStatus.IN_PROGRESS
 
 
 def test_h5_creates_case_from_draft_and_serves_authorized_image(desk_context: DeskContext) -> None:

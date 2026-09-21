@@ -63,6 +63,14 @@ class LifecycleStatus(StrEnum):
     CLOSED = "closed"
 
 
+class CaseStatus(StrEnum):
+    PENDING_CONFIRMATION = "pending_confirmation"
+    IN_PROGRESS = "in_progress"
+    WAITING_CUSTOMER = "waiting_customer"
+    CLOSED = "closed"
+    SUSPENDED = "suspended"
+
+
 class DeadlineStatus(StrEnum):
     APPROACHING = "approaching"
     OVERDUE = "overdue"
@@ -87,6 +95,7 @@ class CaseEntryKind(StrEnum):
     TRANSFER_DEV_TEAM = "transfer_dev_team"
     CLOSED = "closed"
     REOPENED = "reopened"
+    STATUS_CHANGED = "status_changed"
     CORRECTION = "correction"
     CASE_METADATA_UPDATED = "case_metadata_updated"
 
@@ -235,6 +244,11 @@ class Case(Base):
     )
     lifecycle_status: Mapped[LifecycleStatus] = mapped_column(
         enum_column(LifecycleStatus), default=LifecycleStatus.OPEN
+    )
+    status: Mapped[CaseStatus] = mapped_column(
+        enum_column(CaseStatus, length=32),
+        default=CaseStatus.PENDING_CONFIRMATION,
+        server_default=CaseStatus.PENDING_CONFIRMATION.value,
     )
     waiting_on: Mapped[WaitingOn] = mapped_column(enum_column(WaitingOn), default=WaitingOn.CONSULT)
     consult_queue_id: Mapped[UUID] = mapped_column(

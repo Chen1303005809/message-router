@@ -45,6 +45,7 @@ from kefu.case_desk.contracts import (
     PostFormalMessage,
     ReopenCase,
     SetCaseApproachingWindow,
+    SetCaseStatus,
     SystemActor,
     TeamOption,
     TextPart,
@@ -65,6 +66,7 @@ from kefu.persistence.models import (
     CaseEntry,
     CaseEntryKind,
     CaseEntryPart,
+    CaseStatus,
     DeadlineStatus,
     Delivery,
     DeliveryDestination,
@@ -199,6 +201,8 @@ class CaseDesk:
                 return self._transfer_dev_team(session, command, actor)
             if isinstance(command, CloseCase):
                 return self._close_case(session, command, actor)
+            if isinstance(command, SetCaseStatus):
+                return self._set_case_status(session, command, actor)
             if isinstance(command, ReopenCase):
                 return self._reopen_case(session, command, actor)
             if isinstance(command, CorrectEntry):
@@ -213,8 +217,10 @@ class CaseDesk:
             try:
                 self._directory.assert_consult_manager(session, viewer.user_id, case)
                 can_edit_metadata = True
+                can_change_consult_status = True
             except Forbidden:
                 can_edit_metadata = False
+                can_change_consult_status = False
             can_extend_deadline = (
                 case.lifecycle_status is LifecycleStatus.OPEN
                 and self._has_consult_deadline_access(session, viewer.user_id, case)
@@ -223,6 +229,7 @@ class CaseDesk:
                 session,
                 case,
                 can_edit_metadata=can_edit_metadata,
+                can_change_consult_status=can_change_consult_status,
                 can_extend_deadline=can_extend_deadline,
             )
 
@@ -601,6 +608,7 @@ class CaseDesk:
             deadline=created_at + timedelta(hours=DEFAULT_CASE_DEADLINE_HOURS),
             approaching_window_minutes=DEFAULT_APPROACHING_WINDOW_MINUTES,
             lifecycle_status=LifecycleStatus.OPEN,
+            status=CaseStatus.PENDING_CONFIRMATION,
             # A handoff cannot move the wait state before its delivery bundle
             # succeeds, so a newly-created event remains on the submitting side.
             waiting_on=WaitingOn.CONSULT,
@@ -1008,6 +1016,7 @@ class CaseDesk:
         actor_user = self._directory.get_user(session, actor.user_id)
         channel = self._directory.active_channel(session, case.current_dev_team_id)
         case.lifecycle_status = LifecycleStatus.CLOSED
+        case.status = CaseStatus.CLOSED
         case.waiting_on = WaitingOn.NONE
         case.version += 1
         entry = self._append_entry(
@@ -1028,6 +1037,37 @@ class CaseDesk:
         )
         return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
+    def _set_case_status(
+        self, session: Session, command: SetCaseStatus, actor: Actor
+    ) -> CommandResult:
+        case = self._load_case(session, command.case_ref, lock=True)
+        self._assert_expected_version(case, command.expected_version)
+        self._directory.assert_case_visible(session, actor.user_id, case)
+        self._assert_open(case)
+        if command.status is CaseStatus.CLOSED:
+            raise ValidationError("请通过‘确认客户侧闭环并关闭’操作关闭事件")
+        if command.status is CaseStatus.WAITING_CUSTOMER:
+            self._directory.assert_consult_manager(session, actor.user_id, case)
+        if case.status is command.status:
+            return self._result(case, None, idempotent=True)
+
+        actor_user = self._directory.get_user(session, actor.user_id)
+        previous_status = case.status
+        case.status = command.status
+        case.version += 1
+        entry = self._append_entry(
+            session,
+            case=case,
+            kind=CaseEntryKind.STATUS_CHANGED,
+            side=EntrySide.SYSTEM,
+            actor_user=actor_user,
+            metadata={
+                "from_status": previous_status.value,
+                "to_status": command.status.value,
+            },
+        )
+        return self._result(case, entry.id)
+
     def _reopen_case(self, session: Session, command: ReopenCase, actor: Actor) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
@@ -1041,6 +1081,7 @@ class CaseDesk:
         if command.waiting_on is WaitingOn.DEV:
             channel = self._directory.active_channel(session, case.current_dev_team_id)
         case.lifecycle_status = LifecycleStatus.OPEN
+        case.status = CaseStatus.IN_PROGRESS
         case.waiting_on = command.waiting_on
         case.version += 1
         entry = self._append_entry(
@@ -1677,6 +1718,7 @@ class CaseDesk:
         case: Case,
         *,
         can_edit_metadata: bool = False,
+        can_change_consult_status: bool = False,
         can_extend_deadline: bool = False,
     ) -> CaseView:
         entries = session.scalars(
@@ -1722,6 +1764,7 @@ class CaseDesk:
             customer_contact_name=case.customer_contact_name,
             customer_contact_method=case.customer_contact_method,
             priority=case.priority,
+            status=case.status,
             lifecycle_status=case.lifecycle_status,
             waiting_on=case.waiting_on,
             deadline=_as_utc(case.deadline),
@@ -1743,6 +1786,7 @@ class CaseDesk:
             updated_at=_as_utc(case.updated_at),
             version=case.version,
             can_edit_metadata=can_edit_metadata,
+            can_change_consult_status=can_change_consult_status,
             can_extend_deadline=can_extend_deadline,
             entries=tuple(entry_views),
             deliveries=tuple(
@@ -1765,6 +1809,7 @@ class CaseDesk:
             title=case.title,
             customer_name=case.customer_name,
             priority=case.priority,
+            status=case.status,
             lifecycle_status=case.lifecycle_status,
             waiting_on=case.waiting_on,
             deadline=_as_utc(case.deadline),
