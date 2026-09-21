@@ -30,9 +30,15 @@ docker compose up --build
 
 这会启动 PostgreSQL、MinIO、web 和用于本地模拟的 bot-worker。`WECOM_TRANSPORT=fake` 仅用于本地自动化验证，不能连接或发送企业微信消息。
 
+## 远端直接运行（不使用 Docker）
+
+本项目没有单独的前端进程：H5 页面由 FastAPI 服务端渲染，页面和 API 一起由 `kefu-web` 提供，远端监听 `127.0.0.1:18000`；Nginx 负责 HTTPS 域名和 `/kefu/` 路径转发。企业微信机器人由不监听端口的 `kefu-worker` 后台进程处理。数据库、媒体存储和环境变量按服务器配置使用；当前实例使用 SQLite 与 `/var/lib/kefu/media`，环境文件位于 `/etc/kefu/`。
+
+远端不需要启动 Docker。首次迁移到 Git 工作树及后续更新命令见[远端部署速查](REMOTE_DEPLOYMENT.md)。日常更新使用服务器上的虚拟环境、Alembic 迁移和 systemd 服务。
+
 ## 远端部署记录
 
-当前远端实例的 SSH 入口、release 与服务路径、数据位置、清理状态及更新步骤见[远端部署速查](REMOTE_DEPLOYMENT.md)（最后核对：2026-09-20）。
+当前远端实例的 SSH 入口、服务和数据路径、清理状态，以及从旧 release 上传方式迁移到 Git 工作树的步骤见[远端部署速查](REMOTE_DEPLOYMENT.md)（最后状态核对：2026-09-21）。
 
 升级到事件追踪工作台时，独立的一次性 Alembic 迁移会清空升级前的事件、时间线、消息、草稿、投递、回调和媒体记录，并删除对象存储 `media/` 前缀下的全部对象（包括版本）；人员、团队、成员授权、研发/咨询群绑定和登录会话会保留。该清理不可回滚。已有实例升级前先停止旧版 web/worker，再运行迁移并启动新版本，避免清理期间仍有进程写入旧事件。Docker Compose 会先运行 `migrate` 再启动 web 和 worker；systemd 部署需一并安装 `deploy/systemd/kefu-migrate.service`，并在升级时先执行 `systemctl stop kefu-web kefu-worker`，再启动这两个服务。其他部署方式需在停掉 web/worker 后运行一次 `alembic upgrade head`。使用 S3 时，迁移凭据需能列举并删除 `media/` 前缀下的对象版本。
 

@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-kefu}
       POSTGRES_USER: ${POSTGRES_USER:-kefu}
@@ -16,6 +17,7 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
+    restart: unless-stopped
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-kefu-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-please}
@@ -32,9 +34,11 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >-
-      /bin/sh -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}
-      && mc mb --ignore-existing local/$${S3_BUCKET}"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$S3_BUCKET"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-kefu-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-please}
@@ -59,6 +63,7 @@ services:
   web:
     build: .
     command: ["uvicorn", "kefu.web.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kefu}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-kefu}
       OBJECT_STORAGE_BACKEND: s3
@@ -85,10 +90,23 @@ services:
         condition: service_completed_successfully
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   bot-worker:
     build: .
     command: ["kefu-worker"]
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kefu}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-kefu}
       OBJECT_STORAGE_BACKEND: s3
