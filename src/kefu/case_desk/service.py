@@ -940,18 +940,36 @@ class CaseDesk:
                 "to_consultant": new_consultant.display_name,
             },
         )
-        delivery_id = self._create_notice_delivery(
-            session,
-            entry=entry,
-            case=case,
-            destination_type=DeliveryDestination.USER,
-            destination_address=new_consultant.wecom_userid,
-            content=(
-                "你已成为本事件的咨询经办人。"
-                "请查看事件中心中的完整时间线和当前下一步。"
-            ),
-        )
-        return self._result(case, entry.id, delivery_ids=(delivery_id,))
+        delivery_ids = [
+            self._create_notice_delivery(
+                session,
+                entry=entry,
+                case=case,
+                destination_type=DeliveryDestination.USER,
+                destination_address=new_consultant.wecom_userid,
+                content=(
+                    "你已成为本事件的咨询经办人。"
+                    "请查看事件中心中的完整时间线和当前下一步。"
+                ),
+            )
+        ]
+        consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
+        if consult_channel is not None:
+            delivery_ids.append(
+                self._create_notice_delivery(
+                    session,
+                    entry=entry,
+                    case=case,
+                    destination_type=DeliveryDestination.CHAT,
+                    destination_address=consult_channel.chatid,
+                    content=(
+                        f"咨询经办人已由{old_consultant or '未指定'}转交给"
+                        f"{new_consultant.display_name}。"
+                        f"请后续由{new_consultant.display_name}继续跟进。"
+                    ),
+                )
+            )
+        return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
 
     def _transfer_developer(
         self, session: Session, command: TransferDeveloper, actor: Actor

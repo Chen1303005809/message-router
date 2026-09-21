@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -26,6 +26,7 @@ from kefu.persistence.models import (
     CaseEntryKind,
     CaseStatus,
     Delivery,
+    DeliveryDestination,
     DeliveryItem,
     DeliveryStatus,
     LifecycleStatus,
@@ -33,6 +34,7 @@ from kefu.persistence.models import (
     PartKind,
     User,
     WaitingOn,
+    WeComChannel,
 )
 from kefu.relay.delivery import DeliveryWorker
 from kefu.relay.references import parse_quoted_case_ref
@@ -195,6 +197,7 @@ def test_handover_keeps_timeline_and_close_requires_consult_authority(
         ),
         actor(desk_context, "consult_a"),
     )
+    assert len(transferred.delivery_ids) == 1
     notice_adapter = deliver(desk_context)
     notice_content = next(
         message.payload["content"]
@@ -231,6 +234,60 @@ def test_handover_keeps_timeline_and_close_requires_consult_authority(
     assert closed.lifecycle_status is LifecycleStatus.CLOSED
     assert closed.status is CaseStatus.CLOSED
     assert closed.waiting_on is WaitingOn.NONE
+
+
+def test_consultant_transfer_notifies_new_handler_and_bound_consult_group(
+    desk_context: DeskContext,
+) -> None:
+    with desk_context.session_factory() as session, session.begin():
+        session.add(
+            WeComChannel(
+                team_id=desk_context.teams["consult"],
+                chatid="chat-consult",
+                initialized_at=datetime.now(UTC),
+            )
+        )
+
+    created = create_case(desk_context)
+    deliver(desk_context)
+    current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
+    transferred = desk_context.desk.execute(
+        TransferConsultant(
+            case_ref=created.case_ref or "",
+            expected_version=current.version,
+            new_consultant_id=desk_context.users["consult_b"],
+        ),
+        actor(desk_context, "consult_a"),
+    )
+
+    assert len(transferred.delivery_ids) == 2
+    adapter = deliver(desk_context)
+    private_messages = [
+        message
+        for message in adapter.sent
+        if message.destination_type is DeliveryDestination.USER
+        and message.destination_address == "consult-b"
+    ]
+    group_messages = [
+        message
+        for message in adapter.sent
+        if message.destination_type is DeliveryDestination.CHAT
+        and message.destination_address == "chat-consult"
+    ]
+    assert len(private_messages) == 2
+    assert len(group_messages) == 2
+
+    private_notice = next(
+        message.payload["content"]
+        for message in private_messages
+        if "content" in message.payload
+    )
+    group_notice = next(
+        message.payload["content"] for message in group_messages if "content" in message.payload
+    )
+    assert "你已成为本事件的咨询经办人" in private_notice
+    assert "咨询经办人已由咨询甲转交给咨询乙" in group_notice
+    assert created.case_ref in group_notice
 
 
 def test_event_handlers_and_team_admins_can_transfer_within_each_team(
