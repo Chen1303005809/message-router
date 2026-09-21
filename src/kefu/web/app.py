@@ -1627,11 +1627,18 @@ h2 { color: #23344f; }
 .status-controls-help { margin: 5px 0 12px; color: var(--muted); font-size: 12px; }
 .status-control-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .status-control-actions form { margin: 0; }
-.status-control-actions button { min-height: 38px; padding: 7px 12px; border: 1px solid #d2dceb; color: #34445d; background: #fff; font-size: 13px; font-weight: 700; }
-.status-control-actions button:hover:not(:disabled) { border-color: #8eabed; color: var(--blue); background: var(--blue-soft); }
+.status-control-actions button { min-height: 40px; padding: 8px 15px; border: 1px solid transparent; border-radius: 9px; color: #34445d; background: #edf1f7; font-size: 13px; font-weight: 750; transition: transform .12s ease, box-shadow .12s ease, background .12s ease; }
+.status-control-actions button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 10px #18243a20; }
+.status-control-actions button:focus-visible { outline: 3px solid #9db8ff; outline-offset: 2px; }
 .status-control-actions button:disabled { cursor: default; opacity: .8; }
-.status-control-actions button.is-current { border-color: #b6c9f3; color: var(--blue); background: var(--blue-soft); }
-.status-control-actions button.is-close { border-color: #e6b6b2; color: var(--red); }
+.status-control-actions button.status-action-accept { color: #fff; background: #285fe8; }
+.status-control-actions button.status-action-feedback { color: #fff; background: #9a5b00; }
+.status-control-actions button.status-action-suspend { color: #fff; background: #6941c6; }
+.status-control-actions button.status-action-close { color: #fff; background: #b42318; }
+.status-control-actions button.status-action-accept:hover:not(:disabled) { background: #174bc4; }
+.status-control-actions button.status-action-feedback:hover:not(:disabled) { background: #7a4800; }
+.status-control-actions button.status-action-suspend:hover:not(:disabled) { background: #5330a3; }
+.status-control-actions button.status-action-close:hover:not(:disabled) { background: #8f1c13; }
 .status-closed-note { margin: 0; color: var(--muted); font-size: 13px; }
 .metadata-editor { margin-top: 12px; padding: 0 16px; }
 .metadata-editor summary { padding: 13px 0; cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 700; }
@@ -2187,49 +2194,64 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
 
     status_action = path_for(f"/events/{escape(case.case_ref)}/status")
     close_action = path_for(f"/events/{escape(case.case_ref)}/close")
-    options = (
-        (CaseStatus.PENDING_CONFIRMATION, "待确定", status_action, True, ""),
-        (CaseStatus.IN_PROGRESS, "处理中", status_action, True, ""),
-        (
-            CaseStatus.WAITING_CUSTOMER,
-            "待客户反馈",
-            status_action,
-            case.can_change_consult_status,
-            "",
-        ),
-        (
-            CaseStatus.CLOSED,
-            "确认客户侧闭环并关闭",
-            close_action,
-            case.can_change_consult_status,
-            "is-close",
-        ),
-        (CaseStatus.SUSPENDED, "挂起", status_action, True, ""),
-    )
     buttons: list[str] = []
-    for status, label, action, allowed, extra_class in options:
-        if not allowed:
-            continue
-        if case.status is status:
-            buttons.append(
-                f'<button type="button" class="is-current" aria-pressed="true" disabled>'
-                f"{label} · 当前</button>"
-            )
-            continue
-        status_field = (
+
+    def status_button(status: CaseStatus, label: str, extra_class: str = "") -> str:
+        return (
+            f'<form method="post" action="{status_action}">'
+            f'<input type="hidden" name="version" value="{case.version}">'
             f'<input type="hidden" name="status" value="{status.value}">'
-            if status is not CaseStatus.CLOSED
-            else ""
+            f'<button type="submit" class="{extra_class}">{label}</button></form>'
         )
+
+    def close_button() -> str:
+        return (
+            f'<form method="post" action="{close_action}">'
+            f'<input type="hidden" name="version" value="{case.version}">'
+            '<button type="submit" class="status-action-close">关闭</button></form>'
+        )
+
+    if case.status is CaseStatus.PENDING_CONFIRMATION:
+        if case.can_accept_pending:
+            buttons.append(
+                status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept")
+            )
+        if case.can_change_consult_status:
+            buttons.append(close_button())
+        help_text = "待确定是初始状态，仅研发人员可通过“受理”进入处理中。"
+    elif case.status is CaseStatus.IN_PROGRESS:
+        if case.can_change_consult_status:
+            buttons.append(
+                status_button(
+                    CaseStatus.WAITING_CUSTOMER,
+                    "待客户反馈",
+                    "status-action-feedback",
+                )
+            )
+            buttons.append(close_button())
         buttons.append(
-            f'<form method="post" action="{action}">'
-            f'<input type="hidden" name="version" value="{case.version}">{status_field}'
-            f'<button type="submit" class="{extra_class.strip()}">{label}</button></form>'
+            status_button(CaseStatus.SUSPENDED, "挂起", "status-action-suspend")
         )
+        help_text = "处理中可由咨询人员设为待客户反馈或关闭；暂时无法推进时可挂起。"
+    elif case.status is CaseStatus.WAITING_CUSTOMER:
+        buttons.append(
+            status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept")
+        )
+        if case.can_change_consult_status:
+            buttons.append(close_button())
+        help_text = "收到客户反馈后点击“受理”继续处理；关闭仅咨询侧可操作。"
+    else:
+        buttons.append(
+            status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept")
+        )
+        if case.can_change_consult_status:
+            buttons.append(close_button())
+        help_text = "暂时无法推进时挂起，恢复处理后点击“受理”；关闭仅咨询侧可操作。"
+
     return f"""
     <section class="status-controls panel" aria-label="事件状态操作">
       <div class="status-controls-heading"><h2>事件状态</h2>{current_status}</div>
-      <p class="status-controls-help">待确定为默认状态；开始受理后选“处理中”，等待客户回复选“待客户反馈”，暂时无法推进时选“挂起”。<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在事件时间线。</p>
+      <p class="status-controls-help">{help_text}<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在事件时间线。</p>
       <div class="status-control-actions">{"".join(buttons)}</div>
     </section>
     """
@@ -2345,6 +2367,7 @@ def _case_json(case: Any) -> dict[str, Any]:
         "current_developer_name": case.current_developer_name,
         "can_edit_metadata": case.can_edit_metadata,
         "can_change_consult_status": case.can_change_consult_status,
+        "can_accept_pending": case.can_accept_pending,
         "can_extend_deadline": case.can_extend_deadline,
         "version": case.version,
         "entries": [

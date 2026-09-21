@@ -236,18 +236,19 @@ def test_workflow_statuses_are_authorized_and_recorded_in_timeline(
     desk_context: DeskContext,
 ) -> None:
     created = create_case(desk_context)
-    current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_b"))
+    current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
+    assert current.status is CaseStatus.PENDING_CONFIRMATION
+    assert current.can_accept_pending is False
 
-    unchanged = desk_context.desk.execute(
-        SetCaseStatus(
-            case_ref=created.case_ref or "",
-            expected_version=current.version,
-            status=CaseStatus.PENDING_CONFIRMATION,
-        ),
-        actor(desk_context, "dev_b"),
-    )
-    assert unchanged.idempotent is True
-    assert unchanged.entry_id is None
+    with pytest.raises(Forbidden, match="研发团队成员受理"):
+        desk_context.desk.execute(
+            SetCaseStatus(
+                case_ref=created.case_ref or "",
+                expected_version=current.version,
+                status=CaseStatus.IN_PROGRESS,
+            ),
+            actor(desk_context, "consult_a"),
+        )
 
     started = desk_context.desk.execute(
         SetCaseStatus(
@@ -257,6 +258,27 @@ def test_workflow_statuses_are_authorized_and_recorded_in_timeline(
         ),
         actor(desk_context, "dev_b"),
     )
+    unchanged = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=started.case_version or 0,
+            status=CaseStatus.IN_PROGRESS,
+        ),
+        actor(desk_context, "dev_b"),
+    )
+    assert unchanged.idempotent is True
+    assert unchanged.entry_id is None
+
+    with pytest.raises(ValidationError, match="初始状态"):
+        desk_context.desk.execute(
+            SetCaseStatus(
+                case_ref=created.case_ref or "",
+                expected_version=started.case_version or 0,
+                status=CaseStatus.PENDING_CONFIRMATION,
+            ),
+            actor(desk_context, "dev_b"),
+        )
+
     processing = desk_context.desk.get_case(
         created.case_ref or "", actor(desk_context, "consult_a")
     )
@@ -285,22 +307,40 @@ def test_workflow_statuses_are_authorized_and_recorded_in_timeline(
         ),
         actor(desk_context, "consult_a"),
     )
-    suspended = desk_context.desk.execute(
+    resumed = desk_context.desk.execute(
         SetCaseStatus(
             case_ref=created.case_ref or "",
             expected_version=waiting_customer.case_version or 0,
+            status=CaseStatus.IN_PROGRESS,
+        ),
+        actor(desk_context, "consult_a"),
+    )
+    suspended = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=resumed.case_version or 0,
             status=CaseStatus.SUSPENDED,
         ),
         actor(desk_context, "dev_a"),
     )
+    resumed_again = desk_context.desk.execute(
+        SetCaseStatus(
+            case_ref=created.case_ref or "",
+            expected_version=suspended.case_version or 0,
+            status=CaseStatus.IN_PROGRESS,
+        ),
+        actor(desk_context, "dev_a"),
+    )
     case = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
-    assert case.status is CaseStatus.SUSPENDED
-    assert [entry.kind for entry in case.entries[-3:]] == [
+    assert case.status is CaseStatus.IN_PROGRESS
+    assert [entry.kind for entry in case.entries[-5:]] == [
+        CaseEntryKind.STATUS_CHANGED,
+        CaseEntryKind.STATUS_CHANGED,
         CaseEntryKind.STATUS_CHANGED,
         CaseEntryKind.STATUS_CHANGED,
         CaseEntryKind.STATUS_CHANGED,
     ]
-    assert suspended.case_version == case.version
+    assert resumed_again.case_version == case.version
 
 
 def test_versions_and_source_msgids_prevent_duplicate_business_entries(

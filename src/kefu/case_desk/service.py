@@ -221,6 +221,9 @@ class CaseDesk:
             except Forbidden:
                 can_edit_metadata = False
                 can_change_consult_status = False
+            can_accept_pending = self._directory.is_member(
+                session, user_id=viewer.user_id, team_id=case.current_dev_team_id
+            )
             can_extend_deadline = (
                 case.lifecycle_status is LifecycleStatus.OPEN
                 and self._has_consult_deadline_access(session, viewer.user_id, case)
@@ -230,6 +233,7 @@ class CaseDesk:
                 case,
                 can_edit_metadata=can_edit_metadata,
                 can_change_consult_status=can_change_consult_status,
+                can_accept_pending=can_accept_pending,
                 can_extend_deadline=can_extend_deadline,
             )
 
@@ -1046,10 +1050,33 @@ class CaseDesk:
         self._assert_open(case)
         if command.status is CaseStatus.CLOSED:
             raise ValidationError("请通过‘确认客户侧闭环并关闭’操作关闭事件")
+        if command.status is CaseStatus.PENDING_CONFIRMATION:
+            raise ValidationError("待确定是初始状态，不能通过操作切回")
         if command.status is CaseStatus.WAITING_CUSTOMER:
             self._directory.assert_consult_manager(session, actor.user_id, case)
         if case.status is command.status:
             return self._result(case, None, idempotent=True)
+
+        if command.status is CaseStatus.IN_PROGRESS:
+            if case.status not in (
+                CaseStatus.PENDING_CONFIRMATION,
+                CaseStatus.WAITING_CUSTOMER,
+                CaseStatus.SUSPENDED,
+            ):
+                raise ValidationError("只有待确定、待客户反馈或挂起状态可以受理")
+            if (
+                case.status is CaseStatus.PENDING_CONFIRMATION
+                and not self._directory.is_member(
+                    session, user_id=actor.user_id, team_id=case.current_dev_team_id
+                )
+            ):
+                raise Forbidden("待确定状态只能由研发团队成员受理")
+        elif command.status is CaseStatus.WAITING_CUSTOMER:
+            if case.status is not CaseStatus.IN_PROGRESS:
+                raise ValidationError("只有处理中事件可以设为待客户反馈")
+        elif command.status is CaseStatus.SUSPENDED:
+            if case.status is not CaseStatus.IN_PROGRESS:
+                raise ValidationError("只有处理中事件可以挂起")
 
         actor_user = self._directory.get_user(session, actor.user_id)
         previous_status = case.status
@@ -1719,6 +1746,7 @@ class CaseDesk:
         *,
         can_edit_metadata: bool = False,
         can_change_consult_status: bool = False,
+        can_accept_pending: bool = False,
         can_extend_deadline: bool = False,
     ) -> CaseView:
         entries = session.scalars(
@@ -1787,6 +1815,7 @@ class CaseDesk:
             version=case.version,
             can_edit_metadata=can_edit_metadata,
             can_change_consult_status=can_change_consult_status,
+            can_accept_pending=can_accept_pending,
             can_extend_deadline=can_extend_deadline,
             entries=tuple(entry_views),
             deliveries=tuple(

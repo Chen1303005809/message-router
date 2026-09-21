@@ -109,13 +109,16 @@ def test_h5_status_buttons_follow_permissions_and_update_timeline(
     detail = client.get(f"/events/{created.case_ref}", headers=consult_headers)
     assert detail.status_code == 200
     assert detail.text.index('aria-label="事件状态操作"') < detail.text.index("事件时间线")
-    assert 'name="status" value="in_progress"' in detail.text
-    assert 'name="status" value="waiting_customer"' in detail.text
+    assert 'name="status" value="in_progress"' not in detail.text
+    assert 'name="status" value="waiting_customer"' not in detail.text
     assert f'action="/events/{created.case_ref}/close"' in detail.text
 
     developer_case = desk_context.desk.get_case(
         created.case_ref or "", Actor(desk_context.users["dev_a"])
     )
+    developer_detail = client.get(f"/events/{created.case_ref}", headers=developer_headers)
+    assert 'name="status" value="in_progress"' in developer_detail.text
+    assert 'class="status-action-accept"' in developer_detail.text
     forbidden = client.post(
         f"/events/{created.case_ref}/status",
         headers=developer_headers,
@@ -135,6 +138,12 @@ def test_h5_status_buttons_follow_permissions_and_update_timeline(
     )
     assert in_progress.status is CaseStatus.IN_PROGRESS
     assert in_progress.entries[-1].kind is CaseEntryKind.STATUS_CHANGED
+    processing_detail = client.get(f"/events/{created.case_ref}", headers=consult_headers)
+    assert 'name="status" value="waiting_customer"' in processing_detail.text
+    assert 'name="status" value="suspended"' in processing_detail.text
+    assert 'class="status-action-feedback"' in processing_detail.text
+    assert 'class="status-action-suspend"' in processing_detail.text
+    assert 'class="status-action-close"' in processing_detail.text
 
     waiting = client.post(
         f"/events/{created.case_ref}/status",

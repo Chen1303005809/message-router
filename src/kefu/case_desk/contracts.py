@@ -276,6 +276,7 @@ class CaseView:
     version: int
     can_edit_metadata: bool
     can_change_consult_status: bool
+    can_accept_pending: bool
     can_extend_deadline: bool
     entries: tuple[EntryView, ...]
     deliveries: tuple[DeliveryView, ...]
