@@ -103,11 +103,11 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
     marker = f"〔KF·{result.case_ref}〕"
     content = adapter.sent[0].payload["content"]
     assert content == (
-        "# 登录失败\n\n"
-        "### 指定研发经办人：**研发甲**\n\n"
-        "#### 咨询侧转发\n"
-        "第一段文字\n第二段文字\n\n"
-        f"转发人：咨询甲（咨询侧） · 事件编号：{marker}"
+        "## 登录失败\n\n"
+        "> *指定经办人：研发甲*\n\n"
+        "#### 反馈内容\n\n"
+        "**第一段文字\n第二段文字**\n\n\n"
+        f"转发人：咨询甲  事件编号：{marker}"
     )
     assert "<@" not in str(content)
     assert parse_quoted_case_ref(str(content)) == result.case_ref
@@ -129,7 +129,7 @@ def test_developer_can_reply_without_becoming_current_handler(desk_context: Desk
     created = create_case(desk_context)
     initial_adapter = deliver(desk_context)
     initial_content = initial_adapter.sent[0].payload["content"]
-    assert "指定研发经办人：**研发甲**" in str(initial_content)
+    assert "> *指定经办人：研发甲*" in str(initial_content)
     assert "<@" not in str(initial_content)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
     posted = desk_context.desk.execute(
@@ -153,12 +153,11 @@ def test_developer_can_reply_without_becoming_current_handler(desk_context: Desk
         message.payload["content"] for message in adapter.sent if "content" in message.payload
     )
     assert response_content == (
-        "# 登录失败\n\n"
-        "### 指定咨询经办人：**咨询甲**\n\n"
-        "#### 研发侧回复\n"
-        "已定位到权限配置\n\n"
-        f"发送人：研发乙（研发侧） · "
-        f"事件编号：〔KF·{created.case_ref}〕"
+        "## 登录失败\n\n"
+        "> *指定经办人：咨询甲*\n\n"
+        "#### 反馈内容\n\n"
+        "**已定位到权限配置**\n\n\n"
+        f"发送人：研发乙  事件编号：〔KF·{created.case_ref}〕"
     )
     assert "<@" not in str(response_content)
     assert parse_quoted_case_ref(str(response_content)) == created.case_ref
@@ -278,12 +277,11 @@ def test_image_first_bundle_still_uses_one_event_card(desk_context: DeskContext)
     ]
     content = adapter.sent[0].payload["content"]
     assert content == (
-        "# 登录失败\n\n"
-        "### 指定研发经办人：**研发甲**\n\n"
-        "#### 咨询侧转发\n"
-        "图片后的补充说明\n\n"
-        f"转发人：咨询甲（咨询侧） · "
-        f"事件编号：〔KF·{created.case_ref}〕"
+        "## 登录失败\n\n"
+        "> *指定经办人：研发甲*\n\n"
+        "#### 反馈内容\n\n"
+        "**图片后的补充说明**\n\n\n"
+        f"转发人：咨询甲  事件编号：〔KF·{created.case_ref}〕"
     )
     assert str(content).count(f"〔KF·{created.case_ref}〕") == 1
 

@@ -53,17 +53,13 @@ def build_formal_bundle(
     if not text_parts or not any(part.strip() for part in text_parts):
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
-    speaker_side = "咨询侧" if side is EntrySide.CONSULT else "研发侧"
-    assignee_side = "研发" if side is EntrySide.CONSULT else "咨询"
     speaker_label = "转发人" if side is EntrySide.CONSULT else "发送人"
-    message_heading = "咨询侧转发" if side is EntrySide.CONSULT else "研发侧回复"
     content = (
-        f"# {case_title}\n\n"
-        f"### 指定{assignee_side}经办人：**{assignee_name}**\n\n"
-        f"#### {message_heading}\n"
-        f"{message_text}\n\n"
-        f"{speaker_label}：{speaker_name}（{speaker_side}）"
-        f" · 事件编号：{marker}"
+        f"## {case_title}\n\n"
+        f"> *指定经办人：{assignee_name}*\n\n"
+        f"#### 反馈内容\n\n"
+        f"**{message_text}**\n\n\n"
+        f"{speaker_label}：{speaker_name}  事件编号：{marker}"
     )
     rendered: list[RenderedDeliveryItem] = [
         RenderedDeliveryItem(

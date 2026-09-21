@@ -101,8 +101,8 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
     persisted_content = relay.get_delivery_markdown_content(decision.delivery_ids[0])
     assert persisted_content is not None
     assert reply == InboundReply(text=persisted_content)
-    assert "指定研发经办人：**研发甲**" in reply.text
-    assert "转发人：咨询甲（咨询侧）" in reply.text
+    assert "> *指定经办人：研发甲*" in reply.text
+    assert "转发人：咨询甲  事件编号：" in reply.text
     assert "@测试机器人" not in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
@@ -166,8 +166,8 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
     decision = relay.handle(consultant_event)
     assert decision.delivery_ids
     assert reply.text == relay.get_delivery_markdown_content(decision.delivery_ids[0])
-    assert "指定研发经办人：**研发甲**" in reply.text
-    assert "转发人：咨询甲（咨询侧）" in reply.text
+    assert "> *指定经办人：研发甲*" in reply.text
+    assert "转发人：咨询甲  事件编号：" in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
     assert all(
@@ -237,6 +237,6 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
         if message.destination_type is DeliveryDestination.CHAT
         and "content" in message.payload
     )
-    assert "指定研发经办人：**研发甲**" in str(group_markdown)
-    assert "转发人：咨询甲（咨询侧）" in str(group_markdown)
+    assert "> *指定经办人：研发甲*" in str(group_markdown)
+    assert "转发人：咨询甲  事件编号：" in str(group_markdown)
     assert parse_quoted_case_ref(str(group_markdown)) == created.case_ref
