@@ -769,29 +769,43 @@ class CaseDesk:
         wait_after = (
             self._opposite_waiting_side(side) if command.intent is MessageIntent.HANDOFF else None
         )
-        delivery_id = self._create_formal_delivery(
-            session,
-            case=case,
-            entry=entry,
-            destination_type=destination_type,
-            destination_address=destination_address,
-            waiting_on_after_delivery=wait_after,
-            delivery_status=(
-                DeliveryStatus.SENT if command.suppress_delivery else DeliveryStatus.PENDING
-            ),
-            item_status=(
-                DeliveryItemStatus.SENT
-                if command.suppress_delivery
-                else DeliveryItemStatus.PENDING
-            ),
-            item_platform_result=(
-                {"delivery_mode": DEFERRED_PASSIVE_PENDING_MODE}
-                if command.suppress_delivery
-                else None
-            ),
+        delivery_status = (
+            DeliveryStatus.SENT if command.suppress_delivery else DeliveryStatus.PENDING
         )
+        item_status = (
+            DeliveryItemStatus.SENT if command.suppress_delivery else DeliveryItemStatus.PENDING
+        )
+        item_platform_result = (
+            {"delivery_mode": DEFERRED_PASSIVE_PENDING_MODE} if command.suppress_delivery else None
+        )
+        delivery_ids = [
+            self._create_formal_delivery(
+                session,
+                case=case,
+                entry=entry,
+                destination_type=destination_type,
+                destination_address=destination_address,
+                waiting_on_after_delivery=wait_after,
+                delivery_status=delivery_status,
+                item_status=item_status,
+                item_platform_result=item_platform_result,
+            )
+        ]
+        if side is EntrySide.DEV:
+            consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
+            if consult_channel is not None:
+                delivery_ids.append(
+                    self._create_formal_delivery(
+                        session,
+                        case=case,
+                        entry=entry,
+                        destination_type=DeliveryDestination.CHAT,
+                        destination_address=consult_channel.chatid,
+                        waiting_on_after_delivery=None,
+                    )
+                )
         case.version += 1
-        return self._result(case, entry.id, delivery_ids=(delivery_id,))
+        return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
 
     def _transfer_consultant(
         self, session: Session, command: TransferConsultant, actor: Actor

@@ -291,6 +291,8 @@ def _reply_for_decision(decision: RelayDecision, web_base_url: str) -> InboundRe
         )
     if decision.disposition is RelayDisposition.CHANNEL_BOUND and decision.reply_text:
         return InboundReply(title="研发群已绑定", text=decision.reply_text)
+    if decision.disposition is RelayDisposition.CONSULT_CHANNEL_BOUND and decision.reply_text:
+        return InboundReply(title="咨询群已绑定", text=decision.reply_text)
     if decision.disposition is RelayDisposition.REJECTED and decision.reply_text:
         return InboundReply(text=decision.reply_text)
     return None

@@ -127,21 +127,71 @@ class DatabaseRoutingDirectory:
         return self.active_channel(session, rows[0].id)
 
     def active_channel(self, session: Session, team_id: UUID) -> TeamChannel:
-        team = self.get_team(session, team_id, kind=TeamKind.DEV)
+        """Resolve the required active channel for a development team."""
+        channel = self._active_channel(session, team_id, kind=TeamKind.DEV, optional=False)
+        assert channel is not None
+        return channel
+
+    def active_consult_channel(self, session: Session, queue_id: UUID) -> TeamChannel | None:
+        """Resolve an optional active channel for a consultation queue.
+
+        Queues can continue using consultant DMs until a consultation group is
+        bound. Inactive queues also do not receive group copies, preserving the
+        primary DM route for existing cases.
+        """
+        team = session.get(Team, queue_id)
+        if team is None:
+            raise NotFound("咨询队列不存在")
+        if team.kind is not TeamKind.CONSULT_QUEUE:
+            raise ValidationErrorForDirectory("团队类型不匹配")
+        if not team.active:
+            return None
+        return self._active_channel(session, queue_id, kind=TeamKind.CONSULT_QUEUE, optional=True)
+
+    def _active_channel(
+        self,
+        session: Session,
+        team_id: UUID,
+        *,
+        kind: TeamKind,
+        optional: bool,
+    ) -> TeamChannel | None:
+        team = self.get_team(session, team_id, kind=kind)
         channels = session.scalars(
             select(WeComChannel).where(
                 WeComChannel.team_id == team.id,
                 WeComChannel.active.is_(True),
             )
         ).all()
+        if optional and not channels:
+            return None
         if len(channels) != 1 or channels[0].initialized_at is None:
-            raise RoutingUnavailable("研发团队没有唯一且已初始化的群聊通道")
+            label = "研发团队" if kind is TeamKind.DEV else "咨询队列"
+            raise RoutingUnavailable(f"{label}没有唯一且已初始化的群聊通道")
         return TeamChannel(team_id=team.id, chatid=channels[0].chatid)
 
     def bind_dev_chat(
         self, session: Session, *, actor_id: UUID, team_name: str, chatid: str
     ) -> TeamChannel:
-        """Bind the current group to one dev team, under a team-admin check.
+        """Bind the current group to one development team."""
+        return self.bind_team_chat(
+            session,
+            actor_id=actor_id,
+            team_name=team_name,
+            chatid=chatid,
+            team_kind=TeamKind.DEV,
+        )
+
+    def bind_team_chat(
+        self,
+        session: Session,
+        *,
+        actor_id: UUID,
+        team_name: str,
+        chatid: str,
+        team_kind: TeamKind,
+    ) -> TeamChannel:
+        """Bind the current group to a team, under a team-admin check.
 
         This is the one safe exception to the normal manually-maintained
         directory: a group callback is the only reliable way for the bot to
@@ -151,28 +201,31 @@ class DatabaseRoutingDirectory:
         normalized_team_name = team_name.strip()
         normalized_chatid = chatid.strip()
         if not normalized_team_name or not normalized_chatid:
-            raise ValidationErrorForDirectory("研发团队名称和群聊标识不能为空")
+            raise ValidationErrorForDirectory("团队名称和群聊标识不能为空")
         teams = session.scalars(
             select(Team).where(
-                Team.kind == TeamKind.DEV,
+                Team.kind == team_kind,
                 Team.name == normalized_team_name,
                 Team.active.is_(True),
             )
         ).all()
         if len(teams) != 1:
-            raise RoutingUnavailable("未找到唯一的在岗研发责任团队")
+            label = "在岗研发责任团队" if team_kind is TeamKind.DEV else "在岗咨询队列"
+            raise RoutingUnavailable(f"未找到唯一的{label}")
         team = teams[0]
         self.get_user(session, actor_id)
         if not (
             self.is_global_admin(session, actor_id)
             or self.is_admin(session, user_id=actor_id, team_id=team.id)
         ):
-            raise Forbidden("只有该研发团队管理员可以绑定研发群")
+            label = "研发团队管理员" if team_kind is TeamKind.DEV else "咨询队列管理员"
+            chat_label = "研发群" if team_kind is TeamKind.DEV else "咨询群"
+            raise Forbidden(f"只有该{label}可以绑定{chat_label}")
         existing = session.scalar(
             select(WeComChannel).where(WeComChannel.chatid == normalized_chatid)
         )
         if existing is not None and existing.team_id != team.id:
-            raise RoutingUnavailable("该企业微信群已绑定到另一个研发责任团队")
+            raise RoutingUnavailable("该企业微信群已绑定到另一个团队")
         for active_channel in session.scalars(
             select(WeComChannel).where(
                 WeComChannel.team_id == team.id,

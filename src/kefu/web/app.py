@@ -182,7 +182,7 @@ def create_app(
         <main class="setup-card">
           <div class="eyebrow">首次使用 · H5 事件管理中心</div>
           <h1>初始化总管理员</h1>
-          <p class="muted">总管理员使用企业微信 userid 登录，不单独设置密码。初始化完成后，人员授权、团队配置和研发群绑定都可以在管理中心可视化完成。</p>
+          <p class="muted">总管理员使用企业微信 userid 登录，不单独设置密码。初始化完成后，人员授权、团队配置和研发/咨询群绑定都可以在管理中心可视化完成。</p>
           <div class="notice">{escape(token_hint)}</div>
           <form method="post" action="{external_path('/setup')}">
             <label>企业微信 userid
@@ -1236,7 +1236,7 @@ def _admin_dashboard(
 
         <div class="panel" id="teams">
           <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>团队与授权</h2></div><span class="count-pill">{overview.team_count}</span></div>
-          <p class="panel-intro">咨询队列负责咨询侧可见范围；研发责任团队负责群路由和研发处理人授权。</p>
+          <p class="panel-intro">咨询队列负责咨询侧可见范围和咨询群通知；研发责任团队负责研发群路由和研发处理人授权。</p>
           <details class="add-box" open>
             <summary>＋ 新增团队</summary>
             <form method="post" action="{path_for('/admin/teams')}" class="form-grid team-create-form">
@@ -1251,7 +1251,7 @@ def _admin_dashboard(
 
       <section class="permission-note">
         <strong>授权规则</strong>
-        <span>成员 = 可查看和处理团队事件；团队管理员 = 可在本团队内执行交接、转交和研发群绑定；总管理员 = 可管理全组织并查看全部事件。</span>
+          <span>成员 = 可查看和处理团队事件；团队管理员 = 可在本团队内执行交接、转交和群聊绑定；总管理员 = 可管理全组织并查看全部事件。</span>
       </section>
     </main>
     """
@@ -1303,15 +1303,16 @@ def _admin_team_card(
         for user in users
     ) or '<option value="">请先添加在岗成员</option>'
     channel = ""
-    if team.kind is TeamKind.DEV:
+    if team.kind in (TeamKind.DEV, TeamKind.CONSULT_QUEUE):
+        chat_label = "研发群" if team.kind is TeamKind.DEV else "咨询群"
         channel_value = escape(team.channel_chatid or "")
         channel_status = (
             f'<span class="muted">当前群：{channel_value}</span>'
             if team.channel_initialized
-            else '<span class="warning-text">尚未绑定研发群</span>'
+            else f'<span class="warning-text">尚未绑定{chat_label}</span>'
         )
         channel = f"""
-        <div class="channel-box"><div><strong>研发群通道</strong>{channel_status}</div>
+        <div class="channel-box"><div><strong>{chat_label}通道</strong>{channel_status}</div>
           <form method="post" action="{path_for(f'/admin/teams/{team_id}/channel')}" class="inline-form">
             <input name="chatid" required maxlength="256" value="{channel_value}" placeholder="粘贴企业微信群 chatid">
             <button type="submit">绑定</button>
@@ -1932,12 +1933,15 @@ def _priority_label_value(value: str) -> str:
     }.get(value, value)
 
 
-def _render_delivery_badges(deliveries: tuple[Any, ...] | list[Any]) -> str:
+def _render_delivery_badges(deliveries: tuple[Any, ...] | list[Any], entry_side: EntrySide) -> str:
     if not deliveries:
         return ""
     chips: list[str] = []
     for delivery in deliveries:
-        target = "研发群" if delivery.destination_type is DeliveryDestination.CHAT else "咨询侧"
+        if delivery.destination_type is DeliveryDestination.CHAT:
+            target = "咨询群" if entry_side is EntrySide.DEV else "研发群"
+        else:
+            target = "咨询经办人" if entry_side is EntrySide.DEV else "咨询侧"
         label, color = {
             DeliveryStatus.PENDING: ("投递中", "delivery-pending"),
             DeliveryStatus.SENT: ("已送达", "delivery-sent"),
@@ -1974,7 +1978,7 @@ def _render_entry(
         if entry.message_intent is MessageIntent.SYNC
         else ""
     )
-    delivery_badges = _render_delivery_badges(deliveries)
+    delivery_badges = _render_delivery_badges(deliveries, entry.side)
     return (
         f'<article class="entry {kind}"><div class="entry-heading">{heading}'
         f'<time datetime="{escape(entry.created_at.isoformat())}">{_format_datetime(entry.created_at)}</time></div>'

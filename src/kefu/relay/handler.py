@@ -23,6 +23,7 @@ from kefu.persistence.models import (
     MessageDraft,
     MessageDraftPart,
     PartKind,
+    TeamKind,
 )
 from kefu.relay.references import parse_quoted_case_ref
 from kefu.routing.directory import DatabaseRoutingDirectory
@@ -35,6 +36,7 @@ class RelayDisposition(StrEnum):
     DRAFT_SAVED = "draft_saved"
     FORWARDED = "forwarded"
     CHANNEL_BOUND = "channel_bound"
+    CONSULT_CHANNEL_BOUND = "consult_channel_bound"
     OPEN_EVENT_CENTER = "open_event_center"
     IGNORED = "ignored"
     REJECTED = "rejected"
@@ -164,20 +166,27 @@ class Relay:
         if not event.mentioned_bot:
             return RelayDecision(RelayDisposition.IGNORED)
         if not event.chatid:
-            raise ValidationError("研发群消息缺少群聊标识")
-        requested_team_name = _requested_team_binding(event.parts)
-        if requested_team_name is not None:
+            raise ValidationError("群聊消息缺少群聊标识")
+        requested_binding = _requested_team_binding(event.parts)
+        if requested_binding is not None:
+            team_kind, team_name = requested_binding
             sender = self._user_for_wecom_userid(event.sender_userid)
             with self._session_factory() as session, session.begin():
-                self._directory.bind_dev_chat(
+                self._directory.bind_team_chat(
                     session,
                     actor_id=sender,
-                    team_name=requested_team_name,
+                    team_name=team_name,
                     chatid=event.chatid,
+                    team_kind=team_kind,
+                )
+            if team_kind is TeamKind.CONSULT_QUEUE:
+                return RelayDecision(
+                    RelayDisposition.CONSULT_CHANNEL_BOUND,
+                    reply_text=f"已将当前群绑定为咨询队列「{team_name}」的咨询群。",
                 )
             return RelayDecision(
                 RelayDisposition.CHANNEL_BOUND,
-                reply_text=f"已将当前群绑定为研发团队「{requested_team_name}」的沟通群。",
+                reply_text=f"已将当前群绑定为研发团队「{team_name}」的沟通群。",
             )
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
@@ -324,14 +333,20 @@ class Relay:
         return self._case_desk.restore_deferred_deliveries(delivery_ids)
 
 
-def _requested_team_binding(parts: Sequence[InboundPart]) -> str | None:
-    """Parse the explicit ``绑定研发团队 团队名称`` admin instruction only."""
-    command = "绑定研发团队"
+def _requested_team_binding(parts: Sequence[InboundPart]) -> tuple[TeamKind, str] | None:
+    """Parse explicit development-team or consultation-queue binding commands."""
+    commands = (
+        ("绑定研发团队", TeamKind.DEV, "研发团队"),
+        ("绑定咨询队列", TeamKind.CONSULT_QUEUE, "咨询队列"),
+    )
     for part in parts:
-        if not isinstance(part, InboundTextPart) or command not in part.text:
+        if not isinstance(part, InboundTextPart):
             continue
-        team_name = part.text.split(command, maxsplit=1)[1].strip(" ：:\t\n")
-        if not team_name:
-            raise ValidationError("请使用“绑定研发团队 团队名称”指定要绑定的研发团队")
-        return team_name
+        for command, team_kind, label in commands:
+            if command not in part.text:
+                continue
+            team_name = part.text.split(command, maxsplit=1)[1].strip(" ：:\t\n")
+            if not team_name:
+                raise ValidationError(f"请使用“{command} 团队名称”指定要绑定的{label}")
+            return team_kind, team_name
     return None

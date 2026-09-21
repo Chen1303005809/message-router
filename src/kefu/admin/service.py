@@ -2,7 +2,7 @@
 
 The event desk deliberately owns event transitions, while this module owns
 the smaller but still security-sensitive organization changes: identities,
-teams, memberships, global administrators, and development chat bindings.
+teams, memberships, global administrators, and team chat bindings.
 The web layer only translates forms/JSON into these operations.
 """
 
@@ -346,22 +346,21 @@ class Administration:
 
     def bind_channel(self, actor: Actor, *, team_id: UUID, chatid: str) -> TeamChannel:
         if not isinstance(chatid, str):
-            raise ValidationError("研发群标识必须是文本")
+            raise ValidationError("群聊标识必须是文本")
         normalized_chatid = chatid.strip()
         if not normalized_chatid:
-            raise ValidationError("研发群标识不能为空")
+            raise ValidationError("群聊标识不能为空")
         with self._session_factory() as session, session.begin():
             self._assert_admin(session, actor)
             team = session.get(Team, team_id)
             if team is None:
                 raise NotFound("团队不存在")
-            if team.kind is not TeamKind.DEV:
-                raise ValidationError("只有研发责任团队可以绑定研发群")
-            return self._directory.bind_dev_chat(
+            return self._directory.bind_team_chat(
                 session,
                 actor_id=actor.user_id,
                 team_name=team.name,
                 chatid=normalized_chatid,
+                team_kind=team.kind,
             )
 
     def _assert_admin(self, session: Session, actor: Actor) -> User:
