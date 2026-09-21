@@ -59,13 +59,11 @@ def build_formal_bundle(
     message_heading = "咨询侧转发" if side is EntrySide.CONSULT else "研发侧回复"
     content = (
         f"# {case_title}\n\n"
-        f"## 处理责任\n"
-        f"指定{assignee_side}经办人：**{assignee_name}**\n\n"
-        f"## 消息内容\n"
-        f"### {message_heading}\n"
+        f"### 指定{assignee_side}经办人：**{assignee_name}**\n\n"
+        f"#### {message_heading}\n"
         f"{message_text}\n\n"
-        f'<font color="comment">{speaker_label}：{speaker_name}（{speaker_side}）'
-        f" · 事件编号：{marker}</font>"
+        f"{speaker_label}：{speaker_name}（{speaker_side}）"
+        f" · 事件编号：{marker}"
     )
     rendered: list[RenderedDeliveryItem] = [
         RenderedDeliveryItem(
