@@ -17,7 +17,12 @@ def test_bootstrap_upserts_manual_routing_without_duplicate_memberships(
         ],
         "teams": [
             {"key": "new-queue", "kind": "consult_queue", "name": "新咨询队列"},
-            {"key": "new-dev-team", "kind": "dev", "name": "新研发团队"},
+            {
+                "key": "new-dev-team",
+                "kind": "dev",
+                "name": "新研发团队",
+                "lead_display_name": "研发团队负责人",
+            },
         ],
         "memberships": [
             {"team": "new-queue", "wecom_userid": "new-consult", "role": "admin"},
@@ -38,6 +43,7 @@ def test_bootstrap_upserts_manual_routing_without_duplicate_memberships(
         )
         assert developer is not None
         assert team is not None
+        assert team.lead_display_name == "研发团队负责人"
         assert (
             session.get(TeamMembership, {"team_id": team.id, "user_id": developer.id}) is not None
         )

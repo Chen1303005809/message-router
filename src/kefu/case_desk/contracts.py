@@ -62,7 +62,7 @@ type ContentPart = TextPart | ImagePart
 class CreateCase:
     title: str
     consult_queue_id: UUID
-    developer_id: UUID
+    dev_team_id: UUID
     customer_name: str | None = None
     customer_contact_name: str | None = None
     customer_contact_method: str | None = None
@@ -125,18 +125,10 @@ class TransferConsultant:
 
 
 @dataclass(frozen=True, slots=True)
-class TransferDeveloper:
-    case_ref: str
-    expected_version: int
-    new_developer_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
 class TransferDevTeam:
     case_ref: str
     expected_version: int
     new_dev_team_id: UUID
-    new_developer_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +186,6 @@ type Command = (
     | PostFormalMessage
     | UpdateCaseMetadata
     | TransferConsultant
-    | TransferDeveloper
     | TransferDevTeam
     | CloseCase
     | SetCaseStatus
@@ -269,8 +260,7 @@ class CaseView:
     current_consultant_name: str | None
     current_dev_team_id: UUID
     current_dev_team_name: str
-    current_developer_id: UUID | None
-    current_developer_name: str | None
+    current_dev_team_lead_display_name: str | None
     created_at: datetime
     updated_at: datetime
     version: int
@@ -280,7 +270,6 @@ class CaseView:
     can_extend_deadline: bool
     can_transfer: bool
     transferable_consultants: tuple[UserOption, ...]
-    transferable_developers: tuple[UserOption, ...]
     entries: tuple[EntryView, ...]
     deliveries: tuple[DeliveryView, ...]
 
@@ -298,7 +287,6 @@ class CaseSummary:
     approaching_window_minutes: int
     deadline_status: DeadlineStatus | None
     current_consultant_id: UUID | None
-    current_developer_id: UUID | None
     updated_at: datetime
     version: int
 
@@ -361,6 +349,7 @@ class DraftView:
 class TeamOption:
     id: UUID
     name: str
+    lead_display_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

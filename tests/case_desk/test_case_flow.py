@@ -18,11 +18,11 @@ from kefu.case_desk.contracts import (
     SetCaseStatus,
     TextPart,
     TransferConsultant,
-    TransferDeveloper,
     TransferDevTeam,
 )
-from kefu.case_desk.errors import Conflict, Forbidden, RoutingUnavailable, ValidationError
+from kefu.case_desk.errors import Conflict, Forbidden, ValidationError
 from kefu.persistence.models import (
+    Case,
     CaseEntryKind,
     CaseStatus,
     Delivery,
@@ -49,7 +49,7 @@ def actor(context: DeskContext, name: str) -> Actor:
 def create_case(
     context: DeskContext,
     *,
-    developer: str = "dev_a",
+    dev_team: str = "dev_a",
     parts: tuple[TextPart | ImagePart, ...] | None = None,
     source_msgid: str | None = "inbound-create-1",
 ):
@@ -57,7 +57,7 @@ def create_case(
         CreateCase(
             title="登录失败",
             consult_queue_id=context.teams["consult"],
-            developer_id=context.users[developer],
+            dev_team_id=context.teams[dev_team],
             parts=parts or (TextPart("客户无法登录"),),
             source_msgid=source_msgid,
         ),
@@ -84,10 +84,16 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
             ImagePart(desk_context.media_id),
         ),
     )
+    with desk_context.session_factory() as session:
+        case_record = session.scalar(select(Case).where(Case.case_ref == result.case_ref))
+        assert case_record is not None
+        assert case_record.current_developer_id is None
     before = desk_context.desk.get_case(result.case_ref or "", actor(desk_context, "consult_a"))
     assert before.lifecycle_status is LifecycleStatus.OPEN
     assert before.status is CaseStatus.PENDING_CONFIRMATION
     assert before.waiting_on is WaitingOn.CONSULT
+    assert before.current_dev_team_name == "研发一组"
+    assert before.current_dev_team_lead_display_name == "一组负责人"
     assert [part.kind for part in before.entries[0].parts] == [
         PartKind.TEXT,
         PartKind.IMAGE,
@@ -110,7 +116,7 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
     content = adapter.sent[0].payload["content"]
     assert content == (
         "## 登录失败\n\n"
-        "> 指定经办人：研发甲\n\n"
+        "> 研发处理团队：研发一组\n\n"
         "**第一段文字\n第二段文字**\n\n\n"
         f"> 转发人：咨询甲  事件编号：{marker}"
     )
@@ -119,11 +125,12 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
     assert str(content).count(marker) == 1
 
 
-def test_developer_can_reply_without_becoming_current_handler(desk_context: DeskContext) -> None:
+def test_developer_reply_keeps_team_routing_and_lead_display(desk_context: DeskContext) -> None:
     created = create_case(desk_context)
     initial_adapter = deliver(desk_context)
     initial_content = initial_adapter.sent[0].payload["content"]
-    assert "> 指定经办人：研发甲" in str(initial_content)
+    assert "> 研发处理团队：研发一组" in str(initial_content)
+    assert "指定经办人" not in str(initial_content)
     assert "<@" not in str(initial_content)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
     posted = desk_context.desk.execute(
@@ -137,7 +144,8 @@ def test_developer_can_reply_without_becoming_current_handler(desk_context: Desk
     pending = desk_context.desk.get_case(posted.case_ref or "", actor(desk_context, "consult_a"))
     assert pending.waiting_on is WaitingOn.DEV
     assert pending.entries[-1].actor_name_snapshot == "研发乙"
-    assert pending.current_developer_id == desk_context.users["dev_a"]
+    assert pending.current_dev_team_name == "研发一组"
+    assert pending.current_dev_team_lead_display_name == "一组负责人"
 
     adapter = deliver(desk_context)
     finished = desk_context.desk.get_case(posted.case_ref or "", actor(desk_context, "consult_a"))
@@ -290,7 +298,7 @@ def test_consultant_transfer_notifies_new_handler_and_bound_consult_group(
     assert created.case_ref in group_notice
 
 
-def test_event_handlers_and_team_admins_can_transfer_within_each_team(
+def test_consultant_handover_requires_current_consultant_or_team_admin(
     desk_context: DeskContext,
 ) -> None:
     created = create_case(desk_context)
@@ -302,18 +310,11 @@ def test_event_handlers_and_team_admins_can_transfer_within_each_team(
         desk_context.users["consult_b"],
         desk_context.users["consult_admin"],
     }
-    assert {person.id for person in current.transferable_developers} == {
-        desk_context.users["dev_a"],
-        desk_context.users["dev_b"],
-        desk_context.users["dev_admin"],
-    }
-
     ordinary_consultant = desk_context.desk.get_case(
         created.case_ref or "", actor(desk_context, "consult_b")
     )
     assert ordinary_consultant.can_transfer is False
     assert ordinary_consultant.transferable_consultants == ()
-    assert ordinary_consultant.transferable_developers == ()
 
     with desk_context.session_factory() as session, session.begin():
         global_admin = session.get(User, desk_context.users["outsider"])
@@ -324,7 +325,6 @@ def test_event_handlers_and_team_admins_can_transfer_within_each_team(
     )
     assert global_admin_view.can_transfer is False
     assert global_admin_view.transferable_consultants == ()
-    assert global_admin_view.transferable_developers == ()
 
     with pytest.raises(Forbidden):
         desk_context.desk.execute(
@@ -338,12 +338,12 @@ def test_event_handlers_and_team_admins_can_transfer_within_each_team(
 
     with pytest.raises(Forbidden):
         desk_context.desk.execute(
-            TransferDeveloper(
+            TransferConsultant(
                 case_ref=created.case_ref or "",
                 expected_version=current.version,
-                new_developer_id=desk_context.users["dev_b"],
+                new_consultant_id=desk_context.users["consult_b"],
             ),
-            actor(desk_context, "dev_b"),
+            actor(desk_context, "dev_a"),
         )
 
     with pytest.raises(Forbidden):
@@ -356,19 +356,19 @@ def test_event_handlers_and_team_admins_can_transfer_within_each_team(
             actor(desk_context, "outsider"),
         )
 
-    developer_handler_transfer = desk_context.desk.execute(
+    consultant_transfer = desk_context.desk.execute(
         TransferConsultant(
             case_ref=created.case_ref or "",
             expected_version=current.version,
             new_consultant_id=desk_context.users["consult_b"],
         ),
-        actor(desk_context, "dev_a"),
+        actor(desk_context, "consult_a"),
     )
     consultant_admin_transfer = desk_context.desk.execute(
-        TransferDeveloper(
+        TransferConsultant(
             case_ref=created.case_ref or "",
-            expected_version=developer_handler_transfer.case_version or 0,
-            new_developer_id=desk_context.users["dev_b"],
+            expected_version=consultant_transfer.case_version or 0,
+            new_consultant_id=desk_context.users["consult_a"],
         ),
         actor(desk_context, "consult_admin"),
     )
@@ -376,7 +376,7 @@ def test_event_handlers_and_team_admins_can_transfer_within_each_team(
         TransferConsultant(
             case_ref=created.case_ref or "",
             expected_version=consultant_admin_transfer.case_version or 0,
-            new_consultant_id=desk_context.users["consult_a"],
+            new_consultant_id=desk_context.users["consult_b"],
         ),
         actor(desk_context, "dev_admin"),
     )
@@ -384,18 +384,7 @@ def test_event_handlers_and_team_admins_can_transfer_within_each_team(
         created.case_ref or "", actor(desk_context, "consult_b")
     )
     assert developer_admin_transfer.case_version == transferred.version
-    assert transferred.current_consultant_id == desk_context.users["consult_a"]
-    assert transferred.current_developer_id == desk_context.users["dev_b"]
-
-    with pytest.raises(RoutingUnavailable, match="不属于目标研发团队"):
-        desk_context.desk.execute(
-            TransferDeveloper(
-                case_ref=created.case_ref or "",
-                expected_version=transferred.version,
-                new_developer_id=desk_context.users["dev_c"],
-            ),
-            actor(desk_context, "consult_a"),
-        )
+    assert transferred.current_consultant_id == desk_context.users["consult_b"]
 
 
 def test_workflow_statuses_are_authorized_and_recorded_in_timeline(
@@ -546,7 +535,7 @@ def test_image_first_bundle_does_not_send_event_card(desk_context: DeskContext) 
     content = adapter.sent[0].payload["content"]
     assert content == (
         "## 登录失败\n\n"
-        "> 指定经办人：研发甲\n\n"
+        "> 研发处理团队：研发一组\n\n"
         "**图片后的补充说明**\n\n\n"
         f"> 转发人：咨询甲  事件编号：〔KF·{created.case_ref}〕"
     )
@@ -618,31 +607,17 @@ def test_overview_counts_visible_cases_by_lifecycle_and_waiting_side(
     assert outsider.closed_count == 0
 
 
-def test_developer_and_team_transfers_preserve_waiting_and_revoke_old_team(
+def test_dev_team_transfer_preserves_waiting_and_revokes_old_team(
     desk_context: DeskContext,
 ) -> None:
     created = create_case(desk_context)
     deliver(desk_context)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
-    moved_developer = desk_context.desk.execute(
-        TransferDeveloper(
-            case_ref=created.case_ref or "",
-            expected_version=current.version,
-            new_developer_id=desk_context.users["dev_b"],
-        ),
-        actor(desk_context, "consult_a"),
-    )
-    after_developer = desk_context.desk.get_case(
-        created.case_ref or "", actor(desk_context, "consult_a")
-    )
-    assert after_developer.current_developer_id == desk_context.users["dev_b"]
-    assert after_developer.waiting_on is WaitingOn.DEV
     desk_context.desk.execute(
         TransferDevTeam(
-            case_ref=moved_developer.case_ref or "",
-            expected_version=after_developer.version,
+            case_ref=created.case_ref or "",
+            expected_version=current.version,
             new_dev_team_id=desk_context.teams["dev_b"],
-            new_developer_id=desk_context.users["dev_c"],
         ),
         actor(desk_context, "consult_a"),
     )
@@ -650,7 +625,8 @@ def test_developer_and_team_transfers_preserve_waiting_and_revoke_old_team(
         desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
     transferred = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_c"))
     assert transferred.current_dev_team_id == desk_context.teams["dev_b"]
-    assert transferred.current_developer_id == desk_context.users["dev_c"]
+    assert transferred.current_dev_team_name == "研发二组"
+    assert transferred.current_dev_team_lead_display_name == "二组负责人"
     assert transferred.waiting_on is WaitingOn.DEV
 
 
@@ -713,7 +689,7 @@ def test_correction_is_append_only_and_copies_the_formal_message(desk_context: D
         CreateCase(
             title="另一个问题",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_c"],
+            dev_team_id=desk_context.teams["dev_b"],
             parts=(TextPart("正确事件的初始内容"),),
             source_msgid="target-message",
         ),

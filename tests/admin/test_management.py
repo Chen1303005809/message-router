@@ -56,6 +56,19 @@ def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
     assert created_team.status_code == 201
     team_id = UUID(created_team.json()["id"])
 
+    created_dev_team = client.post(
+        "/api/admin/teams",
+        headers=headers,
+        json={
+            "kind": "dev",
+            "name": "支付研发组",
+            "lead_display_name": "支付负责人",
+        },
+    )
+    assert created_dev_team.status_code == 201
+    assert created_dev_team.json()["lead_display_name"] == "支付负责人"
+    assert created_dev_team.json()["members"] == []
+
     membership = client.post(
         f"/api/admin/teams/{team_id}/members",
         headers=headers,
@@ -95,14 +108,20 @@ def test_global_admin_can_see_all_events_and_cannot_remove_last_admin(
 
     # The bootstrap identity is allowed to perform a cross-team setup action
     # without being added to a business team first.
-    created_team = admin.create_team(actor, kind=TeamKind.DEV, name="新研发组")
+    created_team = admin.create_team(
+        actor,
+        kind=TeamKind.DEV,
+        name="新研发组",
+        lead_display_name="新研发负责人",
+    )
     assert created_team.kind is TeamKind.DEV
+    assert created_team.lead_display_name == "新研发负责人"
 
     case = desk_context.desk.execute(
         CreateCase(
             title="总管理员可见性",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("内容"),),
         ),
         Actor(desk_context.users["consult_a"]),

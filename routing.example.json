@@ -10,7 +10,7 @@
   ],
   "teams": [
     {"key": "consult", "kind": "consult_queue", "name": "试点咨询队列"},
-    {"key": "platform", "kind": "dev", "name": "平台研发组"}
+    {"key": "platform", "kind": "dev", "name": "平台研发组", "lead_display_name": "研发负责人"}
   ],
   "memberships": [
     {"team": "consult", "wecom_userid": "consultant-a", "role": "admin"},

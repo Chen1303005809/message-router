@@ -59,7 +59,7 @@ def test_relay_runs_draft_to_group_reply_round_trip_with_idempotency(
         CreateCase(
             title="登录失败",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             draft_id=draft.draft_id,
         ),
         Actor(desk_context.users["consult_a"]),
@@ -120,7 +120,7 @@ def test_relay_rejects_unquoted_or_wrong_group_developer_reply(desk_context: Des
         CreateCase(
             title="群聊校验",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("请处理"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -161,7 +161,7 @@ def test_consult_group_selects_consult_side_for_dual_role_member(
         CreateCase(
             title="咨询群身份判定",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),

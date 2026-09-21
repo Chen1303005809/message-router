@@ -56,7 +56,7 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
         CreateCase(
             title="延迟被动回复实验",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -108,7 +108,7 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
     persisted_content = relay.get_delivery_markdown_content(decision.delivery_ids[0])
     assert persisted_content is not None
     assert reply == InboundReply(text=persisted_content)
-    assert "> 指定经办人：研发甲" in reply.text
+    assert "指定经办人" not in reply.text
     assert "转发人：咨询甲  事件编号：" in reply.text
     assert "@测试机器人" not in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
@@ -140,7 +140,7 @@ def test_inbound_loop_passively_replies_to_consult_group_after_developer_message
         CreateCase(
             title="咨询群被动回复",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -208,7 +208,7 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
         CreateCase(
             title="无引用延迟回复实验",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -256,7 +256,7 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
     decision = relay.handle(consultant_event)
     assert decision.delivery_ids
     assert reply.text == relay.get_delivery_markdown_content(decision.delivery_ids[0])
-    assert "> 指定经办人：研发甲" in reply.text
+    assert "指定经办人" not in reply.text
     assert "转发人：咨询甲  事件编号：" in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
@@ -292,7 +292,7 @@ def test_inbound_loop_restores_consult_group_push_when_passive_reply_fails(
         CreateCase(
             title="咨询群被动回复失败兜底",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -351,7 +351,7 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
         CreateCase(
             title="被动回复失败兜底",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -401,6 +401,6 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
         if message.destination_type is DeliveryDestination.CHAT
         and "content" in message.payload
     )
-    assert "> 指定经办人：研发甲" in str(group_markdown)
+    assert "指定经办人" not in str(group_markdown)
     assert "转发人：咨询甲  事件编号：" in str(group_markdown)
     assert parse_quoted_case_ref(str(group_markdown)) == created.case_ref

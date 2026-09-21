@@ -52,7 +52,7 @@ def test_h5_lists_events_renders_detail_and_posts_formal_message(desk_context: D
         CreateCase(
             title="H5 验收",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("初始内容"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -89,14 +89,14 @@ def test_h5_lists_events_renders_detail_and_posts_formal_message(desk_context: D
     assert updated.entries[-1].parts[0].text == "通过 H5 补充信息"
 
 
-def test_event_detail_shows_explicit_transfers_and_separated_deadline_controls(
+def test_event_detail_shows_consultant_handover_and_separated_deadline_controls(
     desk_context: DeskContext,
 ) -> None:
     created = desk_context.desk.execute(
         CreateCase(
             title="详情页转交验收",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("转交和期限管理验收"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -106,12 +106,20 @@ def test_event_detail_shows_explicit_transfers_and_separated_deadline_controls(
     detail = client.get(f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "consult-a"})
 
     assert detail.status_code == 200
-    assert 'aria-label="事件处理人转交"' in detail.text
+    assert 'aria-label="咨询经办人转交"' in detail.text
     assert 'name="new_consultant_id"' in detail.text
-    assert 'name="new_developer_id"' in detail.text
+    assert 'name="new_developer_id"' not in detail.text
     assert str(desk_context.users["consult_b"]) in detail.text
-    assert str(desk_context.users["dev_b"]) in detail.text
+    assert "研发团队负责人（仅显示）" in detail.text
+    assert "一组负责人" in detail.text
+    assert str(desk_context.users["dev_b"]) not in detail.text
     assert str(desk_context.users["dev_c"]) not in detail.text
+    api = client.get(
+        f"/api/events/{created.case_ref}", headers={"X-WeCom-UserId": "consult-a"}
+    )
+    assert api.status_code == 200
+    assert api.json()["current_dev_team_lead_display_name"] == "一组负责人"
+    assert "current_developer_name" not in api.json()
 
     assert "调整当前截止时间" in detail.text
     assert "设置临近期限提醒" in detail.text
@@ -138,7 +146,7 @@ def test_event_detail_shows_explicit_transfers_and_separated_deadline_controls(
     )
     assert updated.current_consultant_id == desk_context.users["consult_b"]
 
-    wrong_team_target = client.post(
+    removed_developer_transfer = client.post(
         f"/events/{created.case_ref}/transfer-developer",
         headers={"X-WeCom-UserId": "consult-b"},
         data={
@@ -147,7 +155,7 @@ def test_event_detail_shows_explicit_transfers_and_separated_deadline_controls(
         },
         follow_redirects=False,
     )
-    assert wrong_team_target.status_code == 409
+    assert removed_developer_transfer.status_code == 404
 
 
 def test_transfer_controls_are_hidden_from_ordinary_team_members(
@@ -157,7 +165,7 @@ def test_transfer_controls_are_hidden_from_ordinary_team_members(
         CreateCase(
             title="转交权限验收",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("检查转交权限"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -169,13 +177,13 @@ def test_transfer_controls_are_hidden_from_ordinary_team_members(
         f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "consult-b"}
     )
     assert ordinary_consultant.status_code == 200
-    assert 'aria-label="事件处理人转交"' not in ordinary_consultant.text
+    assert 'aria-label="咨询经办人转交"' not in ordinary_consultant.text
 
     current_developer = client.get(
         f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "dev-a"}
     )
     assert current_developer.status_code == 200
-    assert 'aria-label="事件处理人转交"' in current_developer.text
+    assert 'aria-label="咨询经办人转交"' not in current_developer.text
     developer_case = desk_context.desk.get_case(
         created.case_ref or "", Actor(desk_context.users["dev_a"])
     )
@@ -188,13 +196,13 @@ def test_transfer_controls_are_hidden_from_ordinary_team_members(
         },
         follow_redirects=False,
     )
-    assert developer_transfer.status_code == 303
+    assert developer_transfer.status_code == 404
 
     developer_admin = client.get(
         f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "dev-admin"}
     )
     assert developer_admin.status_code == 200
-    assert 'aria-label="事件处理人转交"' in developer_admin.text
+    assert 'aria-label="咨询经办人转交"' in developer_admin.text
 
 
 def test_h5_status_buttons_follow_permissions_and_update_timeline(
@@ -204,7 +212,7 @@ def test_h5_status_buttons_follow_permissions_and_update_timeline(
         CreateCase(
             title="状态流转验收",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("等待状态跟进"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -344,7 +352,7 @@ def test_h5_creates_case_from_draft_and_serves_authorized_image(desk_context: De
             "title": "网页创建事件",
             "customer_name": "测试客户",
             "consult_queue_id": str(desk_context.teams["consult"]),
-            "developer_id": str(desk_context.users["dev_a"]),
+            "dev_team_id": str(desk_context.teams["dev_a"]),
         },
         follow_redirects=False,
     )
@@ -375,6 +383,9 @@ def test_h5_homepage_creates_case_with_multiple_images(desk_context: DeskContext
     assert form.status_code == 200
     assert 'enctype="multipart/form-data"' in form.text
     assert 'name="images"' in form.text
+    assert 'name="dev_team_id"' in form.text
+    assert "研发一组（负责人：一组负责人）" in form.text
+    assert 'name="developer_id"' not in form.text
 
     created = client.post(
         "/events/new",
@@ -384,7 +395,7 @@ def test_h5_homepage_creates_case_with_multiple_images(desk_context: DeskContext
             "description": "客户登录后页面空白",
             "customer_name": "网页客户",
             "consult_queue_id": str(desk_context.teams["consult"]),
-            "developer_id": str(desk_context.users["dev_a"]),
+            "dev_team_id": str(desk_context.teams["dev_a"]),
             "priority": "normal",
         },
         files=[
@@ -453,7 +464,7 @@ def test_oauth_login_return_preserves_event_history_card_destination(
         CreateCase(
             title="OAuth 详情跳转",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("初始内容"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -489,7 +500,7 @@ def test_h5_preserves_a_reverse_proxy_mount_prefix(desk_context: DeskContext) ->
         CreateCase(
             title="代理路径验收",
             consult_queue_id=desk_context.teams["consult"],
-            developer_id=desk_context.users["dev_a"],
+            dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("初始内容"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -516,7 +527,7 @@ def test_h5_preserves_a_reverse_proxy_mount_prefix(desk_context: DeskContext) ->
             "description": "问题描述",
             "customer_name": "路径客户",
             "consult_queue_id": str(desk_context.teams["consult"]),
-            "developer_id": str(desk_context.users["dev_a"]),
+            "dev_team_id": str(desk_context.teams["dev_a"]),
         },
         follow_redirects=False,
     )

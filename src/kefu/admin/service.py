@@ -69,6 +69,7 @@ class ManagedTeamMember:
 class ManagedTeam:
     id: UUID
     name: str
+    lead_display_name: str | None
     kind: TeamKind
     active: bool
     channel_chatid: str | None
@@ -232,12 +233,22 @@ class Administration:
             session.flush()
             return self._user_view(session, user)
 
-    def create_team(self, actor: Actor, *, kind: TeamKind, name: str) -> ManagedTeam:
+    def create_team(
+        self,
+        actor: Actor,
+        *,
+        kind: TeamKind,
+        name: str,
+        lead_display_name: str | None = None,
+    ) -> ManagedTeam:
         try:
             kind = TeamKind(kind)
         except (TypeError, ValueError) as error:
             raise ValidationError("团队类型只能是咨询队列或研发责任团队") from error
         normalized_name = _team_name(name)
+        normalized_lead_name = (
+            _team_lead_display_name(lead_display_name) if kind is TeamKind.DEV else None
+        )
         with self._session_factory() as session, session.begin():
             self._assert_admin(session, actor)
             existing = session.scalar(
@@ -245,7 +256,13 @@ class Administration:
             )
             if existing is not None:
                 raise Conflict("同类型团队名称已经存在")
-            team = Team(id=uuid4(), kind=kind, name=normalized_name, active=True)
+            team = Team(
+                id=uuid4(),
+                kind=kind,
+                name=normalized_name,
+                lead_display_name=normalized_lead_name,
+                active=True,
+            )
             session.add(team)
             session.flush()
             return self._team_view(session, team)
@@ -256,10 +273,13 @@ class Administration:
         team_id: UUID,
         *,
         name: str | None = None,
+        lead_display_name: str | None = None,
         active: bool | None = None,
     ) -> ManagedTeam:
         if name is not None:
             name = _team_name(name)
+        if lead_display_name is not None:
+            lead_display_name = _team_lead_display_name(lead_display_name)
         if active is not None and not isinstance(active, bool):
             raise ValidationError("团队启用标识必须是布尔值")
         with self._session_factory() as session, session.begin():
@@ -278,6 +298,10 @@ class Administration:
                 if duplicate is not None:
                     raise Conflict("同类型团队名称已经存在")
                 team.name = name
+            if lead_display_name is not None:
+                if team.kind is not TeamKind.DEV:
+                    raise ValidationError("只有研发团队可以设置负责人展示名")
+                team.lead_display_name = lead_display_name
             if active is not None:
                 team.active = active
             session.flush()
@@ -447,6 +471,7 @@ class Administration:
         return ManagedTeam(
             id=team.id,
             name=team.name,
+            lead_display_name=team.lead_display_name,
             kind=team.kind,
             active=team.active,
             channel_chatid=channel.chatid if channel is not None else None,
@@ -513,4 +538,15 @@ def _team_name(name: str) -> str:
         raise ValidationError("团队名称不能为空")
     if len(normalized_name) > 256:
         raise ValidationError("团队名称不能超过 256 个字符")
+    return normalized_name
+
+
+def _team_lead_display_name(name: str | None) -> str:
+    if not isinstance(name, str):
+        raise ValidationError("研发团队负责人展示名不能为空")
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValidationError("研发团队负责人展示名不能为空")
+    if len(normalized_name) > 256:
+        raise ValidationError("研发团队负责人展示名不能超过 256 个字符")
     return normalized_name

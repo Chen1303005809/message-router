@@ -82,8 +82,18 @@ def desk_context() -> DeskContext:
         session.add_all(
             [
                 Team(id=teams["consult"], kind=TeamKind.CONSULT_QUEUE, name="咨询队列"),
-                Team(id=teams["dev_a"], kind=TeamKind.DEV, name="研发一组"),
-                Team(id=teams["dev_b"], kind=TeamKind.DEV, name="研发二组"),
+                Team(
+                    id=teams["dev_a"],
+                    kind=TeamKind.DEV,
+                    name="研发一组",
+                    lead_display_name="一组负责人",
+                ),
+                Team(
+                    id=teams["dev_b"],
+                    kind=TeamKind.DEV,
+                    name="研发二组",
+                    lead_display_name="二组负责人",
+                ),
             ]
         )
         memberships = [

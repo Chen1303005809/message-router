@@ -32,7 +32,8 @@ def build_formal_bundle(
     case_ref: str,
     case_title: str,
     speaker_name: str,
-    assignee_name: str,
+    assignee_name: str | None = None,
+    dev_team_name: str | None = None,
     parts: Iterable[SourcePart],
     side: EntrySide,
 ) -> tuple[RenderedDeliveryItem, ...]:
@@ -51,9 +52,14 @@ def build_formal_bundle(
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
     speaker_label = "转发人" if side is EntrySide.CONSULT else "发送人"
+    routing_details = ""
+    if side is EntrySide.CONSULT and dev_team_name:
+        routing_details = f"> 研发处理团队：{dev_team_name}\n\n"
+    elif side is EntrySide.DEV and assignee_name:
+        routing_details = f"> 指定经办人：{assignee_name}\n\n"
     content = (
         f"## {case_title}\n\n"
-        f"> 指定经办人：{assignee_name}\n\n"
+        f"{routing_details}"
         f"**{message_text}**\n\n\n"
         f"> {speaker_label}：{speaker_name}  事件编号：{marker}"
     )

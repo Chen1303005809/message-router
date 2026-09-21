@@ -42,7 +42,6 @@ from kefu.case_desk.contracts import (
     SetCaseStatus,
     TextPart,
     TransferConsultant,
-    TransferDeveloper,
     TransferDevTeam,
     UpdateCaseMetadata,
 )
@@ -323,6 +322,11 @@ def create_app(
                 actor,
                 kind=TeamKind(str(payload["kind"])),
                 name=_payload_text(payload, "name"),
+                lead_display_name=(
+                    _payload_text(payload, "lead_display_name")
+                    if "lead_display_name" in payload
+                    else None
+                ),
             )
             return JSONResponse(_managed_team_json(team), status_code=201)
         except (CaseDeskError, ValueError, KeyError) as error:
@@ -337,6 +341,11 @@ def create_app(
                 actor,
                 team_id,
                 name=_payload_text(payload, "name") if "name" in payload else None,
+                lead_display_name=(
+                    _payload_text(payload, "lead_display_name")
+                    if "lead_display_name" in payload
+                    else None
+                ),
                 active=_payload_bool(payload, "active") if "active" in payload else None,
             )
             return JSONResponse(_managed_team_json(team))
@@ -435,6 +444,7 @@ def create_app(
                 actor,
                 kind=TeamKind(_required(form, "kind")),
                 name=_required(form, "name"),
+                lead_display_name=_optional_form_text(form, "lead_display_name"),
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
@@ -451,6 +461,7 @@ def create_app(
                 actor,
                 team_id,
                 name=_required(form, "name"),
+                lead_display_name=_optional_form_text(form, "lead_display_name"),
                 active=form.get("active") == "on",
             )
         except (CaseDeskError, ValueError) as error:
@@ -600,16 +611,16 @@ def create_app(
         try:
             draft = desk.get_draft(draft_id, actor)
             queues = desk.list_consult_queues(actor)
-            developers = desk.list_developers(actor)
+            dev_teams = desk.list_dev_teams(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         queue_options = "".join(
             f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
         )
-        developer_options = "".join(
-            f'<option value="{developer.id}">{escape(developer.display_name)}'
-            f"（{escape(developer.wecom_userid)}）</option>"
-            for developer in developers
+        dev_team_options = "".join(
+            f'<option value="{team.id}">{escape(team.name)}'
+            f"（负责人：{escape(team.lead_display_name or '未配置')}）</option>"
+            for team in dev_teams
         )
         body = f"""
         <main class="create-main">
@@ -634,8 +645,9 @@ def create_app(
             </label>
             <div class="form-row">
               <label>咨询团队 <select name="consult_queue_id" required>{queue_options}</select></label>
-              <label>研发处理人 <select name="developer_id" required>{developer_options}</select></label>
+              <label>研发处理团队 <select name="dev_team_id" required>{dev_team_options}</select></label>
             </div>
+            <p class="muted">研发团队负责人姓名仅作展示，事件由团队共同处理，不会指定个人经办人。</p>
             <p class="muted">默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可由咨询处理人调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
@@ -654,7 +666,7 @@ def create_app(
                 CreateCase(
                     title=_required(form, "title"),
                     consult_queue_id=UUID(_required(form, "consult_queue_id")),
-                    developer_id=UUID(_required(form, "developer_id")),
+                    dev_team_id=UUID(_required(form, "dev_team_id")),
                     customer_name=_required(form, "customer_name"),
                     customer_contact_name=form.get("customer_contact_name"),
                     customer_contact_method=form.get("customer_contact_method"),
@@ -675,7 +687,7 @@ def create_app(
             return actor
         try:
             queues = desk.list_consult_queues(actor)
-            developers = desk.list_developers(actor)
+            dev_teams = desk.list_dev_teams(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         if not queues:
@@ -683,10 +695,10 @@ def create_app(
         queue_options = "".join(
             f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
         )
-        developer_options = "".join(
-            f'<option value="{developer.id}">{escape(developer.display_name)}'
-            f"（{escape(developer.wecom_userid)}）</option>"
-            for developer in developers
+        dev_team_options = "".join(
+            f'<option value="{team.id}">{escape(team.name)}'
+            f"（负责人：{escape(team.lead_display_name or '未配置')}）</option>"
+            for team in dev_teams
         )
         body = f"""
         <main class="create-main">
@@ -716,9 +728,10 @@ def create_app(
                 <option value="" disabled selected>选择咨询团队</option>{queue_options}
               </select></label>
             </div>
-            <label>研发处理人 <select name="developer_id" required>
-              <option value="" disabled selected>选择研发处理人</option>{developer_options}
+            <label>研发处理团队 <select name="dev_team_id" required>
+              <option value="" disabled selected>选择研发处理团队</option>{dev_team_options}
             </select></label>
+            <p class="muted">研发团队负责人姓名仅作展示，事件由团队共同处理，不会指定个人经办人。</p>
             <p class="muted">描述文字必填，图片可选。默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可在详情中调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
@@ -739,7 +752,7 @@ def create_app(
             customer_contact_name = _optional_form_text(form, "customer_contact_name")
             customer_contact_method = _optional_form_text(form, "customer_contact_method")
             consult_queue_id = UUID(_required_form_text(form, "consult_queue_id"))
-            developer_id = UUID(_required_form_text(form, "developer_id"))
+            dev_team_id = UUID(_required_form_text(form, "dev_team_id"))
             priority = CasePriority(_optional_form_text(form, "priority") or "normal")
             if len(title) > 512:
                 raise ValidationError("事件标题不能超过 512 个字符")
@@ -755,9 +768,9 @@ def create_app(
             queues = desk.list_consult_queues(actor)
             if consult_queue_id not in {queue.id for queue in queues}:
                 raise Forbidden("你不属于所选咨询团队")
-            developers = desk.list_developers(actor)
-            if developer_id not in {developer.id for developer in developers}:
-                raise Forbidden("所选研发处理人不可用")
+            dev_teams = desk.list_dev_teams(actor)
+            if dev_team_id not in {team.id for team in dev_teams}:
+                raise Forbidden("所选研发处理团队不可用")
 
             uploads: list[UploadFile] = []
             for item in form.getlist("images"):
@@ -785,7 +798,7 @@ def create_app(
                 CreateCase(
                     title=title,
                     consult_queue_id=consult_queue_id,
-                    developer_id=developer_id,
+                    dev_team_id=dev_team_id,
                     customer_name=customer_name,
                     customer_contact_name=customer_contact_name,
                     customer_contact_method=customer_contact_method,
@@ -862,7 +875,7 @@ def create_app(
               <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
               <div><span>当前咨询处理人</span><strong>{escape(case.current_consultant_name or '未指定')}</strong></div>
               <div><span>研发团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
-              <div><span>当前研发处理人</span><strong>{escape(case.current_developer_name or '未指定')}</strong></div>
+              <div><span>研发团队负责人（仅显示）</span><strong>{escape(case.current_dev_team_lead_display_name or '未配置')}</strong></div>
               <div><span>创建时间</span><strong>{_format_datetime(case.created_at)}</strong></div>
               <div><span>截止时间</span><strong>{_format_datetime(case.deadline)}</strong></div>
               <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
@@ -1058,25 +1071,6 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/transfer-developer", include_in_schema=False)
-    async def transfer_developer_page(request: Request, case_ref: str) -> RedirectResponse:
-        actor = page_actor_or_login(request)
-        if isinstance(actor, RedirectResponse):
-            return actor
-        form = await _urlencoded_form(request)
-        try:
-            desk.execute(
-                TransferDeveloper(
-                    case_ref=case_ref,
-                    expected_version=int(_required(form, "version")),
-                    new_developer_id=UUID(_required(form, "new_developer_id")),
-                ),
-                actor,
-            )
-        except (CaseDeskError, ValueError) as error:
-            raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
-
     @app.post("/api/events/{case_ref}/transfer-consultant")
     async def transfer_consultant(request: Request, case_ref: str) -> JSONResponse:
         actor = actor_or_error(request)
@@ -1094,35 +1088,16 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return JSONResponse({"case_ref": result.case_ref, "version": result.case_version})
 
-    @app.post("/api/events/{case_ref}/transfer-developer")
-    async def transfer_developer(request: Request, case_ref: str) -> JSONResponse:
-        actor = actor_or_error(request)
-        payload = await _json_object(request)
-        try:
-            result = desk.execute(
-                TransferDeveloper(
-                    case_ref=case_ref,
-                    expected_version=int(payload["version"]),
-                    new_developer_id=UUID(str(payload["new_developer_id"])),
-                ),
-                actor,
-            )
-        except (CaseDeskError, ValueError, KeyError) as error:
-            raise _http_error(_as_case_desk_error(error)) from error
-        return JSONResponse({"case_ref": result.case_ref, "version": result.case_version})
-
     @app.post("/api/events/{case_ref}/transfer-dev-team")
     async def transfer_dev_team(request: Request, case_ref: str) -> JSONResponse:
         actor = actor_or_error(request)
         payload = await _json_object(request)
         try:
-            developer_id = payload.get("new_developer_id")
             result = desk.execute(
                 TransferDevTeam(
                     case_ref=case_ref,
                     expected_version=int(payload["version"]),
                     new_dev_team_id=UUID(str(payload["new_dev_team_id"])),
-                    new_developer_id=UUID(str(developer_id)) if developer_id else None,
                 ),
                 actor,
             )
@@ -1234,6 +1209,7 @@ def _managed_team_json(team: ManagedTeam) -> dict[str, object]:
     return {
         "id": str(team.id),
         "name": team.name,
+        "lead_display_name": team.lead_display_name,
         "kind": team.kind.value,
         "active": team.active,
         "channel_chatid": team.channel_chatid,
@@ -1273,7 +1249,7 @@ def _admin_dashboard(
       <div>
         <div class="eyebrow">H5 事件管理中心</div>
         <h1>组织与授权</h1>
-        <p class="muted">总管理员：{escape(actor.user_id.hex[:8])} · 统一管理咨询处理人和研发处理人</p>
+        <p class="muted">总管理员：{escape(actor.user_id.hex[:8])} · 管理成员、团队与群聊路由</p>
       </div>
       <nav><a href="{events_path}">返回事件中心</a><a class="active" href="{admin_path}">管理设置</a></nav>
     </header>
@@ -1295,7 +1271,7 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">用企业微信 userid 建立登录身份。成员加入团队后，才能成为咨询处理人或研发处理人。</p>
+          <p class="panel-intro">用企业微信 userid 建立登录身份。咨询经办人必须属于咨询队列；研发事件归属整个研发团队，不单独指定个人经办人。</p>
           <form class="search-form" method="get" action="{admin_path}">
             <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>
@@ -1315,12 +1291,13 @@ def _admin_dashboard(
 
         <div class="panel" id="teams">
           <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>团队与授权</h2></div><span class="count-pill">{overview.team_count}</span></div>
-          <p class="panel-intro">咨询团队负责事件归属和咨询侧可见范围，并可绑定咨询群接收通知；研发团队负责研发处理人授权和研发群消息路由。</p>
+          <p class="panel-intro">咨询团队负责事件归属和咨询侧可见范围，并可绑定咨询群接收通知；研发团队负责事件路由和研发群消息转发，负责人姓名仅作展示，不关联成员账号。</p>
           <details class="add-box" open>
             <summary>＋ 新增团队</summary>
             <form method="post" action="{path_for('/admin/teams')}" class="form-grid team-create-form">
               <label>团队类型<select name="kind"><option value="consult_queue">{_team_kind_label(TeamKind.CONSULT_QUEUE)}</option><option value="dev">{_team_kind_label(TeamKind.DEV)}</option></select></label>
               <label>团队名称<input name="name" required maxlength="256" placeholder="例如 平台研发组"></label>
+              <label>研发负责人展示名<input name="lead_display_name" maxlength="256" placeholder="仅显示，不关联企业微信成员"></label>
               <button class="primary" type="submit">创建团队</button>
             </form>
           </details>
@@ -1381,6 +1358,12 @@ def _admin_team_card(
         f'<option value="{escape(str(user.id))}">{escape(user.display_name)}（{escape(user.wecom_userid)}）</option>'
         for user in users
     ) or '<option value="">请先添加在岗成员</option>'
+    lead_editor = (
+        f'<label>负责人展示名<input name="lead_display_name" maxlength="256" '
+        f'value="{escape(team.lead_display_name or "")}" placeholder="仅显示，不关联成员账号"></label>'
+        if team.kind is TeamKind.DEV
+        else ""
+    )
     channel = ""
     if team.kind in (TeamKind.DEV, TeamKind.CONSULT_QUEUE):
         chat_label = "研发群" if team.kind is TeamKind.DEV else "咨询群"
@@ -1403,6 +1386,7 @@ def _admin_team_card(
       <div class="team-header"><div><span class="eyebrow">{escape(team_badge)}</span><h3>{escape(team.name)}</h3></div>{status}</div>
       <form method="post" action="{path_for(f'/admin/teams/{team_id}')}" class="team-edit-form">
         <input name="name" required maxlength="256" value="{escape(team.name)}">
+        {lead_editor}
         <label class="check-label"><input type="checkbox" name="active"{checked}> 启用</label>
         <button class="subtle-button" type="submit">保存</button>
       </form>
@@ -2194,7 +2178,6 @@ def _transfer_controls(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_transfer:
         return ""
     consultant_action = path_for(f"/events/{escape(case.case_ref)}/transfer-consultant")
-    developer_action = path_for(f"/events/{escape(case.case_ref)}/transfer-developer")
     consultant_control = _transfer_person_control(
         case=case,
         action=consultant_action,
@@ -2205,24 +2188,13 @@ def _transfer_controls(case: Any, path_for: Callable[[str], str]) -> str:
         people=case.transferable_consultants,
         button_label="转交咨询处理人",
     )
-    developer_control = _transfer_person_control(
-        case=case,
-        action=developer_action,
-        field_name="new_developer_id",
-        heading="转交研发处理人",
-        team_name=case.current_dev_team_name,
-        current_id=case.current_developer_id,
-        people=case.transferable_developers,
-        button_label="转交研发处理人",
-    )
     return f"""
-    <section class="transfer-controls panel" aria-label="事件处理人转交">
-      <h2>事件处理人转交</h2>
-      <p class="transfer-controls-intro">只有当前事件处理人或双方团队管理员可以转交；
-        每个处理人只能转给其当前团队中的在岗成员。</p>
+    <section class="transfer-controls panel" aria-label="咨询经办人转交">
+      <h2>咨询经办人转交</h2>
+      <p class="transfer-controls-intro">当前咨询经办人、咨询队列管理员或研发团队管理员可以转交；
+        接收人必须是当前咨询队列中的在岗成员。</p>
       <div class="transfer-control-grid">
         {consultant_control}
-        {developer_control}
       </div>
     </section>
     """
@@ -2501,7 +2473,7 @@ def _case_json(case: Any) -> dict[str, Any]:
         "consult_queue_name": case.consult_queue_name,
         "current_consultant_name": case.current_consultant_name,
         "current_dev_team_name": case.current_dev_team_name,
-        "current_developer_name": case.current_developer_name,
+        "current_dev_team_lead_display_name": case.current_dev_team_lead_display_name,
         "can_edit_metadata": case.can_edit_metadata,
         "can_change_consult_status": case.can_change_consult_status,
         "can_accept_pending": case.can_accept_pending,

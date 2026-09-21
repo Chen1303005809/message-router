@@ -106,25 +106,20 @@ class DatabaseRoutingDirectory:
             raise Forbidden("只有事件中心总管理员可以管理组织和授权")
         return user
 
-    def route_developer(self, session: Session, developer_id: UUID) -> TeamChannel:
-        """Resolve exactly one active development team and its one active chat."""
-        self.get_user(session, developer_id)
-        now = utc_now()
-        valid_from, valid_until = self._current_membership_conditions(now)
-        rows = session.scalars(
+    def active_dev_teams(self, session: Session) -> list[Team]:
+        """Return active development teams with an initialized group route."""
+        return session.scalars(
             select(Team)
-            .join(TeamMembership, TeamMembership.team_id == Team.id)
+            .join(WeComChannel, WeComChannel.team_id == Team.id)
             .where(
-                TeamMembership.user_id == developer_id,
                 Team.kind == TeamKind.DEV,
                 Team.active.is_(True),
-                valid_from,
-                valid_until,
+                WeComChannel.active.is_(True),
+                WeComChannel.initialized_at.is_not(None),
             )
+            .distinct()
+            .order_by(Team.name.asc())
         ).all()
-        if len(rows) != 1:
-            raise RoutingUnavailable("研发人员没有唯一的有效责任团队")
-        return self.active_channel(session, rows[0].id)
 
     def active_channel(self, session: Session, team_id: UUID) -> TeamChannel:
         """Resolve the required active channel for a development team."""
@@ -312,16 +307,13 @@ class DatabaseRoutingDirectory:
         consult_current = actor_id == case.current_consultant_id and self.is_member(
             session, user_id=actor_id, team_id=case.consult_queue_id
         )
-        developer_current = actor_id == case.current_developer_id and self.is_member(
-            session, user_id=actor_id, team_id=case.current_dev_team_id
-        )
         consult_admin = self.is_admin(session, user_id=actor_id, team_id=case.consult_queue_id)
         developer_admin = self.is_admin(session, user_id=actor_id, team_id=case.current_dev_team_id)
-        return consult_current or developer_current or consult_admin or developer_admin
+        return consult_current or consult_admin or developer_admin
 
     def assert_case_transfer_authorized(self, session: Session, actor_id: UUID, case: Case) -> None:
         if not self.can_transfer_case(session, actor_id, case):
-            raise Forbidden("只有当前事件处理人或咨询队列、研发团队管理员可以转交")
+            raise Forbidden("只有当前咨询经办人或咨询队列、研发团队管理员可以转交")
 
     def active_members_in_team(
         self, session: Session, *, team_id: UUID, team_kind: TeamKind
@@ -342,13 +334,6 @@ class DatabaseRoutingDirectory:
             )
             .order_by(User.display_name.asc(), User.wecom_userid.asc())
         ).all()
-
-    def assert_developer_in_team(self, session: Session, developer_id: UUID, team_id: UUID) -> User:
-        self.get_team(session, team_id, kind=TeamKind.DEV)
-        developer = self.get_user(session, developer_id)
-        if not self.is_member(session, user_id=developer_id, team_id=team_id):
-            raise RoutingUnavailable("研发处理人不属于目标研发团队")
-        return developer
 
     def assert_consultant_in_queue(
         self, session: Session, consultant_id: UUID, queue_id: UUID
@@ -382,35 +367,6 @@ class DatabaseRoutingDirectory:
             )
             .order_by(Team.name.asc())
         ).all()
-
-    def list_active_developers(
-        self, session: Session, *, query: str = "", limit: int = 50
-    ) -> list[User]:
-        now = utc_now()
-        valid_from, valid_until = self._current_membership_conditions(now)
-        statement = (
-            select(User)
-            .join(TeamMembership, TeamMembership.user_id == User.id)
-            .join(Team, Team.id == TeamMembership.team_id)
-            .where(
-                User.active.is_(True),
-                Team.active.is_(True),
-                Team.kind == TeamKind.DEV,
-                valid_from,
-                valid_until,
-            )
-            .distinct()
-            .order_by(User.display_name.asc(), User.wecom_userid.asc())
-            .limit(max(1, min(limit, 100)))
-        )
-        normalized = query.strip()
-        if normalized:
-            pattern = f"%{normalized}%"
-            statement = statement.where(
-                or_(User.display_name.ilike(pattern), User.wecom_userid.ilike(pattern))
-            )
-        return session.scalars(statement).all()
-
 
 class ValidationErrorForDirectory(RoutingUnavailable):
     """A routing-specific invalid input that must remain fail-closed."""

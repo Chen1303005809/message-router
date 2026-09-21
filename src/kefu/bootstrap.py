@@ -112,12 +112,25 @@ def _upsert_teams(session: Session, values: Sequence[object]) -> dict[str, Team]
             kind = TeamKind(_string(item, "kind"))
         except ValueError as error:
             raise BootstrapConfigError(f"团队 {key} 的 kind 无效") from error
+        lead_display_name = (
+            _string(item, "lead_display_name") if kind is TeamKind.DEV else None
+        )
+        if lead_display_name is not None and len(lead_display_name) > 256:
+            raise BootstrapConfigError(f"团队 {key} 的负责人展示名不能超过 256 个字符")
         team = session.scalar(select(Team).where(Team.kind == kind, Team.name == name))
         if team is None:
-            team = Team(id=uuid4(), kind=kind, name=name, active=bool(item.get("active", True)))
+            team = Team(
+                id=uuid4(),
+                kind=kind,
+                name=name,
+                lead_display_name=lead_display_name,
+                active=bool(item.get("active", True)),
+            )
             session.add(team)
         else:
             team.active = bool(item.get("active", True))
+            if kind is TeamKind.DEV:
+                team.lead_display_name = lead_display_name
         result[key] = team
     return result
 

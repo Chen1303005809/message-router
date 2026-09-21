@@ -167,6 +167,9 @@ class Team(Base):
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     kind: Mapped[TeamKind] = mapped_column(enum_column(TeamKind))
     name: Mapped[str] = mapped_column(String(256))
+    # A development-team lead is informational text only. It intentionally
+    # does not reference a User or participate in case assignment/authorization.
+    lead_display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -260,6 +263,9 @@ class Case(Base):
     current_dev_team_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("teams.id"), index=True
     )
+    # Legacy nullable storage retained so existing databases can upgrade
+    # without discarding old assignment data. The application no longer reads
+    # or writes this field; new events belong to a development team only.
     current_developer_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )

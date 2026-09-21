@@ -50,7 +50,6 @@ from kefu.case_desk.contracts import (
     TeamOption,
     TextPart,
     TransferConsultant,
-    TransferDeveloper,
     TransferDevTeam,
     UpdateCaseMetadata,
     UserOption,
@@ -195,8 +194,6 @@ class CaseDesk:
                 return self._update_case_metadata(session, command, actor)
             if isinstance(command, TransferConsultant):
                 return self._transfer_consultant(session, command, actor)
-            if isinstance(command, TransferDeveloper):
-                return self._transfer_developer(session, command, actor)
             if isinstance(command, TransferDevTeam):
                 return self._transfer_dev_team(session, command, actor)
             if isinstance(command, CloseCase):
@@ -245,22 +242,6 @@ class CaseDesk:
                 if can_transfer
                 else ()
             )
-            transferable_developers = (
-                tuple(
-                    UserOption(
-                        id=user.id,
-                        display_name=user.display_name,
-                        wecom_userid=user.wecom_userid,
-                    )
-                    for user in self._directory.active_members_in_team(
-                        session,
-                        team_id=case.current_dev_team_id,
-                        team_kind=TeamKind.DEV,
-                    )
-                )
-                if can_transfer
-                else ()
-            )
             return self._case_view(
                 session,
                 case,
@@ -270,7 +251,6 @@ class CaseDesk:
                 can_extend_deadline=can_extend_deadline,
                 can_transfer=can_transfer,
                 transferable_consultants=transferable_consultants,
-                transferable_developers=transferable_developers,
             )
 
     def list_cases(self, case_filter: CaseFilter, viewer: Actor) -> Page:
@@ -305,12 +285,7 @@ class CaseDesk:
                     )
                 )
             if case_filter.assigned_to_me:
-                statement = statement.where(
-                    or_(
-                        Case.current_consultant_id == viewer.user_id,
-                        Case.current_developer_id == viewer.user_id,
-                    )
-                )
+                statement = statement.where(Case.current_consultant_id == viewer.user_id)
             cases = session.scalars(
                 statement.order_by(Case.updated_at.desc(), Case.case_ref.asc())
                 .offset(offset)
@@ -427,17 +402,18 @@ class CaseDesk:
             )
             return tuple(TeamOption(id=team.id, name=team.name) for team in teams)
 
-    def list_developers(self, viewer: Actor, *, query: str = "") -> tuple[UserOption, ...]:
+    def list_dev_teams(self, viewer: Actor) -> tuple[TeamOption, ...]:
+        """List routable development teams, including their display-only lead labels."""
         with self._session_factory() as session:
             self._directory.get_user(session, viewer.user_id)
-            users = self._directory.list_active_developers(session, query=query)
+            teams = self._directory.active_dev_teams(session)
             return tuple(
-                UserOption(
-                    id=user.id,
-                    display_name=user.display_name,
-                    wecom_userid=user.wecom_userid,
+                TeamOption(
+                    id=team.id,
+                    name=team.name,
+                    lead_display_name=team.lead_display_name,
                 )
-                for user in users
+                for team in teams
             )
 
     def get_media_access(self, case_ref: str, media_id: UUID, viewer: Actor) -> MediaAccess:
@@ -631,8 +607,10 @@ class CaseDesk:
                 self._directory.assert_case_visible(session, actor.user_id, existing_case)
                 return self._result(existing_case, existing.id, idempotent=True)
         self._assert_media_exists(session, parts)
-        channel = self._directory.route_developer(session, command.developer_id)
-        developer = self._directory.get_user(session, command.developer_id)
+        dev_team = self._directory.get_team(
+            session, command.dev_team_id, kind=TeamKind.DEV
+        )
+        channel = self._directory.active_channel(session, dev_team.id)
         title = self._validated_title(command.title, parts)
         customer_name = self._validated_customer_name(command.customer_name)
         related_case_id = self._validated_related_case(session, command.related_case_id)
@@ -655,7 +633,6 @@ class CaseDesk:
             consult_queue_id=command.consult_queue_id,
             current_consultant_id=actor.user_id,
             current_dev_team_id=channel.team_id,
-            current_developer_id=developer.id,
             creator_id=actor.user_id,
             related_case_id=related_case_id,
             version=1,
@@ -681,6 +658,7 @@ class CaseDesk:
             destination_type=DeliveryDestination.CHAT,
             destination_address=channel.chatid,
             waiting_on_after_delivery=WaitingOn.DEV,
+            dev_team_name=dev_team.name,
         )
         if command.draft_id is not None:
             draft = session.get(MessageDraft, command.draft_id)
@@ -971,39 +949,6 @@ class CaseDesk:
             )
         return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
 
-    def _transfer_developer(
-        self, session: Session, command: TransferDeveloper, actor: Actor
-    ) -> CommandResult:
-        case = self._load_case(session, command.case_ref, lock=True)
-        self._assert_expected_version(case, command.expected_version)
-        self._directory.assert_case_transfer_authorized(session, actor.user_id, case)
-        actor_user = self._directory.get_user(session, actor.user_id)
-        new_developer = self._directory.assert_developer_in_team(
-            session, command.new_developer_id, case.current_dev_team_id
-        )
-        if case.current_developer_id == new_developer.id:
-            raise ValidationError("该人员已经是当前研发处理人")
-        old_developer = self._user_name(session, case.current_developer_id)
-        case.current_developer_id = new_developer.id
-        case.version += 1
-        entry = self._append_entry(
-            session,
-            case=case,
-            kind=CaseEntryKind.TRANSFER_DEVELOPER,
-            side=EntrySide.SYSTEM,
-            actor_user=actor_user,
-            metadata={"from_developer": old_developer, "to_developer": new_developer.display_name},
-        )
-        delivery_id = self._create_notice_delivery(
-            session,
-            entry=entry,
-            case=case,
-            destination_type=DeliveryDestination.USER,
-            destination_address=new_developer.wecom_userid,
-            content="你已成为本事件的研发处理人，请查看事件中心。",
-        )
-        return self._result(case, entry.id, delivery_ids=(delivery_id,))
-
     def _transfer_dev_team(
         self, session: Session, command: TransferDevTeam, actor: Actor
     ) -> CommandResult:
@@ -1015,20 +960,10 @@ class CaseDesk:
             raise ValidationError("目标研发责任团队与当前团队相同")
         old_channel = self._directory.active_channel(session, case.current_dev_team_id)
         new_channel = self._directory.active_channel(session, command.new_dev_team_id)
-        new_developer_id: UUID | None = None
-        new_developer_name: str | None = None
-        if command.new_developer_id is not None:
-            new_developer = self._directory.assert_developer_in_team(
-                session, command.new_developer_id, command.new_dev_team_id
-            )
-            new_developer_id = new_developer.id
-            new_developer_name = new_developer.display_name
         old_team_id = case.current_dev_team_id
-        old_developer_name = self._user_name(session, case.current_developer_id)
         old_team = session.get(Team, old_team_id)
         new_team = session.get(Team, new_channel.team_id)
         case.current_dev_team_id = new_channel.team_id
-        case.current_developer_id = new_developer_id
         case.version += 1
         entry = self._append_entry(
             session,
@@ -1041,8 +976,6 @@ class CaseDesk:
                 "to_dev_team_id": str(new_channel.team_id),
                 "from_dev_team": old_team.name if old_team else "未知团队",
                 "to_dev_team": new_team.name if new_team else "未知团队",
-                "from_developer": old_developer_name,
-                "to_developer": new_developer_name,
             },
         )
         old_delivery = self._create_notice_delivery(
@@ -1059,10 +992,7 @@ class CaseDesk:
             case=case,
             destination_type=DeliveryDestination.CHAT,
             destination_address=new_channel.chatid,
-            content=(
-                "本事件已转入本团队。"
-                f"当前研发处理人：{new_developer_name or '尚未指定'}。请在事件中心查看完整时间线。"
-            ),
+            content="本事件已转入本团队，请在事件中心查看完整时间线。",
         )
         return self._result(case, entry.id, delivery_ids=(old_delivery, new_delivery))
 
@@ -1469,6 +1399,7 @@ class CaseDesk:
         destination_type: DeliveryDestination,
         destination_address: str,
         waiting_on_after_delivery: WaitingOn | None,
+        dev_team_name: str | None = None,
         delivery_status: DeliveryStatus = DeliveryStatus.PENDING,
         item_status: DeliveryItemStatus = DeliveryItemStatus.PENDING,
         item_platform_result: Mapping[str, object] | None = None,
@@ -1483,11 +1414,11 @@ class CaseDesk:
                 case_title=case.title,
                 speaker_name=_original_speaker_name(entry),
                 assignee_name=(
-                    self._user_name(session, case.current_developer_id)
-                    if entry.side is EntrySide.CONSULT
-                    else self._user_name(session, case.current_consultant_id)
-                )
-                or "未指定",
+                    self._user_name(session, case.current_consultant_id)
+                    if entry.side is EntrySide.DEV
+                    else None
+                ),
+                dev_team_name=dev_team_name,
                 parts=entry_parts,
                 side=entry.side,
             )
@@ -1804,7 +1735,6 @@ class CaseDesk:
         can_extend_deadline: bool = False,
         can_transfer: bool = False,
         transferable_consultants: tuple[UserOption, ...] = (),
-        transferable_developers: tuple[UserOption, ...] = (),
     ) -> CaseView:
         entries = session.scalars(
             select(CaseEntry).where(CaseEntry.case_id == case.id).order_by(CaseEntry.sequence.asc())
@@ -1840,6 +1770,7 @@ class CaseDesk:
             .where(CaseEntry.case_id == case.id)
             .order_by(Delivery.created_at.asc())
         ).all()
+        dev_team = session.get(Team, case.current_dev_team_id)
         now = utc_now()
         return CaseView(
             id=case.id,
@@ -1862,11 +1793,8 @@ class CaseDesk:
             current_consultant_id=case.current_consultant_id,
             current_consultant_name=self._user_name(session, case.current_consultant_id),
             current_dev_team_id=case.current_dev_team_id,
-            current_dev_team_name=(
-                team.name if (team := session.get(Team, case.current_dev_team_id)) else "未知团队"
-            ),
-            current_developer_id=case.current_developer_id,
-            current_developer_name=self._user_name(session, case.current_developer_id),
+            current_dev_team_name=dev_team.name if dev_team else "未知团队",
+            current_dev_team_lead_display_name=dev_team.lead_display_name if dev_team else None,
             created_at=_as_utc(case.created_at),
             updated_at=_as_utc(case.updated_at),
             version=case.version,
@@ -1876,7 +1804,6 @@ class CaseDesk:
             can_extend_deadline=can_extend_deadline,
             can_transfer=can_transfer,
             transferable_consultants=transferable_consultants,
-            transferable_developers=transferable_developers,
             entries=tuple(entry_views),
             deliveries=tuple(
                 DeliveryView(
@@ -1905,7 +1832,6 @@ class CaseDesk:
             approaching_window_minutes=case.approaching_window_minutes,
             deadline_status=_case_deadline_status(case),
             current_consultant_id=case.current_consultant_id,
-            current_developer_id=case.current_developer_id,
             updated_at=_as_utc(case.updated_at),
             version=case.version,
         )
