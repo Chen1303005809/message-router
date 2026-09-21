@@ -35,13 +35,10 @@ def build_formal_bundle(
     assignee_name: str,
     parts: Iterable[SourcePart],
     side: EntrySide,
-    history_url: str,
 ) -> tuple[RenderedDeliveryItem, ...]:
-    """Render a decorated, quoteable message, attachments, and history card.
+    """Render a decorated, quoteable message and its image attachments.
 
     The marker remains in ordinary message text for reliable reply association.
-    The template card provides an internal H5 navigation action without a
-    Markdown URL that WeCom may open in an external browser.
     """
     source_parts = tuple(parts)
     marker = format_case_marker(case_ref)
@@ -75,7 +72,6 @@ def build_formal_bundle(
                     payload={"media_id": str(source_part.media_id)},
                 )
             )
-    rendered.append(_history_card(case_ref, case_title, speaker_name, "发言人", history_url))
     return tuple(rendered)
 
 

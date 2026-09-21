@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
-from kefu.persistence.models import DeferredPassiveReply
+from kefu.persistence.models import DeferredPassiveReply, EntrySide
 from kefu.wecom.transport import InboundEvent
 
 DEFAULT_CLAIM_LEASE_SECONDS = 60.0
@@ -29,13 +29,22 @@ def _utc_now() -> datetime:
 class PendingPassiveReply:
     """A claimed callback context ready to be answered once."""
 
-    __slots__ = ("id", "case_ref", "req_id", "event", "expires_at", "claim_token")
+    __slots__ = (
+        "id",
+        "case_ref",
+        "origin_side",
+        "req_id",
+        "event",
+        "expires_at",
+        "claim_token",
+    )
 
     def __init__(
         self,
         *,
         id: UUID,
         case_ref: str | None,
+        origin_side: EntrySide | None,
         req_id: str,
         event: InboundEvent,
         expires_at: datetime,
@@ -43,6 +52,7 @@ class PendingPassiveReply:
     ) -> None:
         self.id = id
         self.case_ref = case_ref
+        self.origin_side = origin_side
         self.req_id = req_id
         self.event = event
         self.expires_at = expires_at
@@ -67,7 +77,13 @@ class DeferredPassiveReplyStore:
         self._ttl = timedelta(seconds=ttl_seconds)
         self._claim_lease = timedelta(seconds=claim_lease_seconds)
 
-    def save(self, event: InboundEvent, case_ref: str | None) -> PendingPassiveReply | None:
+    def save(
+        self,
+        event: InboundEvent,
+        case_ref: str | None,
+        *,
+        origin_side: EntrySide | None = None,
+    ) -> PendingPassiveReply | None:
         """Persist one callback context, returning ``None`` without a req_id."""
         raw_frame = _raw_frame(event)
         req_id = _callback_req_id(event)
@@ -79,6 +95,7 @@ class DeferredPassiveReplyStore:
         record = DeferredPassiveReply(
             id=uuid4(),
             case_ref=clean_case_ref,
+            origin_side=origin_side,
             req_id=req_id,
             msgid=event.msgid,
             raw_frame_json=raw_frame,
@@ -91,36 +108,44 @@ class DeferredPassiveReplyStore:
         return PendingPassiveReply(
             id=record.id,
             case_ref=clean_case_ref,
+            origin_side=origin_side,
             req_id=req_id,
             event=event,
             expires_at=expires_at,
             claim_token=None,
         )
 
-    def take(self, case_ref: str) -> PendingPassiveReply | None:
+    def take(
+        self, case_ref: str, *, origin_side: EntrySide | None = None
+    ) -> PendingPassiveReply | None:
         """Claim a case match, or the sole unkeyed callback if unambiguous."""
         now = _utc_now()
         clean_case_ref = case_ref.strip().upper()
         with self._session_factory() as session, session.begin():
             self._purge_expired(session, now)
             eligible = self._eligible(now)
-            record = session.scalar(
+            keyed = session.scalars(
                 select(DeferredPassiveReply)
                 .where(DeferredPassiveReply.case_ref == clean_case_ref, eligible)
                 .order_by(DeferredPassiveReply.created_at.asc())
-                .limit(1)
                 .with_for_update(skip_locked=True)
+            ).all()
+            record = next(
+                (row for row in keyed if _matches_origin_side(row, origin_side)),
+                None,
             )
             if record is None:
                 unkeyed = session.scalars(
                     select(DeferredPassiveReply)
                     .where(DeferredPassiveReply.case_ref.is_(None), eligible)
                     .order_by(DeferredPassiveReply.created_at.asc())
-                    .limit(2)
                     .with_for_update(skip_locked=True)
                 ).all()
-                if len(unkeyed) == 1:
-                    record = unkeyed[0]
+                matching_unkeyed = [
+                    row for row in unkeyed if _matches_origin_side(row, origin_side)
+                ]
+                if len(matching_unkeyed) == 1:
+                    record = matching_unkeyed[0]
             if record is None:
                 return None
             claim_token = uuid4()
@@ -161,26 +186,26 @@ class DeferredPassiveReplyStore:
                 record.claim_token = None
                 record.claimed_until = None
 
-    def has_match(self, case_ref: str) -> bool:
-        """Tell the worker whether a later consultant reply can release a callback."""
+    def has_match(
+        self, case_ref: str, *, origin_side: EntrySide | None = None
+    ) -> bool:
+        """Tell the worker whether a matching opposite-side callback is pending."""
         now = _utc_now()
         clean_case_ref = case_ref.strip().upper()
         with self._session_factory() as session, session.begin():
             self._purge_expired(session, now)
             eligible = self._eligible(now)
-            keyed = session.scalar(
-                select(DeferredPassiveReply.id)
+            keyed_records = session.scalars(
+                select(DeferredPassiveReply)
                 .where(DeferredPassiveReply.case_ref == clean_case_ref, eligible)
-                .limit(1)
-            )
-            if keyed is not None:
+            ).all()
+            if any(_matches_origin_side(row, origin_side) for row in keyed_records):
                 return True
             unkeyed = session.scalars(
-                select(DeferredPassiveReply.id)
+                select(DeferredPassiveReply)
                 .where(DeferredPassiveReply.case_ref.is_(None), eligible)
-                .limit(2)
             ).all()
-            return len(unkeyed) == 1
+            return len([row for row in unkeyed if _matches_origin_side(row, origin_side)]) == 1
 
     def purge_expired(self) -> int:
         """Remove callback contexts whose TTL has elapsed."""
@@ -200,6 +225,7 @@ class DeferredPassiveReplyStore:
         return PendingPassiveReply(
             id=record.id,
             case_ref=record.case_ref,
+            origin_side=record.origin_side,
             req_id=record.req_id,
             event=InboundEvent(
                 msgid=record.msgid,
@@ -225,6 +251,16 @@ class DeferredPassiveReplyStore:
             delete(DeferredPassiveReply).where(DeferredPassiveReply.expires_at <= now)
         )
         return int(result.rowcount or 0)
+
+
+def _matches_origin_side(
+    record: DeferredPassiveReply, origin_side: EntrySide | None
+) -> bool:
+    if origin_side is None or record.origin_side is origin_side:
+        return True
+    # Rows created before origin-side tracking came online were all developer
+    # group callbacks, so keep them eligible for that existing release path.
+    return origin_side is EntrySide.DEV and record.origin_side is None
 
 
 def _raw_frame(event: InboundEvent) -> dict[str, object] | None:

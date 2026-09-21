@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -136,6 +137,54 @@ def test_relay_rejects_unquoted_or_wrong_group_developer_reply(desk_context: Des
         )
     )
     assert wrong_group.disposition is RelayDisposition.REJECTED
+
+
+def test_consult_group_selects_consult_side_for_dual_role_member(
+    desk_context: DeskContext,
+) -> None:
+    with desk_context.session_factory() as session, session.begin():
+        session.add(
+            TeamMembership(
+                team_id=desk_context.teams["consult"],
+                user_id=desk_context.users["dev_a"],
+                role=MembershipRole.MEMBER,
+            )
+        )
+        session.add(
+            WeComChannel(
+                team_id=desk_context.teams["consult"],
+                chatid="chat-consult",
+                initialized_at=datetime.now(UTC),
+            )
+        )
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="咨询群身份判定",
+            consult_queue_id=desk_context.teams["consult"],
+            developer_id=desk_context.users["dev_a"],
+            parts=(TextPart("原始问题"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    relay = Relay(desk_context.session_factory, desk_context.desk)
+
+    decision = relay.handle(
+        InboundEvent(
+            msgid="dual-role-consult-group-reply",
+            sender_userid="dev-a",
+            chatid="chat-consult",
+            chattype="group",
+            parts=(InboundTextPart("咨询侧补充信息"),),
+            quote_content=f"〔KF·{created.case_ref}〕",
+            mentioned_bot=True,
+        )
+    )
+
+    assert decision.disposition is RelayDisposition.FORWARDED
+    case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["dev_a"])
+    )
+    assert case.entries[-1].side is EntrySide.CONSULT
 
 
 class BrokenObjectStorage:

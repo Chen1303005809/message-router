@@ -99,7 +99,11 @@ class Relay:
         self._draft_ttl = draft_ttl
 
     def handle(
-        self, event: InboundEvent, *, suppress_group_delivery: bool = False
+        self,
+        event: InboundEvent,
+        *,
+        suppress_group_delivery: bool = False,
+        suppress_consult_group_delivery: bool = False,
     ) -> RelayDecision:
         """Classify a callback exactly once and return a transport-neutral decision."""
         msgid = event.msgid.strip()
@@ -120,12 +124,26 @@ class Relay:
                     event, suppress_group_delivery=suppress_group_delivery
                 )
             elif event.chattype == "group":
-                decision = self._handle_group(event)
+                decision = self._handle_group(
+                    event,
+                    suppress_consult_group_delivery=suppress_consult_group_delivery,
+                )
             else:
                 decision = RelayDecision(RelayDisposition.IGNORED)
         except (CaseDeskError, MediaIngestError) as error:
             decision = RelayDecision(RelayDisposition.REJECTED, reply_text=str(error))
         return self._remember_decision(msgid, decision)
+
+    def group_side_for_chatid(self, chatid: str | None) -> EntrySide | None:
+        if not chatid:
+            return None
+        with self._session_factory() as session:
+            team_kind = self._directory.team_kind_for_chatid(session, chatid)
+        if team_kind is TeamKind.CONSULT_QUEUE:
+            return EntrySide.CONSULT
+        if team_kind is TeamKind.DEV:
+            return EntrySide.DEV
+        return None
 
     def _handle_single(
         self, event: InboundEvent, *, suppress_group_delivery: bool = False
@@ -162,7 +180,12 @@ class Relay:
             reply_text="已保存为消息草稿。请选择“创建新事件”或添加到已有事件。",
         )
 
-    def _handle_group(self, event: InboundEvent) -> RelayDecision:
+    def _handle_group(
+        self,
+        event: InboundEvent,
+        *,
+        suppress_consult_group_delivery: bool = False,
+    ) -> RelayDecision:
         if not event.mentioned_bot:
             return RelayDecision(RelayDisposition.IGNORED)
         if not event.chatid:
@@ -188,6 +211,9 @@ class Relay:
                 RelayDisposition.CHANNEL_BOUND,
                 reply_text=f"已将当前群绑定为研发团队「{team_name}」的沟通群。",
             )
+        side = self.group_side_for_chatid(event.chatid)
+        if side is None:
+            raise ValidationError("当前群聊尚未绑定为咨询队列或研发责任团队")
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
         case_ref = parse_quoted_case_ref(event.quote_content)
@@ -204,8 +230,9 @@ class Relay:
                 parts=parts,
                 intent=event.intent,
                 source_msgid=event.msgid,
-                side=EntrySide.DEV,
+                side=side,
                 origin_chatid=event.chatid,
+                suppress_consult_group_delivery=suppress_consult_group_delivery,
             ),
             Actor(sender),
         )

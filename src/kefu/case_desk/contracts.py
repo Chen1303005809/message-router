@@ -73,6 +73,13 @@ class CreateCase:
 
 
 @dataclass(frozen=True, slots=True)
+class AdjustCaseDeadline:
+    case_ref: str
+    expected_version: int
+    adjustment_minutes: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExtendCaseDeadline:
     case_ref: str
     expected_version: int
@@ -96,6 +103,7 @@ class PostFormalMessage:
     side: EntrySide | None = None
     origin_chatid: str | None = None
     suppress_delivery: bool = False
+    suppress_consult_group_delivery: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +180,7 @@ class DeliveryItemFailed:
 
 type Command = (
     CreateCase
+    | AdjustCaseDeadline
     | ExtendCaseDeadline
     | SetCaseApproachingWindow
     | PostFormalMessage

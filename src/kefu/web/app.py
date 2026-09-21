@@ -29,12 +29,12 @@ from kefu.admin.service import (
     initialize_global_admin,
 )
 from kefu.case_desk.contracts import (
+    AdjustCaseDeadline,
     Actor,
     CaseFilter,
     CloseCase,
     CreateCase,
     EntryView,
-    ExtendCaseDeadline,
     ImagePart,
     PostFormalMessage,
     ReopenCase,
@@ -618,20 +618,18 @@ def create_app(
             {_render_parts(draft.parts, None)}</section>
           <form class="panel create-form" method="post">
             <h2>事件信息</h2>
+            <label>事件标题 <input name="title" required maxlength="512"></label>
             <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
             <div class="form-row">
               <label>联系人（选填） <input name="customer_contact_name" maxlength="256"></label>
               <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" placeholder="电话、邮箱或其他联系方法"></label>
             </div>
-            <div class="form-row">
-              <label>紧急程度
-                <select name="priority">
-                  <option value="normal">普通</option><option value="urgent">紧急</option>
-                  <option value="severe">严重</option>
-                </select>
-              </label>
-              <label>事件标题 <input name="title" required maxlength="512"></label>
-            </div>
+            <label>紧急程度
+              <select name="priority">
+                <option value="normal">普通</option><option value="urgent">紧急</option>
+                <option value="severe">严重</option>
+              </select>
+            </label>
             <div class="form-row">
               <label>咨询团队 <select name="consult_queue_id" required>{queue_options}</select></label>
               <label>研发处理人 <select name="developer_id" required>{developer_options}</select></label>
@@ -923,20 +921,30 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
 
+    @app.post("/events/{case_ref}/deadline/adjust", include_in_schema=False)
     @app.post("/events/{case_ref}/deadline/extend", include_in_schema=False)
-    async def extend_event_deadline(request: Request, case_ref: str) -> RedirectResponse:
+    async def adjust_event_deadline(request: Request, case_ref: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
+            adjustment_field = (
+                "adjustment_hours" if "adjustment_hours" in form else "extension_hours"
+            )
+            adjustment_minutes = _half_hour_hours_to_minutes(
+                _required(form, adjustment_field), "调整时长"
+            )
+            direction = form.get("direction", "delay")
+            if direction == "advance":
+                adjustment_minutes = -adjustment_minutes
+            elif direction != "delay":
+                raise ValidationError("期限调整方向无效")
             desk.execute(
-                ExtendCaseDeadline(
+                AdjustCaseDeadline(
                     case_ref=case_ref,
                     expected_version=int(_required(form, "version")),
-                    extension_minutes=_half_hour_hours_to_minutes(
-                        _required(form, "extension_hours"), "延长期限"
-                    ),
+                    adjustment_minutes=adjustment_minutes,
                 ),
                 actor,
             )
@@ -2062,20 +2070,23 @@ def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
 def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_extend_deadline or case.lifecycle_status is LifecycleStatus.CLOSED:
         return ""
-    extend_action = path_for(f"/events/{escape(case.case_ref)}/deadline/extend")
+    adjust_action = path_for(f"/events/{escape(case.case_ref)}/deadline/adjust")
     approaching_action = path_for(f"/events/{escape(case.case_ref)}/deadline/approaching-window")
     approaching_hours = _hours_value(case.approaching_window_minutes)
     return f"""
     <section class="deadline-controls panel">
       <h2>期限管理</h2>
       <div class="deadline-control-grid">
-        <form method="post" action="{extend_action}">
+        <form method="post" action="{adjust_action}">
           <input type="hidden" name="version" value="{case.version}">
-          <label>延长时长（小时）
-            <input type="number" name="extension_hours" min="0.5" step="0.5" value="0.5" required>
+          <label>调整方向
+            <select name="direction"><option value="delay">延后</option><option value="advance">提前</option></select>
           </label>
-          <p class="muted">在当前截止时间基础上延长，按至少 30 分钟递增。</p>
-          <button class="primary" type="submit">延长截止时间</button>
+          <label>调整时长（小时）
+            <input type="number" name="adjustment_hours" min="0.5" step="0.5" value="0.5" required>
+          </label>
+          <p class="muted">相对当前截止时间提前或延后，按至少 30 分钟递增。</p>
+          <button class="primary" type="submit">调整截止时间</button>
         </form>
         <form method="post" action="{approaching_action}">
           <input type="hidden" name="version" value="{case.version}">

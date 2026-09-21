@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from kefu.case_desk.contracts import (
     SYSTEM_ACTOR,
     Actor,
+    AdjustCaseDeadline,
     CaseFilter,
     CaseOverview,
     CaseSummary,
@@ -136,6 +137,18 @@ def _validated_deadline_minutes(value: int, label: str) -> int:
     return value
 
 
+def _validated_deadline_adjustment_minutes(value: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value == 0
+        or abs(value) > MAX_DEADLINE_INCREMENT_MINUTES
+        or abs(value) % MIN_DEADLINE_INCREMENT_MINUTES != 0
+    ):
+        raise ValidationError("调整时长绝对值必须在30分钟到可设置上限之间，并按30分钟递增")
+    return value
+
+
 class CaseDesk:
     """Event service with the public shape ``execute/get_case/list_cases``.
 
@@ -170,8 +183,8 @@ class CaseDesk:
                 raise Forbidden("此操作需要已认证的人员身份")
             if isinstance(command, CreateCase):
                 return self._create_case(session, command, actor)
-            if isinstance(command, ExtendCaseDeadline):
-                return self._extend_case_deadline(session, command, actor)
+            if isinstance(command, (AdjustCaseDeadline, ExtendCaseDeadline)):
+                return self._adjust_case_deadline(session, command, actor)
             if isinstance(command, SetCaseApproachingWindow):
                 return self._set_case_approaching_window(session, command, actor)
             if isinstance(command, PostFormalMessage):
@@ -673,22 +686,34 @@ class CaseDesk:
         )
         return self._result(case, entry.id)
 
-    def _extend_case_deadline(
-        self, session: Session, command: ExtendCaseDeadline, actor: Actor
+    def _adjust_case_deadline(
+        self,
+        session: Session,
+        command: AdjustCaseDeadline | ExtendCaseDeadline,
+        actor: Actor,
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
         if case.lifecycle_status is not LifecycleStatus.OPEN:
             raise ValidationError("已关闭事件不能调整期限")
         self._assert_consult_deadline_access(session, actor.user_id, case)
-        extension_minutes = _validated_deadline_minutes(command.extension_minutes, "延长期限")
+        if isinstance(command, AdjustCaseDeadline):
+            adjustment_minutes = _validated_deadline_adjustment_minutes(
+                command.adjustment_minutes
+            )
+            action = "adjust_deadline"
+        else:
+            adjustment_minutes = _validated_deadline_minutes(
+                command.extension_minutes, "延长期限"
+            )
+            action = "extend_deadline"
         actor_user = self._directory.get_user(session, actor.user_id)
 
         old_deadline = _as_utc(case.deadline)
         try:
-            new_deadline = old_deadline + timedelta(minutes=extension_minutes)
+            new_deadline = old_deadline + timedelta(minutes=adjustment_minutes)
         except OverflowError as error:
-            raise ValidationError("延长期限超出可设置范围") from error
+            raise ValidationError("截止时间调整超出可设置范围") from error
         case.deadline = new_deadline
         case.version += 1
         entry = self._append_entry(
@@ -698,7 +723,7 @@ class CaseDesk:
             side=EntrySide.SYSTEM,
             actor_user=actor_user,
             metadata={
-                "action": "extend_deadline",
+                "action": action,
                 "changes": {
                     "deadline": {
                         "from": old_deadline.isoformat(),
@@ -755,6 +780,12 @@ class CaseDesk:
         )
         if command.suppress_delivery and side is not EntrySide.CONSULT:
             raise ValidationError("只有咨询侧群聊投递可以使用被动回复替代")
+        if command.suppress_consult_group_delivery and side is not EntrySide.DEV:
+            raise ValidationError("只有研发侧回复可以使用咨询群被动回复替代")
+        if side is EntrySide.CONSULT and command.origin_chatid is not None:
+            channel = self._directory.active_consult_channel(session, case.consult_queue_id)
+            if channel is None or channel.chatid != command.origin_chatid:
+                raise Forbidden("咨询正式回复必须来自当前咨询队列绑定的群聊")
         if side is EntrySide.DEV and command.origin_chatid is not None:
             channel = self._directory.active_channel(session, case.current_dev_team_id)
             if channel.chatid != command.origin_chatid:
@@ -808,6 +839,7 @@ class CaseDesk:
         if side is EntrySide.DEV:
             consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
             if consult_channel is not None:
+                defer_consult_channel = command.suppress_consult_group_delivery
                 delivery_ids.append(
                     self._create_formal_delivery(
                         session,
@@ -816,6 +848,19 @@ class CaseDesk:
                         destination_type=DeliveryDestination.CHAT,
                         destination_address=consult_channel.chatid,
                         waiting_on_after_delivery=None,
+                        delivery_status=(
+                            DeliveryStatus.SENT if defer_consult_channel else DeliveryStatus.PENDING
+                        ),
+                        item_status=(
+                            DeliveryItemStatus.SENT
+                            if defer_consult_channel
+                            else DeliveryItemStatus.PENDING
+                        ),
+                        item_platform_result=(
+                            {"delivery_mode": DEFERRED_PASSIVE_PENDING_MODE}
+                            if defer_consult_channel
+                            else None
+                        ),
                     )
                 )
         case.version += 1
@@ -1323,7 +1368,6 @@ class CaseDesk:
                 or "未指定",
                 parts=entry_parts,
                 side=entry.side,
-                history_url=f"{self._web_base_url}/events/{case.case_ref}",
             )
         except ValueError as error:
             raise ValidationError("去除 @ 提及后，正式消息必须保留文字内容") from error

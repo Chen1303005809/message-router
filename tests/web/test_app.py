@@ -320,10 +320,9 @@ def test_h5_preserves_a_reverse_proxy_mount_prefix(desk_context: DeskContext) ->
             .where(DeliveryItem.delivery_id == new_view.deliveries[0].id)
             .order_by(DeliveryItem.position)
         ).all()
-    history_card = delivery_items[-1].payload_json["template_card"]
-    assert history_card["jump_list"][0]["url"] == (
-        f"https://events.example.test/kefu/events/{new_ref}"
-    )
+    assert len(delivery_items) == 1
+    assert "template_card" not in delivery_items[0].payload_json
+    assert "content" in delivery_items[0].payload_json
 
     oauth_settings = settings(
         auth_mode="wecom_oauth", web_base_url="https://events.example.test/kefu"

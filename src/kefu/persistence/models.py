@@ -439,12 +439,21 @@ class DeferredPassiveReply(Base):
     __tablename__ = "deferred_passive_replies"
     __table_args__ = (
         Index("ix_deferred_passive_replies_case_expiry", "case_ref", "expires_at"),
+        Index(
+            "ix_deferred_passive_replies_side_expiry",
+            "case_ref",
+            "origin_side",
+            "expires_at",
+        ),
         Index("ix_deferred_passive_replies_expiry", "expires_at"),
         Index("ix_deferred_passive_replies_claim_token", "claim_token"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     case_ref: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    origin_side: Mapped[EntrySide | None] = mapped_column(
+        enum_column(EntrySide, length=16), nullable=True
+    )
     req_id: Mapped[str] = mapped_column(String(256))
     msgid: Mapped[str] = mapped_column(String(256))
     raw_frame_json: Mapped[dict[str, Any]] = mapped_column(JSON)

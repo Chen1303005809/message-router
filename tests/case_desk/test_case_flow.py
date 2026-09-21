@@ -98,38 +98,26 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
         PartKind.TEXT,
         PartKind.IMAGE,
         PartKind.IMAGE,
-        PartKind.TEXT,
     ]
+    assert all("template_card" not in message.payload for message in adapter.sent)
     marker = f"〔KF·{result.case_ref}〕"
     content = adapter.sent[0].payload["content"]
     assert content == (
         "## 登录失败\n\n"
-        "> *指定经办人：研发甲*\n\n"
-        "#### 反馈内容\n\n"
+        "> 指定经办人：研发甲\n\n"
         "**第一段文字\n第二段文字**\n\n\n"
-        f"转发人：咨询甲  事件编号：{marker}"
+        f"> 转发人：咨询甲  事件编号：{marker}"
     )
     assert "<@" not in str(content)
     assert parse_quoted_case_ref(str(content)) == result.case_ref
     assert str(content).count(marker) == 1
-    card = adapter.sent[-1].payload["template_card"]
-    assert card["main_title"]["title"] == "登录失败"
-    assert card["main_title"]["desc"] == "发言人：咨询甲"
-    assert marker in card["sub_title_text"]
-    assert card["jump_list"] == [
-        {
-            "type": 1,
-            "title": "查看事件历史",
-            "url": f"http://localhost:8000/events/{result.case_ref}",
-        }
-    ]
 
 
 def test_developer_can_reply_without_becoming_current_handler(desk_context: DeskContext) -> None:
     created = create_case(desk_context)
     initial_adapter = deliver(desk_context)
     initial_content = initial_adapter.sent[0].payload["content"]
-    assert "> *指定经办人：研发甲*" in str(initial_content)
+    assert "> 指定经办人：研发甲" in str(initial_content)
     assert "<@" not in str(initial_content)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
     posted = desk_context.desk.execute(
@@ -154,10 +142,9 @@ def test_developer_can_reply_without_becoming_current_handler(desk_context: Desk
     )
     assert response_content == (
         "## 登录失败\n\n"
-        "> *指定经办人：咨询甲*\n\n"
-        "#### 反馈内容\n\n"
+        "> 指定经办人：咨询甲\n\n"
         "**已定位到权限配置**\n\n\n"
-        f"发送人：研发乙  事件编号：〔KF·{created.case_ref}〕"
+        f"> 发送人：研发乙  事件编号：〔KF·{created.case_ref}〕"
     )
     assert "<@" not in str(response_content)
     assert parse_quoted_case_ref(str(response_content)) == created.case_ref
@@ -264,7 +251,7 @@ def test_versions_and_source_msgids_prevent_duplicate_business_entries(
         )
 
 
-def test_image_first_bundle_still_uses_one_event_card(desk_context: DeskContext) -> None:
+def test_image_first_bundle_does_not_send_event_card(desk_context: DeskContext) -> None:
     created = create_case(
         desk_context,
         parts=(ImagePart(desk_context.media_id), TextPart("图片后的补充说明")),
@@ -273,15 +260,14 @@ def test_image_first_bundle_still_uses_one_event_card(desk_context: DeskContext)
     assert [message.kind for message in adapter.sent] == [
         PartKind.TEXT,
         PartKind.IMAGE,
-        PartKind.TEXT,
     ]
+    assert all("template_card" not in message.payload for message in adapter.sent)
     content = adapter.sent[0].payload["content"]
     assert content == (
         "## 登录失败\n\n"
-        "> *指定经办人：研发甲*\n\n"
-        "#### 反馈内容\n\n"
+        "> 指定经办人：研发甲\n\n"
         "**图片后的补充说明**\n\n\n"
-        f"转发人：咨询甲  事件编号：〔KF·{created.case_ref}〕"
+        f"> 转发人：咨询甲  事件编号：〔KF·{created.case_ref}〕"
     )
     assert str(content).count(f"〔KF·{created.case_ref}〕") == 1
 
@@ -433,7 +419,7 @@ def test_partial_delivery_retry_does_not_repeat_successful_items(desk_context: D
         assert delivery is not None
         delivery.next_attempt_at -= timedelta(minutes=5)
     deliver(desk_context, adapter)
-    assert len(adapter.sent) == 3
+    assert len(adapter.sent) == 2
     assert [message.req_id for message in adapter.sent].count(adapter.sent[0].req_id) == 1
     final = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
     assert final.waiting_on is WaitingOn.DEV

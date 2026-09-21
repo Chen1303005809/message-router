@@ -18,6 +18,7 @@ from kefu.media.storage import (
     object_storage_from_settings,
 )
 from kefu.persistence.database import create_engine_from_url, create_session_factory
+from kefu.persistence.models import EntrySide
 from kefu.relay.delivery import DeliveryWorker
 from kefu.relay.handler import Relay, RelayDecision, RelayDisposition
 from kefu.relay.references import parse_quoted_case_ref
@@ -87,10 +88,17 @@ async def _inbound_loop(
 ) -> None:
     async for event in transport.events():
         try:
-            suppress_group_delivery = await asyncio.to_thread(
-                _should_suppress_group_delivery,
+            if event.chattype == "single":
+                origin_side = EntrySide.CONSULT
+            elif event.chattype == "group":
+                origin_side = relay.group_side_for_chatid(event.chatid)
+            else:
+                origin_side = None
+            suppress_group_delivery, suppress_consult_group_delivery = await asyncio.to_thread(
+                _deferred_delivery_suppression,
                 event=event,
                 deferred_replies=deferred_replies,
+                origin_side=origin_side,
             )
             # Database and object-store adapters are synchronous; do not stall
             # heartbeats while they write a draft or a formal entry.
@@ -98,6 +106,7 @@ async def _inbound_loop(
                 relay.handle,
                 event,
                 suppress_group_delivery=suppress_group_delivery,
+                suppress_consult_group_delivery=suppress_consult_group_delivery,
             )
         except Exception:
             logger.exception("relay failed for WeCom msgid=%s", event.msgid)
@@ -114,6 +123,7 @@ async def _inbound_loop(
             event=event,
             decision=decision,
             deferred_replies=deferred_replies,
+            origin_side=origin_side,
         )
         if pending is not None:
             logger.info(
@@ -135,7 +145,9 @@ async def _inbound_loop(
             deferred_replies=deferred_replies,
             transport=transport,
             relay=relay,
+            origin_side=origin_side,
             suppress_group_delivery=suppress_group_delivery,
+            suppress_consult_group_delivery=suppress_consult_group_delivery,
         )
 
 
@@ -144,45 +156,49 @@ def _defer_group_callback(
     event: InboundEvent,
     decision: RelayDecision,
     deferred_replies: DeferredPassiveReplyStore | None,
+    origin_side: EntrySide | None,
 ) -> PendingPassiveReply | None:
     if (
         deferred_replies is None
         or decision.idempotent
         or event.chattype != "group"
         or not event.mentioned_bot
+        or origin_side is None
     ):
         return None
     if decision.disposition is RelayDisposition.FORWARDED:
-        return deferred_replies.save(event, decision.case_ref)
+        return deferred_replies.save(event, decision.case_ref, origin_side=origin_side)
     if (
         decision.disposition is RelayDisposition.REJECTED
         and decision.reply_text == DEFERRED_QUOTE_ERROR
     ):
-        # The no-quote branch has no case_ref.  The store will only release it
-        # when it is the sole unkeyed callback, so this experiment never guesses
-        # between multiple unrelated group messages.
-        return deferred_replies.save(event, None)
+        # The no-quote branch has no case_ref. The store releases it only when
+        # exactly one unkeyed callback from this originating side is eligible.
+        return deferred_replies.save(event, None, origin_side=origin_side)
     return None
 
 
-def _should_suppress_group_delivery(
+def _deferred_delivery_suppression(
     *,
     event: InboundEvent,
     deferred_replies: DeferredPassiveReplyStore | None,
-) -> bool:
-    """Suppress only a consultant group delivery that has a saved callback target."""
+    origin_side: EntrySide | None,
+) -> tuple[bool, bool]:
+    """Return which active delivery is replaced by a matching passive callback."""
     if (
         deferred_replies is None
-        or event.chattype != "single"
+        or origin_side is None
         or not event.quote_content
         or any(isinstance(part, InboundImagePart) for part in event.parts)
     ):
-        return False
+        return False, False
     try:
         case_ref = parse_quoted_case_ref(event.quote_content)
     except CaseDeskError:
-        return False
-    return deferred_replies.has_match(case_ref)
+        return False, False
+    if origin_side is EntrySide.CONSULT:
+        return deferred_replies.has_match(case_ref, origin_side=EntrySide.DEV), False
+    return False, deferred_replies.has_match(case_ref, origin_side=EntrySide.CONSULT)
 
 
 async def _release_deferred_callback(
@@ -192,36 +208,50 @@ async def _release_deferred_callback(
     deferred_replies: DeferredPassiveReplyStore | None,
     transport: WeComTransport,
     relay: Relay,
+    origin_side: EntrySide | None,
     suppress_group_delivery: bool,
+    suppress_consult_group_delivery: bool,
 ) -> None:
     if (
         deferred_replies is None
         or decision.idempotent
         or decision.disposition is not RelayDisposition.FORWARDED
         or decision.case_ref is None
-        or event.chattype != "single"
+        or origin_side is None
     ):
         return
-    pending = await asyncio.to_thread(deferred_replies.take, decision.case_ref)
+    pending_origin_side = (
+        EntrySide.DEV if origin_side is EntrySide.CONSULT else EntrySide.CONSULT
+    )
+    pending = await asyncio.to_thread(
+        deferred_replies.take,
+        decision.case_ref,
+        origin_side=pending_origin_side,
+    )
+    deferred_delivery_ids = _deferred_delivery_ids(
+        decision.delivery_ids,
+        suppress_group_delivery=suppress_group_delivery,
+        suppress_consult_group_delivery=suppress_consult_group_delivery,
+    )
     if pending is None:
-        if suppress_group_delivery and decision.delivery_ids:
-            await _restore_deferred_deliveries(relay, decision.delivery_ids)
+        if deferred_delivery_ids:
+            await _restore_deferred_deliveries(relay, deferred_delivery_ids)
         return
     try:
         if not decision.delivery_ids:
-            raise RuntimeError("咨询正式消息缺少持久化投递，无法回复研发群")
+            raise RuntimeError("正式消息缺少持久化投递，无法执行被动回复")
         markdown_content = await asyncio.to_thread(
             relay.get_delivery_markdown_content, decision.delivery_ids[0]
         )
         if not isinstance(markdown_content, str) or not markdown_content.strip():
-            raise RuntimeError("咨询正式消息缺少 Markdown 正文，无法回复研发群")
+            raise RuntimeError("正式消息缺少 Markdown 正文，无法执行被动回复")
         await transport.reply(
             pending.event,
             InboundReply(text=markdown_content),
         )
     except Exception:
-        if suppress_group_delivery and decision.delivery_ids:
-            await _restore_deferred_deliveries(relay, decision.delivery_ids)
+        if deferred_delivery_ids:
+            await _restore_deferred_deliveries(relay, deferred_delivery_ids)
         await _acknowledge_deferred_reply(deferred_replies, pending)
         logger.exception(
             "failed to release deferred passive reply req_id=%s case_ref=%s",
@@ -229,9 +259,11 @@ async def _release_deferred_callback(
             pending.case_ref,
         )
     else:
-        if suppress_group_delivery and decision.delivery_ids:
+        if deferred_delivery_ids:
             try:
-                await asyncio.to_thread(relay.complete_deferred_deliveries, decision.delivery_ids)
+                await asyncio.to_thread(
+                    relay.complete_deferred_deliveries, deferred_delivery_ids
+                )
             except Exception:
                 # The passive reply has already reached WeCom. Keep the
                 # placeholder marked as sent rather than generating a second
@@ -246,6 +278,21 @@ async def _release_deferred_callback(
             pending.req_id,
             pending.case_ref,
         )
+
+
+def _deferred_delivery_ids(
+    delivery_ids: tuple[UUID, ...],
+    *,
+    suppress_group_delivery: bool,
+    suppress_consult_group_delivery: bool,
+) -> tuple[UUID, ...]:
+    if suppress_group_delivery:
+        return delivery_ids
+    if suppress_consult_group_delivery:
+        # The first delivery is the consultant DM; subsequent copies go to
+        # the optional consultation group and are the only items being deferred.
+        return delivery_ids[1:]
+    return ()
 
 
 async def _restore_deferred_deliveries(

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from kefu.case_desk.contracts import Actor, CreateCase, TextPart
-from kefu.persistence.models import DeliveryDestination
+from kefu.persistence.models import (
+    DeliveryDestination,
+    EntrySide,
+    MembershipRole,
+    TeamMembership,
+    WeComChannel,
+)
 from kefu.relay.delivery import DeliveryWorker
 from kefu.relay.handler import Relay
 from kefu.relay.references import parse_quoted_case_ref
@@ -101,13 +108,96 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
     persisted_content = relay.get_delivery_markdown_content(decision.delivery_ids[0])
     assert persisted_content is not None
     assert reply == InboundReply(text=persisted_content)
-    assert "> *指定经办人：研发甲*" in reply.text
+    assert "> 指定经办人：研发甲" in reply.text
     assert "转发人：咨询甲  事件编号：" in reply.text
     assert "@测试机器人" not in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
     assert all(
         message.destination_type is not DeliveryDestination.CHAT for message in transport.sent
+    )
+
+
+def test_inbound_loop_passively_replies_to_consult_group_after_developer_message(
+    desk_context: DeskContext,
+) -> None:
+    with desk_context.session_factory() as session, session.begin():
+        session.add(
+            TeamMembership(
+                team_id=desk_context.teams["consult"],
+                user_id=desk_context.users["dev_a"],
+                role=MembershipRole.MEMBER,
+            )
+        )
+        session.add(
+            WeComChannel(
+                team_id=desk_context.teams["consult"],
+                chatid="chat-consult",
+                initialized_at=datetime.now(UTC),
+            )
+        )
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="咨询群被动回复",
+            consult_queue_id=desk_context.teams["consult"],
+            developer_id=desk_context.users["dev_a"],
+            parts=(TextPart("原始问题"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    asyncio.run(DeliveryWorker(desk_context.desk, FakeWeComAdapter()).deliver_pending())
+    marker = f"〔KF·{created.case_ref}〕"
+    consult_group_event = InboundEvent(
+        msgid="consult-group-passive-callback",
+        sender_userid="dev-a",
+        chatid="chat-consult",
+        chattype="group",
+        parts=(InboundTextPart("咨询群补充情况"),),
+        quote_content=marker,
+        mentioned_bot=True,
+        metadata={"wecom_raw_frame": {"headers": {"req_id": "callback-consult-group-1"}}},
+    )
+    developer_event = InboundEvent(
+        msgid="developer-reply-to-consult-group",
+        sender_userid="dev-b",
+        chatid="chat-dev-a",
+        chattype="group",
+        parts=(InboundTextPart("研发已定位问题"),),
+        quote_content=marker,
+        mentioned_bot=True,
+        metadata={"wecom_raw_frame": {"headers": {"req_id": "callback-dev-group-1"}}},
+    )
+    transport = FakeWeComAdapter()
+    transport.push_inbound(consult_group_event)
+    transport.push_inbound(developer_event)
+    relay = Relay(desk_context.session_factory, desk_context.desk)
+    deferred_replies = DeferredPassiveReplyStore(desk_context.session_factory, ttl_seconds=60)
+
+    asyncio.run(
+        _inbound_loop(
+            relay=relay,
+            transport=transport,
+            web_base_url="https://events.example.test",
+            deferred_replies=deferred_replies,
+        )
+    )
+
+    assert len(transport.replies) == 1
+    replied_event, reply = transport.replies[0]
+    assert replied_event.msgid == consult_group_event.msgid
+    assert replied_event.metadata == consult_group_event.metadata
+    decision = relay.handle(developer_event)
+    assert decision.delivery_ids
+    assert reply.text == relay.get_delivery_markdown_content(decision.delivery_ids[0])
+    assert parse_quoted_case_ref(reply.text) == created.case_ref
+    assert deferred_replies.has_match(created.case_ref or "", origin_side=EntrySide.DEV)
+    asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
+    assert all(
+        not (
+            message.destination_type is DeliveryDestination.CHAT
+            and message.destination_address == "chat-consult"
+        )
+        for message in transport.sent
     )
 
 
@@ -166,7 +256,7 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
     decision = relay.handle(consultant_event)
     assert decision.delivery_ids
     assert reply.text == relay.get_delivery_markdown_content(decision.delivery_ids[0])
-    assert "> *指定经办人：研发甲*" in reply.text
+    assert "> 指定经办人：研发甲" in reply.text
     assert "转发人：咨询甲  事件编号：" in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
@@ -178,6 +268,80 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
 class FailingPassiveReplyAdapter(FakeWeComAdapter):
     async def reply(self, event: InboundEvent, reply: InboundReply):
         raise RuntimeError("planned passive reply failure")
+
+
+def test_inbound_loop_restores_consult_group_push_when_passive_reply_fails(
+    desk_context: DeskContext,
+) -> None:
+    with desk_context.session_factory() as session, session.begin():
+        session.add(
+            TeamMembership(
+                team_id=desk_context.teams["consult"],
+                user_id=desk_context.users["dev_a"],
+                role=MembershipRole.MEMBER,
+            )
+        )
+        session.add(
+            WeComChannel(
+                team_id=desk_context.teams["consult"],
+                chatid="chat-consult",
+                initialized_at=datetime.now(UTC),
+            )
+        )
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="咨询群被动回复失败兜底",
+            consult_queue_id=desk_context.teams["consult"],
+            developer_id=desk_context.users["dev_a"],
+            parts=(TextPart("原始问题"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    asyncio.run(DeliveryWorker(desk_context.desk, FakeWeComAdapter()).deliver_pending())
+    marker = f"〔KF·{created.case_ref}〕"
+    transport = FailingPassiveReplyAdapter()
+    transport.push_inbound(
+        InboundEvent(
+            msgid="consult-group-fallback-callback",
+            sender_userid="dev-a",
+            chatid="chat-consult",
+            chattype="group",
+            parts=(InboundTextPart("咨询侧补充信息"),),
+            quote_content=marker,
+            mentioned_bot=True,
+            metadata={"wecom_raw_frame": {"headers": {"req_id": "callback-consult-fallback"}}},
+        )
+    )
+    transport.push_inbound(
+        InboundEvent(
+            msgid="developer-consult-group-fallback",
+            sender_userid="dev-b",
+            chatid="chat-dev-a",
+            chattype="group",
+            parts=(InboundTextPart("研发侧处理结果"),),
+            quote_content=marker,
+            mentioned_bot=True,
+            metadata={"wecom_raw_frame": {"headers": {"req_id": "callback-dev-fallback"}}},
+        )
+    )
+    deferred_replies = DeferredPassiveReplyStore(desk_context.session_factory, ttl_seconds=60)
+
+    asyncio.run(
+        _inbound_loop(
+            relay=Relay(desk_context.session_factory, desk_context.desk),
+            transport=transport,
+            web_base_url="https://events.example.test",
+            deferred_replies=deferred_replies,
+        )
+    )
+
+    assert deferred_replies.has_match(created.case_ref or "", origin_side=EntrySide.DEV)
+    asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
+    assert any(
+        message.destination_type is DeliveryDestination.CHAT
+        and message.destination_address == "chat-consult"
+        for message in transport.sent
+    )
 
 
 def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
@@ -237,6 +401,6 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
         if message.destination_type is DeliveryDestination.CHAT
         and "content" in message.payload
     )
-    assert "> *指定经办人：研发甲*" in str(group_markdown)
+    assert "> 指定经办人：研发甲" in str(group_markdown)
     assert "转发人：咨询甲  事件编号：" in str(group_markdown)
     assert parse_quoted_case_ref(str(group_markdown)) == created.case_ref

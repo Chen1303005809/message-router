@@ -132,6 +132,22 @@ class DatabaseRoutingDirectory:
         assert channel is not None
         return channel
 
+    def team_kind_for_chatid(self, session: Session, chatid: str) -> TeamKind | None:
+        """Resolve an active bound group to its organization side."""
+        channel = session.scalar(
+            select(WeComChannel).where(
+                WeComChannel.chatid == chatid,
+                WeComChannel.active.is_(True),
+                WeComChannel.initialized_at.is_not(None),
+            )
+        )
+        if channel is None:
+            return None
+        team = session.get(Team, channel.team_id)
+        if team is None or not team.active:
+            return None
+        return team.kind
+
     def active_consult_channel(self, session: Session, queue_id: UUID) -> TeamChannel | None:
         """Resolve an optional active channel for a consultation queue.
 

@@ -1,6 +1,7 @@
 """The event desk's narrow public interface."""
 
 from kefu.case_desk.contracts import (
+    AdjustCaseDeadline,
     Actor,
     CaseFilter,
     CreateCase,
@@ -15,6 +16,7 @@ from kefu.case_desk.contracts import (
 from kefu.case_desk.service import CaseDesk
 
 __all__ = [
+    "AdjustCaseDeadline",
     "Actor",
     "CaseDesk",
     "DeadlineStatus",
