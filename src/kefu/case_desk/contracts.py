@@ -278,6 +278,9 @@ class CaseView:
     can_change_consult_status: bool
     can_accept_pending: bool
     can_extend_deadline: bool
+    can_transfer: bool
+    transferable_consultants: tuple[UserOption, ...]
+    transferable_developers: tuple[UserOption, ...]
     entries: tuple[EntryView, ...]
     deliveries: tuple[DeliveryView, ...]
 

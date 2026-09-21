@@ -228,6 +228,39 @@ class CaseDesk:
                 case.lifecycle_status is LifecycleStatus.OPEN
                 and self._has_consult_deadline_access(session, viewer.user_id, case)
             )
+            can_transfer = self._directory.can_transfer_case(session, viewer.user_id, case)
+            transferable_consultants = (
+                tuple(
+                    UserOption(
+                        id=user.id,
+                        display_name=user.display_name,
+                        wecom_userid=user.wecom_userid,
+                    )
+                    for user in self._directory.active_members_in_team(
+                        session,
+                        team_id=case.consult_queue_id,
+                        team_kind=TeamKind.CONSULT_QUEUE,
+                    )
+                )
+                if can_transfer
+                else ()
+            )
+            transferable_developers = (
+                tuple(
+                    UserOption(
+                        id=user.id,
+                        display_name=user.display_name,
+                        wecom_userid=user.wecom_userid,
+                    )
+                    for user in self._directory.active_members_in_team(
+                        session,
+                        team_id=case.current_dev_team_id,
+                        team_kind=TeamKind.DEV,
+                    )
+                )
+                if can_transfer
+                else ()
+            )
             return self._case_view(
                 session,
                 case,
@@ -235,6 +268,9 @@ class CaseDesk:
                 can_change_consult_status=can_change_consult_status,
                 can_accept_pending=can_accept_pending,
                 can_extend_deadline=can_extend_deadline,
+                can_transfer=can_transfer,
+                transferable_consultants=transferable_consultants,
+                transferable_developers=transferable_developers,
             )
 
     def list_cases(self, case_filter: CaseFilter, viewer: Actor) -> Page:
@@ -883,7 +919,7 @@ class CaseDesk:
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
-        self._directory.assert_consult_manager(session, actor.user_id, case)
+        self._directory.assert_case_transfer_authorized(session, actor.user_id, case)
         actor_user = self._directory.get_user(session, actor.user_id)
         new_consultant = self._directory.assert_consultant_in_queue(
             session, consultant_id=command.new_consultant_id, queue_id=case.consult_queue_id
@@ -922,7 +958,7 @@ class CaseDesk:
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
-        self._directory.assert_developer_transfer_authorized(session, actor.user_id, case)
+        self._directory.assert_case_transfer_authorized(session, actor.user_id, case)
         actor_user = self._directory.get_user(session, actor.user_id)
         new_developer = self._directory.assert_developer_in_team(
             session, command.new_developer_id, case.current_dev_team_id
@@ -955,7 +991,7 @@ class CaseDesk:
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
-        self._directory.assert_developer_transfer_authorized(session, actor.user_id, case)
+        self._directory.assert_case_transfer_authorized(session, actor.user_id, case)
         actor_user = self._directory.get_user(session, actor.user_id)
         if case.current_dev_team_id == command.new_dev_team_id:
             raise ValidationError("目标研发责任团队与当前团队相同")
@@ -1748,6 +1784,9 @@ class CaseDesk:
         can_change_consult_status: bool = False,
         can_accept_pending: bool = False,
         can_extend_deadline: bool = False,
+        can_transfer: bool = False,
+        transferable_consultants: tuple[UserOption, ...] = (),
+        transferable_developers: tuple[UserOption, ...] = (),
     ) -> CaseView:
         entries = session.scalars(
             select(CaseEntry).where(CaseEntry.case_id == case.id).order_by(CaseEntry.sequence.asc())
@@ -1817,6 +1856,9 @@ class CaseDesk:
             can_change_consult_status=can_change_consult_status,
             can_accept_pending=can_accept_pending,
             can_extend_deadline=can_extend_deadline,
+            can_transfer=can_transfer,
+            transferable_consultants=transferable_consultants,
+            transferable_developers=transferable_developers,
             entries=tuple(entry_views),
             deliveries=tuple(
                 DeliveryView(

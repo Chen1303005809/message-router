@@ -308,21 +308,40 @@ class DatabaseRoutingDirectory:
             return
         raise Forbidden("只有当前咨询经办人或咨询队列管理员可以执行此操作")
 
-    def assert_developer_transfer_authorized(
-        self, session: Session, actor_id: UUID, case: Case
-    ) -> None:
-        if self.is_global_admin(session, actor_id):
-            return
+    def can_transfer_case(self, session: Session, actor_id: UUID, case: Case) -> bool:
         consult_current = actor_id == case.current_consultant_id and self.is_member(
             session, user_id=actor_id, team_id=case.consult_queue_id
         )
         developer_current = actor_id == case.current_developer_id and self.is_member(
             session, user_id=actor_id, team_id=case.current_dev_team_id
         )
-        team_admin = self.is_admin(session, user_id=actor_id, team_id=case.current_dev_team_id)
-        if consult_current or developer_current or team_admin:
-            return
-        raise Forbidden("只有当前经办人或研发团队管理员可以转交研发")
+        consult_admin = self.is_admin(session, user_id=actor_id, team_id=case.consult_queue_id)
+        developer_admin = self.is_admin(session, user_id=actor_id, team_id=case.current_dev_team_id)
+        return consult_current or developer_current or consult_admin or developer_admin
+
+    def assert_case_transfer_authorized(self, session: Session, actor_id: UUID, case: Case) -> None:
+        if not self.can_transfer_case(session, actor_id, case):
+            raise Forbidden("只有当前事件处理人或咨询队列、研发团队管理员可以转交")
+
+    def active_members_in_team(
+        self, session: Session, *, team_id: UUID, team_kind: TeamKind
+    ) -> list[User]:
+        now = utc_now()
+        valid_from, valid_until = self._current_membership_conditions(now)
+        return session.scalars(
+            select(User)
+            .join(TeamMembership, TeamMembership.user_id == User.id)
+            .join(Team, Team.id == TeamMembership.team_id)
+            .where(
+                TeamMembership.team_id == team_id,
+                Team.kind == team_kind,
+                Team.active.is_(True),
+                User.active.is_(True),
+                valid_from,
+                valid_until,
+            )
+            .order_by(User.display_name.asc(), User.wecom_userid.asc())
+        ).all()
 
     def assert_developer_in_team(self, session: Session, developer_id: UUID, team_id: UUID) -> User:
         self.get_team(session, team_id, kind=TeamKind.DEV)
@@ -336,8 +355,6 @@ class DatabaseRoutingDirectory:
     ) -> User:
         self.get_team(session, queue_id, kind=TeamKind.CONSULT_QUEUE)
         consultant = self.get_user(session, consultant_id)
-        if self.is_global_admin(session, consultant_id):
-            return consultant
         if not self.is_member(session, user_id=consultant_id, team_id=queue_id):
             raise RoutingUnavailable("咨询经办人不属于目标咨询队列")
         return consultant

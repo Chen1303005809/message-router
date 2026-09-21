@@ -21,7 +21,7 @@ from kefu.case_desk.contracts import (
     TransferDeveloper,
     TransferDevTeam,
 )
-from kefu.case_desk.errors import Conflict, Forbidden, ValidationError
+from kefu.case_desk.errors import Conflict, Forbidden, RoutingUnavailable, ValidationError
 from kefu.persistence.models import (
     CaseEntryKind,
     CaseStatus,
@@ -31,6 +31,7 @@ from kefu.persistence.models import (
     LifecycleStatus,
     MessageIntent,
     PartKind,
+    User,
     WaitingOn,
 )
 from kefu.relay.delivery import DeliveryWorker
@@ -230,6 +231,114 @@ def test_handover_keeps_timeline_and_close_requires_consult_authority(
     assert closed.lifecycle_status is LifecycleStatus.CLOSED
     assert closed.status is CaseStatus.CLOSED
     assert closed.waiting_on is WaitingOn.NONE
+
+
+def test_event_handlers_and_team_admins_can_transfer_within_each_team(
+    desk_context: DeskContext,
+) -> None:
+    created = create_case(desk_context)
+    current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
+
+    assert current.can_transfer is True
+    assert {person.id for person in current.transferable_consultants} == {
+        desk_context.users["consult_a"],
+        desk_context.users["consult_b"],
+        desk_context.users["consult_admin"],
+    }
+    assert {person.id for person in current.transferable_developers} == {
+        desk_context.users["dev_a"],
+        desk_context.users["dev_b"],
+        desk_context.users["dev_admin"],
+    }
+
+    ordinary_consultant = desk_context.desk.get_case(
+        created.case_ref or "", actor(desk_context, "consult_b")
+    )
+    assert ordinary_consultant.can_transfer is False
+    assert ordinary_consultant.transferable_consultants == ()
+    assert ordinary_consultant.transferable_developers == ()
+
+    with desk_context.session_factory() as session, session.begin():
+        global_admin = session.get(User, desk_context.users["outsider"])
+        assert global_admin is not None
+        global_admin.is_global_admin = True
+    global_admin_view = desk_context.desk.get_case(
+        created.case_ref or "", actor(desk_context, "outsider")
+    )
+    assert global_admin_view.can_transfer is False
+    assert global_admin_view.transferable_consultants == ()
+    assert global_admin_view.transferable_developers == ()
+
+    with pytest.raises(Forbidden):
+        desk_context.desk.execute(
+            TransferConsultant(
+                case_ref=created.case_ref or "",
+                expected_version=current.version,
+                new_consultant_id=desk_context.users["consult_b"],
+            ),
+            actor(desk_context, "consult_b"),
+        )
+
+    with pytest.raises(Forbidden):
+        desk_context.desk.execute(
+            TransferDeveloper(
+                case_ref=created.case_ref or "",
+                expected_version=current.version,
+                new_developer_id=desk_context.users["dev_b"],
+            ),
+            actor(desk_context, "dev_b"),
+        )
+
+    with pytest.raises(Forbidden):
+        desk_context.desk.execute(
+            TransferConsultant(
+                case_ref=created.case_ref or "",
+                expected_version=current.version,
+                new_consultant_id=desk_context.users["consult_b"],
+            ),
+            actor(desk_context, "outsider"),
+        )
+
+    developer_handler_transfer = desk_context.desk.execute(
+        TransferConsultant(
+            case_ref=created.case_ref or "",
+            expected_version=current.version,
+            new_consultant_id=desk_context.users["consult_b"],
+        ),
+        actor(desk_context, "dev_a"),
+    )
+    consultant_admin_transfer = desk_context.desk.execute(
+        TransferDeveloper(
+            case_ref=created.case_ref or "",
+            expected_version=developer_handler_transfer.case_version or 0,
+            new_developer_id=desk_context.users["dev_b"],
+        ),
+        actor(desk_context, "consult_admin"),
+    )
+    developer_admin_transfer = desk_context.desk.execute(
+        TransferConsultant(
+            case_ref=created.case_ref or "",
+            expected_version=consultant_admin_transfer.case_version or 0,
+            new_consultant_id=desk_context.users["consult_a"],
+        ),
+        actor(desk_context, "dev_admin"),
+    )
+    transferred = desk_context.desk.get_case(
+        created.case_ref or "", actor(desk_context, "consult_b")
+    )
+    assert developer_admin_transfer.case_version == transferred.version
+    assert transferred.current_consultant_id == desk_context.users["consult_a"]
+    assert transferred.current_developer_id == desk_context.users["dev_b"]
+
+    with pytest.raises(RoutingUnavailable, match="不属于目标研发团队"):
+        desk_context.desk.execute(
+            TransferDeveloper(
+                case_ref=created.case_ref or "",
+                expected_version=transferred.version,
+                new_developer_id=desk_context.users["dev_c"],
+            ),
+            actor(desk_context, "consult_a"),
+        )
 
 
 def test_workflow_statuses_are_authorized_and_recorded_in_timeline(

@@ -50,6 +50,7 @@ def desk_context() -> DeskContext:
             "dev_a",
             "dev_b",
             "dev_c",
+            "dev_admin",
             "outsider",
         )
     }
@@ -70,6 +71,11 @@ def desk_context() -> DeskContext:
                 User(id=users["dev_a"], wecom_userid="dev-a", display_name="研发甲"),
                 User(id=users["dev_b"], wecom_userid="dev-b", display_name="研发乙"),
                 User(id=users["dev_c"], wecom_userid="dev-c", display_name="研发丙"),
+                User(
+                    id=users["dev_admin"],
+                    wecom_userid="dev-admin",
+                    display_name="研发管理员",
+                ),
                 User(id=users["outsider"], wecom_userid="outsider", display_name="外部人员"),
             ]
         )
@@ -86,6 +92,7 @@ def desk_context() -> DeskContext:
             ("consult", "consult_admin", MembershipRole.ADMIN),
             ("dev_a", "dev_a", MembershipRole.MEMBER),
             ("dev_a", "dev_b", MembershipRole.MEMBER),
+            ("dev_a", "dev_admin", MembershipRole.ADMIN),
             ("dev_b", "dev_c", MembershipRole.MEMBER),
         ]
         session.add_all(

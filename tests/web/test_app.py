@@ -89,6 +89,114 @@ def test_h5_lists_events_renders_detail_and_posts_formal_message(desk_context: D
     assert updated.entries[-1].parts[0].text == "通过 H5 补充信息"
 
 
+def test_event_detail_shows_explicit_transfers_and_separated_deadline_controls(
+    desk_context: DeskContext,
+) -> None:
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="详情页转交验收",
+            consult_queue_id=desk_context.teams["consult"],
+            developer_id=desk_context.users["dev_a"],
+            parts=(TextPart("转交和期限管理验收"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    app = create_app(session_factory=desk_context.session_factory, settings=settings())
+    client = TestClient(app)
+    detail = client.get(f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "consult-a"})
+
+    assert detail.status_code == 200
+    assert 'aria-label="事件处理人转交"' in detail.text
+    assert 'name="new_consultant_id"' in detail.text
+    assert 'name="new_developer_id"' in detail.text
+    assert str(desk_context.users["consult_b"]) in detail.text
+    assert str(desk_context.users["dev_b"]) in detail.text
+    assert str(desk_context.users["dev_c"]) not in detail.text
+
+    assert "调整当前截止时间" in detail.text
+    assert "设置临近期限提醒" in detail.text
+    assert "应用截止时间调整" in detail.text
+    assert "保存提醒设置" in detail.text
+    assert "此操作只改变截止时间，不会改变临近期限提醒设置。" in detail.text
+    assert "此操作只改变临近期限提醒设置，不会调整截止时间。" in detail.text
+
+    current = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_a"])
+    )
+    response = client.post(
+        f"/events/{created.case_ref}/transfer-consultant",
+        headers={"X-WeCom-UserId": "consult-a"},
+        data={
+            "version": str(current.version),
+            "new_consultant_id": str(desk_context.users["consult_b"]),
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    updated = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_b"])
+    )
+    assert updated.current_consultant_id == desk_context.users["consult_b"]
+
+    wrong_team_target = client.post(
+        f"/events/{created.case_ref}/transfer-developer",
+        headers={"X-WeCom-UserId": "consult-b"},
+        data={
+            "version": str(updated.version),
+            "new_developer_id": str(desk_context.users["dev_c"]),
+        },
+        follow_redirects=False,
+    )
+    assert wrong_team_target.status_code == 409
+
+
+def test_transfer_controls_are_hidden_from_ordinary_team_members(
+    desk_context: DeskContext,
+) -> None:
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="转交权限验收",
+            consult_queue_id=desk_context.teams["consult"],
+            developer_id=desk_context.users["dev_a"],
+            parts=(TextPart("检查转交权限"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    app = create_app(session_factory=desk_context.session_factory, settings=settings())
+    client = TestClient(app)
+
+    ordinary_consultant = client.get(
+        f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "consult-b"}
+    )
+    assert ordinary_consultant.status_code == 200
+    assert 'aria-label="事件处理人转交"' not in ordinary_consultant.text
+
+    current_developer = client.get(
+        f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "dev-a"}
+    )
+    assert current_developer.status_code == 200
+    assert 'aria-label="事件处理人转交"' in current_developer.text
+    developer_case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["dev_a"])
+    )
+    developer_transfer = client.post(
+        f"/events/{created.case_ref}/transfer-developer",
+        headers={"X-WeCom-UserId": "dev-a"},
+        data={
+            "version": str(developer_case.version),
+            "new_developer_id": str(desk_context.users["dev_b"]),
+        },
+        follow_redirects=False,
+    )
+    assert developer_transfer.status_code == 303
+
+    developer_admin = client.get(
+        f"/events/{created.case_ref}", headers={"X-WeCom-UserId": "dev-admin"}
+    )
+    assert developer_admin.status_code == 200
+    assert 'aria-label="事件处理人转交"' in developer_admin.text
+
+
 def test_h5_status_buttons_follow_permissions_and_update_timeline(
     desk_context: DeskContext,
 ) -> None:

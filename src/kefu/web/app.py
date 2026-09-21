@@ -868,6 +868,7 @@ def create_app(
               <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
             </div>
           </section>
+          {_transfer_controls(case, external_path)}
           {_deadline_controls(case, external_path)}
           {_metadata_form(case, external_path)}
           {_case_status_controls(case, external_path)}
@@ -1031,6 +1032,44 @@ def create_app(
                     case_ref=case_ref,
                     expected_version=int(_required(form, "version")),
                     waiting_on=WaitingOn(_required(form, "waiting_on")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+
+    @app.post("/events/{case_ref}/transfer-consultant", include_in_schema=False)
+    async def transfer_consultant_page(request: Request, case_ref: str) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await _urlencoded_form(request)
+        try:
+            desk.execute(
+                TransferConsultant(
+                    case_ref=case_ref,
+                    expected_version=int(_required(form, "version")),
+                    new_consultant_id=UUID(_required(form, "new_consultant_id")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+
+    @app.post("/events/{case_ref}/transfer-developer", include_in_schema=False)
+    async def transfer_developer_page(request: Request, case_ref: str) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await _urlencoded_form(request)
+        try:
+            desk.execute(
+                TransferDeveloper(
+                    case_ref=case_ref,
+                    expected_version=int(_required(form, "version")),
+                    new_developer_id=UUID(_required(form, "new_developer_id")),
                 ),
                 actor,
             )
@@ -1616,11 +1655,19 @@ h2 { color: #23344f; }
 .case-meta-grid div { min-width: 0; }
 .case-meta-grid span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
 .case-meta-grid strong { display: block; overflow-wrap: anywhere; font-size: 13px; }
-.deadline-controls { margin-top: 12px; padding: 18px 20px; }
-.deadline-controls h2 { margin: 0 0 12px; font-size: 16px; }
-.deadline-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.deadline-control-grid form { min-width: 0; margin: 0; }
-.deadline-control-grid p { margin: 5px 0 10px; font-size: 12px; }
+.transfer-controls, .deadline-controls { margin-top: 12px; padding: 18px 20px; }
+.transfer-controls h2, .deadline-controls h2 { margin: 0 0 5px; font-size: 16px; }
+.transfer-controls-intro, .deadline-controls-intro { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+.transfer-control-grid, .deadline-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.transfer-control-card, .deadline-control-card { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfe; }
+.transfer-control-card h3, .deadline-control-card h3 { margin: 0 0 5px; color: #23344f; font-size: 14px; }
+.transfer-control-card p, .deadline-control-card p { margin: 0 0 11px; color: var(--muted); font-size: 12px; }
+.transfer-control-card form, .deadline-control-card form { display: grid; gap: 11px; min-width: 0; margin: 0; }
+.transfer-control-card label, .deadline-control-card label { display: grid; gap: 5px; font-size: 13px; font-weight: 650; }
+.transfer-control-card select, .deadline-control-card select, .deadline-control-card input { width: 100%; min-height: 40px; padding: 8px 10px; }
+.deadline-control-card .muted { margin: 0; }
+.transfer-control-empty { padding: 10px 12px; border-radius: 9px; background: #f1f4f8; }
+.transfer-controls button { justify-self: start; }
 .status-controls { margin-top: 12px; padding: 18px 20px; }
 .status-controls-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 5px; }
 .status-controls-heading h2 { margin: 0; font-size: 16px; }
@@ -1701,7 +1748,7 @@ button.primary { background: var(--blue); }
   .case-titlebar { flex-direction: column; }
   .case-state-badges { justify-content: flex-start; }
   .case-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .deadline-control-grid { grid-template-columns: 1fr; }
+  .transfer-control-grid, .deadline-control-grid { grid-template-columns: 1fr; }
   .form-row { grid-template-columns: 1fr; gap: 0; }
 }
 @media (max-width: 480px) {
@@ -1713,7 +1760,7 @@ button.primary { background: var(--blue); }
   .priority-filters a { padding: 5px 7px; font-size: 12px; }
   .case-card { padding: 14px; }
   .case-meta-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .case-overview, .source-panel, .create-form, .action-panel, .deadline-controls, .status-controls { padding: 15px; }
+  .case-overview, .source-panel, .create-form, .action-panel, .transfer-controls, .deadline-controls, .status-controls { padding: 15px; }
   .entry { padding: 11px 12px; }
   .entry-heading { flex-direction: column; gap: 2px; }
   .entry-heading time { font-size: 10px; }
@@ -2143,6 +2190,85 @@ def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
     """
 
 
+def _transfer_controls(case: Any, path_for: Callable[[str], str]) -> str:
+    if not case.can_transfer:
+        return ""
+    consultant_action = path_for(f"/events/{escape(case.case_ref)}/transfer-consultant")
+    developer_action = path_for(f"/events/{escape(case.case_ref)}/transfer-developer")
+    consultant_control = _transfer_person_control(
+        case=case,
+        action=consultant_action,
+        field_name="new_consultant_id",
+        heading="转交咨询处理人",
+        team_name=case.consult_queue_name,
+        current_id=case.current_consultant_id,
+        people=case.transferable_consultants,
+        button_label="转交咨询处理人",
+    )
+    developer_control = _transfer_person_control(
+        case=case,
+        action=developer_action,
+        field_name="new_developer_id",
+        heading="转交研发处理人",
+        team_name=case.current_dev_team_name,
+        current_id=case.current_developer_id,
+        people=case.transferable_developers,
+        button_label="转交研发处理人",
+    )
+    return f"""
+    <section class="transfer-controls panel" aria-label="事件处理人转交">
+      <h2>事件处理人转交</h2>
+      <p class="transfer-controls-intro">只有当前事件处理人或双方团队管理员可以转交；
+        每个处理人只能转给其当前团队中的在岗成员。</p>
+      <div class="transfer-control-grid">
+        {consultant_control}
+        {developer_control}
+      </div>
+    </section>
+    """
+
+
+def _transfer_person_control(
+    *,
+    case: Any,
+    action: str,
+    field_name: str,
+    heading: str,
+    team_name: str,
+    current_id: UUID | None,
+    people: tuple[Any, ...],
+    button_label: str,
+) -> str:
+    candidates = tuple(person for person in people if person.id != current_id)
+    if not candidates:
+        return f"""
+        <div class="transfer-control-card">
+          <h3>{escape(heading)}</h3>
+          <p>目标范围：{escape(team_name)}</p>
+          <p class="transfer-control-empty">当前团队没有其他在岗成员可选。</p>
+        </div>
+        """
+    options = "".join(
+        f'<option value="{escape(str(person.id))}">{escape(person.display_name)}</option>'
+        for person in candidates
+    )
+    return f"""
+    <div class="transfer-control-card">
+      <h3>{escape(heading)}</h3>
+      <p>目标范围：{escape(team_name)}；仅显示本团队其他在岗成员。</p>
+      <form method="post" action="{action}" aria-label="{escape(heading)}">
+        <input type="hidden" name="version" value="{case.version}">
+        <label>新的处理人
+          <select name="{field_name}" required>
+            <option value="" selected disabled>请选择本团队成员</option>{options}
+          </select>
+        </label>
+        <button class="primary" type="submit">{escape(button_label)}</button>
+      </form>
+    </div>
+    """
+
+
 def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_extend_deadline or case.lifecycle_status is LifecycleStatus.CLOSED:
         return ""
@@ -2150,28 +2276,39 @@ def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     approaching_action = path_for(f"/events/{escape(case.case_ref)}/deadline/approaching-window")
     approaching_hours = _hours_value(case.approaching_window_minutes)
     return f"""
-    <section class="deadline-controls panel">
+    <section class="deadline-controls panel" aria-label="期限管理">
       <h2>期限管理</h2>
+      <p class="deadline-controls-intro">截止时间和临近期限提醒是两项独立设置，分别保存，互不改变。</p>
       <div class="deadline-control-grid">
-        <form method="post" action="{adjust_action}">
-          <input type="hidden" name="version" value="{case.version}">
-          <label>调整方向
-            <select name="direction"><option value="delay">延后</option><option value="advance">提前</option></select>
-          </label>
-          <label>调整时长（小时）
-            <input type="number" name="adjustment_hours" min="0.5" step="0.5" value="0.5" required>
-          </label>
-          <p class="muted">相对当前截止时间提前或延后，按至少 30 分钟递增。</p>
-          <button class="primary" type="submit">调整截止时间</button>
-        </form>
-        <form method="post" action="{approaching_action}">
-          <input type="hidden" name="version" value="{case.version}">
-          <label>提前多久进入临近期限（小时）
-            <input type="number" name="approaching_hours" min="0.5" step="0.5" value="{approaching_hours}" required>
-          </label>
-          <p class="muted">默认提前 24 小时，按至少 30 分钟递增。</p>
-          <button class="primary" type="submit">保存临近期限设置</button>
-        </form>
+        <div class="deadline-control-card">
+          <h3>调整当前截止时间</h3>
+          <p>提前或延后本事件的截止时间，不会修改临近期限提醒。</p>
+          <form method="post" action="{adjust_action}" aria-label="调整截止时间">
+            <input type="hidden" name="version" value="{case.version}">
+            <label>调整方向
+              <select name="direction"><option value="delay">延后</option><option value="advance">提前</option></select>
+            </label>
+            <label>调整时长（小时）
+              <input type="number" name="adjustment_hours" min="0.5" step="0.5" value="0.5" required>
+            </label>
+            <p class="muted">相对当前截止时间提前或延后，按至少 30 分钟递增。</p>
+            <p class="muted">此操作只改变截止时间，不会改变临近期限提醒设置。</p>
+            <button class="primary" type="submit">应用截止时间调整</button>
+          </form>
+        </div>
+        <div class="deadline-control-card">
+          <h3>设置临近期限提醒</h3>
+          <p>设置距截止时间多久时开始显示“临近期限”，不改变截止时间。</p>
+          <form method="post" action="{approaching_action}" aria-label="设置临近期限提醒">
+            <input type="hidden" name="version" value="{case.version}">
+            <label>提前多久进入临近期限（小时）
+              <input type="number" name="approaching_hours" min="0.5" step="0.5" value="{approaching_hours}" required>
+            </label>
+            <p class="muted">默认提前 24 小时，按至少 30 分钟递增。</p>
+            <p class="muted">此操作只改变临近期限提醒设置，不会调整截止时间。</p>
+            <button class="primary" type="submit">保存提醒设置</button>
+          </form>
+        </div>
       </div>
     </section>
     """
