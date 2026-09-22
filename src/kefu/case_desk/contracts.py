@@ -36,6 +36,18 @@ class Actor:
 
 
 @dataclass(frozen=True, slots=True)
+class UnregisteredGroupActor:
+    """A WeCom member verified only by a bound development-group callback.
+
+    This identity is intentionally not persisted as a ``User`` or granted any
+    H5 permissions.  It is accepted only for a formal reply whose origin is a
+    currently bound development-team group.
+    """
+
+    wecom_userid: str
+
+
+@dataclass(frozen=True, slots=True)
 class SystemActor:
     """Reserved actor for delivery bookkeeping; callers cannot impersonate it."""
 

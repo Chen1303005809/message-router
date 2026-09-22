@@ -51,6 +51,7 @@ from kefu.case_desk.contracts import (
     TextPart,
     TransferConsultant,
     TransferDevTeam,
+    UnregisteredGroupActor,
     UpdateCaseMetadata,
     UserOption,
 )
@@ -170,7 +171,9 @@ class CaseDesk:
         if not self._web_base_url:
             raise ValueError("web_base_url 不能为空")
 
-    def execute(self, command: Command, actor: Actor | SystemActor) -> CommandResult:
+    def execute(
+        self, command: Command, actor: Actor | UnregisteredGroupActor | SystemActor
+    ) -> CommandResult:
         """Apply a closed command set atomically and return its stable result."""
         with self._session_factory() as session, session.begin():
             if isinstance(command, (DeliveryItemSucceeded, DeliveryItemFailed)):
@@ -180,6 +183,10 @@ class CaseDesk:
                     return self._delivery_item_succeeded(session, command)
                 return self._delivery_item_failed(session, command)
 
+            if isinstance(command, PostFormalMessage) and isinstance(
+                actor, UnregisteredGroupActor
+            ):
+                return self._post_formal_message(session, command, actor)
             if not isinstance(actor, Actor):
                 raise Forbidden("此操作需要已认证的人员身份")
             if isinstance(command, CreateCase):
@@ -796,14 +803,26 @@ class CaseDesk:
         return self._result(case, entry.id)
 
     def _post_formal_message(
-        self, session: Session, command: PostFormalMessage, actor: Actor
+        self,
+        session: Session,
+        command: PostFormalMessage,
+        actor: Actor | UnregisteredGroupActor,
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
-        actor_user = self._directory.get_user(session, actor.user_id)
-        side = cast(
-            EntrySide,
-            self._directory.side_for_actor(session, actor.user_id, case, command.side),
-        )
+        actor_user: User | None
+        actor_name: str | None = None
+        if isinstance(actor, UnregisteredGroupActor):
+            if command.side is not EntrySide.DEV or not command.origin_chatid:
+                raise Forbidden("未注册成员只能从研发群回复正式信息")
+            actor_user = None
+            actor_name = "研发群未注册成员"
+            side = EntrySide.DEV
+        else:
+            actor_user = self._directory.get_user(session, actor.user_id)
+            side = cast(
+                EntrySide,
+                self._directory.side_for_actor(session, actor.user_id, case, command.side),
+            )
         if command.suppress_delivery and side is not EntrySide.CONSULT:
             raise ValidationError("只有咨询侧群聊投递可以使用被动回复替代")
         if command.suppress_consult_group_delivery and side is not EntrySide.DEV:
@@ -831,9 +850,17 @@ class CaseDesk:
             kind=CaseEntryKind.FORMAL_MESSAGE,
             side=side,
             actor_user=actor_user,
+            actor_name=actor_name,
             intent=command.intent,
             source_msgid=self._clean_source_msgid(command.source_msgid),
-            metadata={"action": "post_formal_message"},
+            metadata={
+                "action": "post_formal_message",
+                **(
+                    {"actor_wecom_userid": actor.wecom_userid}
+                    if isinstance(actor, UnregisteredGroupActor)
+                    else {}
+                ),
+            },
         )
         self._add_parts(session, entry, parts)
         destination_type, destination_address = self._destination_for_side(session, case, side)
@@ -1345,12 +1372,15 @@ class CaseDesk:
         case: Case,
         kind: CaseEntryKind,
         side: EntrySide,
-        actor_user: User,
+        actor_user: User | None,
+        actor_name: str | None = None,
         intent: MessageIntent | None = None,
         source_msgid: str | None = None,
         corrects_entry_id: UUID | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> CaseEntry:
+        if actor_user is None and not actor_name:
+            raise ValidationError("事件记录缺少操作人名称")
         case.last_entry_sequence += 1
         entry = CaseEntry(
             id=uuid4(),
@@ -1358,8 +1388,8 @@ class CaseDesk:
             sequence=case.last_entry_sequence,
             kind=kind,
             side=side,
-            actor_user_id=actor_user.id,
-            actor_name_snapshot=actor_user.display_name,
+            actor_user_id=actor_user.id if actor_user is not None else None,
+            actor_name_snapshot=actor_name or actor_user.display_name,
             message_intent=intent,
             source_msgid=source_msgid,
             corrects_entry_id=corrects_entry_id,

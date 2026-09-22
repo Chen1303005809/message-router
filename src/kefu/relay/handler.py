@@ -13,8 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from kefu.case_desk.contracts import Actor, ContentPart, ImagePart, PostFormalMessage, TextPart
-from kefu.case_desk.errors import CaseDeskError, ValidationError
+from kefu.case_desk.contracts import (
+    Actor,
+    ContentPart,
+    ImagePart,
+    PostFormalMessage,
+    TextPart,
+    UnregisteredGroupActor,
+)
+from kefu.case_desk.errors import CaseDeskError, NotFound, ValidationError
 from kefu.case_desk.service import CaseDesk, utc_now
 from kefu.media.storage import MediaIngestError, MediaIngestor
 from kefu.persistence.models import (
@@ -217,11 +224,20 @@ class Relay:
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
         case_ref = parse_quoted_case_ref(event.quote_content)
-        sender = self._user_for_wecom_userid(event.sender_userid)
+        try:
+            sender_actor: Actor | UnregisteredGroupActor = Actor(
+                self._user_for_wecom_userid(event.sender_userid)
+            )
+        except NotFound:
+            if side is not EntrySide.DEV:
+                raise
+            sender_actor = UnregisteredGroupActor(event.sender_userid)
         # The service makes the matching check under the same transaction that
         # appends the entry; this preliminary read only avoids media work for a
-        # caller who cannot even view the claimed event.
-        self._case_desk.get_case(case_ref, Actor(sender))
+        # caller who cannot even view the claimed event. Unregistered members
+        # have no H5 identity, so the bound development group is their scope.
+        if isinstance(sender_actor, Actor):
+            self._case_desk.get_case(case_ref, sender_actor)
         parts = self._to_case_parts(event.parts)
         result = self._case_desk.execute(
             PostFormalMessage(
@@ -234,7 +250,7 @@ class Relay:
                 origin_chatid=event.chatid,
                 suppress_consult_group_delivery=suppress_consult_group_delivery,
             ),
-            Actor(sender),
+            sender_actor,
         )
         return RelayDecision(
             RelayDisposition.FORWARDED,

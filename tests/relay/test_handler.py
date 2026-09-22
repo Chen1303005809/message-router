@@ -139,6 +139,43 @@ def test_relay_rejects_unquoted_or_wrong_group_developer_reply(desk_context: Des
     assert wrong_group.disposition is RelayDisposition.REJECTED
 
 
+def test_relay_allows_unregistered_member_to_reply_in_dev_group(
+    desk_context: DeskContext,
+) -> None:
+    created = desk_context.desk.execute(
+        CreateCase(
+            title="未注册成员回复",
+            consult_queue_id=desk_context.teams["consult"],
+            dev_team_id=desk_context.teams["dev_a"],
+            parts=(TextPart("请研发协助处理"),),
+        ),
+        Actor(desk_context.users["consult_a"]),
+    )
+    relay = Relay(desk_context.session_factory, desk_context.desk)
+
+    decision = relay.handle(
+        InboundEvent(
+            msgid="unregistered-dev-reply",
+            sender_userid="wecom-not-in-directory",
+            chatid="chat-dev-a",
+            chattype="group",
+            parts=(InboundTextPart("已完成定位"),),
+            quote_content=f"〔KF·{created.case_ref}〕",
+            mentioned_bot=True,
+        )
+    )
+
+    assert decision.disposition is RelayDisposition.FORWARDED
+    case = desk_context.desk.get_case(
+        created.case_ref or "", Actor(desk_context.users["consult_a"])
+    )
+    entry = case.entries[-1]
+    assert entry.side is EntrySide.DEV
+    assert entry.actor_user_id is None
+    assert entry.actor_name_snapshot == "研发群未注册成员"
+    assert entry.metadata["actor_wecom_userid"] == "wecom-not-in-directory"
+
+
 def test_consult_group_selects_consult_side_for_dual_role_member(
     desk_context: DeskContext,
 ) -> None:
