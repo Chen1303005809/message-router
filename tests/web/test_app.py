@@ -423,6 +423,28 @@ def test_h5_homepage_creates_case_with_multiple_images(desk_context: DeskContext
     ).content == b"second-image"
 
 
+def test_h5_new_event_form_accumulates_images_and_accepts_clipboard_paste(
+    desk_context: DeskContext,
+) -> None:
+    app = create_app(
+        session_factory=desk_context.session_factory,
+        settings=settings(),
+        storage=InMemoryObjectStorage(),
+    )
+    client = TestClient(app)
+
+    form = client.get("/events/new", headers={"X-WeCom-UserId": "consult-a"})
+
+    assert form.status_code == 200
+    assert 'data-image-uploader="true"' in form.text
+    assert 'data-image-input="true"' in form.text
+    assert 'data-image-list="true"' in form.text
+    assert "new DataTransfer()" in form.text
+    assert 'addEventListener("paste"' in form.text
+    assert "clipboardData" in form.text
+    assert ".items" in form.text
+
+
 class FakeOAuthClient:
     def authorize_url(self, callback_url: str, state: str) -> str:
         return f"https://oauth.example.test/?callback={callback_url}&state={state}"

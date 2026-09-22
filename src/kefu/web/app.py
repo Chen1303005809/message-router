@@ -709,9 +709,7 @@ def create_app(
             <h2>事件信息</h2>
             <label>事件标题 <input name="title" required maxlength="512" placeholder="例如：订单提交后页面报错"></label>
             <label>问题描述 <textarea name="description" required maxlength="20000" rows="6" placeholder="描述客户现象、发生时间、影响范围和复现步骤"></textarea></label>
-            <label>问题图片（可多选，单张不超过 20 MiB）
-              <input name="images" type="file" accept="image/*" multiple>
-            </label>
+            {_image_upload_controls()}
             <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
             <div class="form-row">
               <label>联系人（选填） <input name="customer_contact_name" maxlength="256"></label>
@@ -1295,11 +1293,12 @@ def _admin_dashboard(
           <details class="add-box" open>
             <summary>＋ 新增团队</summary>
             <form method="post" action="{path_for('/admin/teams')}" class="form-grid team-create-form">
-              <label>团队类型<select name="kind"><option value="consult_queue">{_team_kind_label(TeamKind.CONSULT_QUEUE)}</option><option value="dev">{_team_kind_label(TeamKind.DEV)}</option></select></label>
+              <label>团队类型<select name="kind" data-team-kind-select="true"><option value="consult_queue">{_team_kind_label(TeamKind.CONSULT_QUEUE)}</option><option value="dev">{_team_kind_label(TeamKind.DEV)}</option></select></label>
               <label>团队名称<input name="name" required maxlength="256" placeholder="例如 平台研发组"></label>
-              <label>研发负责人展示名<input name="lead_display_name" maxlength="256" placeholder="仅显示，不关联企业微信成员"></label>
+              <label class="team-lead-display-name-field" hidden>研发负责人展示名<input name="lead_display_name" data-team-lead-input="true" maxlength="256" placeholder="仅显示，不关联企业微信成员" disabled></label>
               <button class="primary" type="submit">创建团队</button>
             </form>
+            {_team_create_form_script()}
           </details>
           <div class="managed-list">{team_cards}</div>
         </div>
@@ -1310,6 +1309,29 @@ def _admin_dashboard(
           <span>成员 = 可查看和处理团队事件；团队管理员 = 可在本团队内执行交接、转交和群聊绑定；总管理员 = 可管理全组织并查看全部事件。</span>
       </section>
     </main>
+    """
+
+
+def _team_create_form_script() -> str:
+    return """
+    <script>
+    (() => {
+      const form = document.querySelector('.team-create-form');
+      const kind = form?.querySelector('[data-team-kind-select="true"]');
+      const leadField = form?.querySelector('.team-lead-display-name-field');
+      const leadInput = form?.querySelector('[data-team-lead-input="true"]');
+      if (!kind || !leadField || !leadInput) return;
+
+      const updateLeadField = () => {
+        const isDevTeam = kind.value === "dev";
+        leadField.hidden = !isDevTeam;
+        leadInput.disabled = !isDevTeam;
+      };
+
+      kind.addEventListener("change", updateLeadField);
+      updateLeadField();
+    })();
+    </script>
     """
 
 
@@ -1680,6 +1702,15 @@ h2 { color: #23344f; }
 .source-panel, .create-form { padding: 18px 20px; margin: 12px 0; }
 .source-panel h2, .create-form h2 { font-size: 16px; margin-bottom: 13px; }
 .create-form label, .metadata-editor label { font-size: 13px; }
+.image-upload-control { margin: 12px 0; }
+.image-upload-control > label { margin-bottom: 5px; }
+.image-upload-control input[type="file"] { margin-top: 0; }
+.image-upload-hint { margin: 5px 0 0; font-size: 12px; }
+.image-upload-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
+.image-upload-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; font-size: 12px; }
+.image-upload-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-upload-remove { flex: 0 0 auto; min-height: 30px; margin: 0; padding: 4px 8px; font-size: 12px; }
+.image-upload-error { margin: 7px 0 0; color: var(--red); font-size: 12px; }
 .timeline-section { margin-top: 24px; }
 .section-heading { border-bottom: 1px solid var(--line); margin-bottom: 8px; }
 .timeline { position: relative; padding: 4px 0 4px 20px; }
@@ -1877,6 +1908,129 @@ button.primary:hover{{background:#004eeb}}
 body.setup-page{{background:#eef4ff}}
 {_WORKBENCH_CSS}
 </style></head><body class="{escape(body_class)}">{body}</body></html>"""
+
+
+def _image_upload_controls() -> str:
+    return """
+    <div class="image-upload-control" data-image-uploader="true" data-max-image-bytes="20971520">
+      <label for="event-images">问题图片（可多选、连续选择或粘贴，单张不超过 20 MiB）</label>
+      <input id="event-images" name="images" type="file" accept="image/*" multiple
+        data-image-input="true" aria-describedby="event-images-hint">
+      <p id="event-images-hint" class="muted image-upload-hint">
+        可一次选择多张，也可反复选择图片或直接在表单中粘贴截图。
+      </p>
+      <ul class="image-upload-list" data-image-list="true" aria-live="polite"></ul>
+      <p class="image-upload-error" data-image-error="true" role="alert" hidden></p>
+    </div>
+    <script>
+    (() => {
+      const uploader = document.querySelector('[data-image-uploader="true"]');
+      if (!uploader) return;
+      const input = uploader.querySelector('[data-image-input="true"]');
+      const list = uploader.querySelector('[data-image-list="true"]');
+      const error = uploader.querySelector('[data-image-error="true"]');
+      const form = input && input.form;
+      if (!input || !list || !error || !form) return;
+
+      const maxBytes = Number(uploader.dataset.maxImageBytes);
+      let selectedFiles = [];
+      let canSynchronizeFiles = typeof DataTransfer !== "undefined";
+
+      const fileKey = (file) =>
+        [file.name, file.size, file.lastModified, file.type].join(":");
+
+      const showError = (message) => {
+        error.textContent = message;
+        error.hidden = !message;
+      };
+
+      const syncInputFiles = () => {
+        if (!canSynchronizeFiles) return false;
+        try {
+          const transfer = new DataTransfer();
+          selectedFiles.forEach((file) => transfer.items.add(file));
+          input.files = transfer.files;
+          return true;
+        } catch (_error) {
+          canSynchronizeFiles = false;
+          return false;
+        }
+      };
+
+      const renderFiles = () => {
+        list.replaceChildren();
+        selectedFiles.forEach((file, index) => {
+          const item = document.createElement("li");
+          item.className = "image-upload-item";
+          const name = document.createElement("span");
+          name.textContent = file.name || `图片 ${index + 1}`;
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "image-upload-remove";
+          remove.textContent = "移除";
+          remove.setAttribute("aria-label", `移除 ${name.textContent}`);
+          remove.addEventListener("click", () => {
+            selectedFiles.splice(index, 1);
+            syncInputFiles();
+            renderFiles();
+          });
+          item.append(name, remove);
+          list.append(item);
+        });
+      };
+
+      const addFiles = (incoming) => {
+        const existing = new Set(selectedFiles.map(fileKey));
+        const rejected = [];
+        for (const file of incoming) {
+          if (!file || !file.type.startsWith("image/")) {
+            rejected.push(`${file?.name || "文件"} 不是图片`);
+            continue;
+          }
+          if (file.size > maxBytes) {
+            rejected.push(`${file.name || "图片"} 超过 20 MiB`);
+            continue;
+          }
+          const key = fileKey(file);
+          if (!existing.has(key)) {
+            existing.add(key);
+            selectedFiles.push(file);
+          }
+        }
+        syncInputFiles();
+        renderFiles();
+        showError(rejected.length ? rejected.join("；") : "");
+      };
+
+      input.addEventListener("change", () => {
+        const picked = Array.from(input.files || []);
+        if (!picked.length) return;
+        if (canSynchronizeFiles) {
+          input.value = "";
+          addFiles(picked);
+        } else {
+          selectedFiles = picked;
+          renderFiles();
+        }
+      });
+
+      form.addEventListener("paste", (event) => {
+        const items = Array.from(event.clipboardData?.items || []);
+        const pastedFiles = items
+          .filter((item) => item.kind === "file")
+          .map((item) => item.getAsFile())
+          .filter(Boolean);
+        if (!pastedFiles.length) return;
+        event.preventDefault();
+        addFiles(pastedFiles);
+      });
+
+      form.addEventListener("submit", () => {
+        syncInputFiles();
+      });
+    })();
+    </script>
+    """
 
 
 def _format_datetime(value: datetime) -> str:

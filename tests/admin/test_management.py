@@ -39,6 +39,15 @@ def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
     assert "组织与授权" in page.text
     assert "咨询队列" in page.text
     assert "研发一组" in page.text
+    team_create_form = page.text.split(
+        '<form method="post" action="/admin/teams" class="form-grid team-create-form">',
+        maxsplit=1,
+    )[1].split("</form>", maxsplit=1)[0]
+    assert 'data-team-kind-select="true"' in team_create_form
+    assert 'class="team-lead-display-name-field" hidden' in team_create_form
+    assert 'data-team-lead-input="true"' in team_create_form
+    assert 'disabled></label>' in team_create_form
+    assert 'addEventListener("change"' in page.text
 
     created_user = client.post(
         "/api/admin/users",
