@@ -12,7 +12,7 @@ services:
       timeout: 3s
       retries: 20
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-data:/var/lib/postgresql/data
 
   minio:
     image: minio/minio:latest
@@ -27,7 +27,7 @@ services:
       timeout: 3s
       retries: 20
     volumes:
-      - minio-data:/data
+      - ./minio-data:/data
 
   minio-init:
     image: minio/mc:latest
@@ -128,7 +128,3 @@ services:
         condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
-
-volumes:
-  postgres-data:
-  minio-data:
