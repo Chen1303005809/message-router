@@ -62,6 +62,10 @@ def _transport_from_settings(
             bot_mention_name=settings.wecom_bot_mention_name,
             require_group_mention=settings.wecom_require_group_mention,
             connect_timeout_seconds=settings.wecom_connect_timeout_seconds,
+            bot_userid_mode=settings.wecom_bot_userid_mode,
+            wecom_corp_id=settings.wecom_corp_id,
+            wecom_corp_secret=settings.wecom_corp_secret,
+            wecom_agent_id=settings.wecom_agent_id,
         )
     raise ValueError(f"不支持的企业微信传输模式：{settings.wecom_transport}")
 

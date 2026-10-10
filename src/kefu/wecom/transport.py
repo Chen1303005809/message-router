@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from kefu.media.storage import ObjectStorage
 from kefu.persistence.models import DeliveryDestination, MessageIntent, PartKind, StoredMedia
 from kefu.wecom.aibot_client import AiBotClient, AiBotClientError, OfficialAiBotClient
+from kefu.wecom.identity import WeComIdentityError, WeComUserIdResolver
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,11 @@ class LongConnectionWeComAdapter:
         bot_mention_name: str | None = None,
         require_group_mention: bool = True,
         connect_timeout_seconds: float = 20,
+        bot_userid_mode: str = "plain",
+        wecom_corp_id: str | None = None,
+        wecom_corp_secret: str | None = None,
+        wecom_agent_id: str | None = None,
+        userid_resolver: WeComUserIdResolver | None = None,
         client: AiBotClient | None = None,
     ) -> None:
         self._bot_id = _nonempty(bot_id, "WECOM_BOT_ID")
@@ -183,6 +189,12 @@ class LongConnectionWeComAdapter:
         self._bot_mention_name = bot_mention_name.strip() if bot_mention_name else None
         self._require_group_mention = require_group_mention
         self._connect_timeout_seconds = connect_timeout_seconds
+        self._userid_resolver = userid_resolver or WeComUserIdResolver(
+            mode=bot_userid_mode,
+            corp_id=wecom_corp_id,
+            corp_secret=wecom_corp_secret,
+            source_agent_id=wecom_agent_id,
+        )
         self._client = client or OfficialAiBotClient(
             bot_id=self._bot_id,
             secret=self._secret,
@@ -362,7 +374,13 @@ class LongConnectionWeComAdapter:
         body = _mapping(frame.get("body"), "企业微信回调缺少消息体")
         msgid = _required_callback_string(body, "msgid")
         sender = _mapping(body.get("from"), "企业微信回调缺少发送人")
-        sender_userid = _required_callback_string(sender, "userid")
+        callback_userid = _required_callback_string(sender, "userid")
+        try:
+            sender_userid = await asyncio.to_thread(
+                self._userid_resolver.resolve, callback_userid
+            )
+        except WeComIdentityError as error:
+            raise InboundPayloadError(str(error)) from error
         chattype = _required_callback_string(body, "chattype")
         if chattype not in {"single", "group"}:
             raise InboundPayloadError("消息会话类型不受支持")
