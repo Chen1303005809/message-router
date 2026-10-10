@@ -63,9 +63,6 @@ def _transport_from_settings(
             require_group_mention=settings.wecom_require_group_mention,
             connect_timeout_seconds=settings.wecom_connect_timeout_seconds,
             bot_userid_mode=settings.wecom_bot_userid_mode,
-            wecom_corp_id=settings.wecom_corp_id,
-            wecom_corp_secret=settings.wecom_corp_secret,
-            wecom_agent_id=settings.wecom_agent_id,
         )
     raise ValueError(f"不支持的企业微信传输模式：{settings.wecom_transport}")
 
@@ -321,6 +318,8 @@ def _reply_for_decision(decision: RelayDecision, web_base_url: str) -> InboundRe
     """Turn relay outcomes into low-noise, callback-bound bot responses."""
     if decision.idempotent:
         return None
+    if decision.disposition is RelayDisposition.IDENTITY_BOUND and decision.reply_text:
+        return InboundReply(title="机器人身份绑定成功", text=decision.reply_text)
     if decision.disposition is RelayDisposition.DRAFT_SAVED and decision.draft_id is not None:
         return InboundReply(
             title="消息草稿已保存",

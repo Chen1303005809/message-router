@@ -16,10 +16,10 @@ from sqlalchemy.orm import Session
 from kefu.case_desk.contracts import (
     Actor,
     ContentPart,
+    DevelopmentGroupActor,
     ImagePart,
     PostFormalMessage,
     TextPart,
-    UnregisteredGroupActor,
 )
 from kefu.case_desk.errors import CaseDeskError, NotFound, ValidationError
 from kefu.case_desk.service import CaseDesk, utc_now
@@ -44,6 +44,7 @@ class RelayDisposition(StrEnum):
     FORWARDED = "forwarded"
     CHANNEL_BOUND = "channel_bound"
     CONSULT_CHANNEL_BOUND = "consult_channel_bound"
+    IDENTITY_BOUND = "identity_bound"
     OPEN_EVENT_CENTER = "open_event_center"
     IGNORED = "ignored"
     REJECTED = "rejected"
@@ -155,7 +156,56 @@ class Relay:
     def _handle_single(
         self, event: InboundEvent, *, suppress_group_delivery: bool = False
     ) -> RelayDecision:
-        sender = self._user_for_wecom_userid(event.sender_userid)
+        if event.sender_open_userid:
+            try:
+                sender = self._user_for_wecom_userid(event.sender_userid)
+            except NotFound as error:
+                submitted_userid = _single_plaintext_userid(event)
+                if submitted_userid is not None:
+                    with self._session_factory() as session:
+                        registered_user = self._directory.find_user_by_plain_wecom_userid(
+                            session, submitted_userid
+                        )
+                    if registered_user is not None:
+                        with self._session_factory() as session, session.begin():
+                            registered_user = self._directory.bind_wecom_open_userid(
+                                session,
+                                open_userid=event.sender_open_userid,
+                                wecom_userid=submitted_userid,
+                            )
+                        return RelayDecision(
+                            RelayDisposition.IDENTITY_BOUND,
+                            reply_text=(
+                                "已将当前机器人身份绑定到事件中心成员"
+                                f"「{registered_user.display_name}」。"
+                                "现在可以直接私聊机器人发送消息。"
+                            ),
+                        )
+                raise ValidationError(
+                    "机器人身份尚未绑定。请先让管理员在事件中心登记你的明文 userid，"
+                    "再单独私聊机器人发送该 userid 完成绑定。"
+                ) from error
+            else:
+                submitted_userid = _single_plaintext_userid(event)
+                if submitted_userid is not None:
+                    with self._session_factory() as session:
+                        registered_user = self._directory.find_user_by_plain_wecom_userid(
+                            session, submitted_userid
+                        )
+                    if registered_user is not None and registered_user.id == sender:
+                        return RelayDecision(
+                            RelayDisposition.IDENTITY_BOUND,
+                            reply_text=(
+                                f"当前机器人身份已绑定到「{registered_user.display_name}」。"
+                            ),
+                        )
+                    if registered_user is not None:
+                        raise ValidationError(
+                            "当前机器人身份已绑定到其他成员，不能通过私聊修改。"
+                            "如需更正，请联系事件中心管理员。"
+                        )
+        else:
+            sender = self._user_for_wecom_userid(event.sender_userid)
         if self._is_my_cases_shortcut(event.parts, event.quote_content):
             return RelayDecision(RelayDisposition.OPEN_EVENT_CENTER)
         if event.quote_content:
@@ -224,18 +274,16 @@ class Relay:
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
         case_ref = parse_quoted_case_ref(event.quote_content)
-        try:
-            sender_actor: Actor | UnregisteredGroupActor = Actor(
-                self._user_for_wecom_userid(event.sender_userid)
-            )
-        except NotFound:
-            if side is not EntrySide.DEV:
-                raise
-            sender_actor = UnregisteredGroupActor(event.sender_userid)
+        if side is EntrySide.DEV:
+            # The bound development group is the acting identity. Member
+            # userid mapping is intentionally unnecessary for team replies.
+            sender_actor = DevelopmentGroupActor(event.sender_userid)
+        else:
+            sender_actor = Actor(self._user_for_wecom_userid(event.sender_userid))
         # The service makes the matching check under the same transaction that
         # appends the entry; this preliminary read only avoids media work for a
-        # caller who cannot even view the claimed event. Unregistered members
-        # have no H5 identity, so the bound development group is their scope.
+        # consultant who cannot even view the claimed event. The bound
+        # development group is the scope for all developer-side replies.
         if isinstance(sender_actor, Actor):
             self._case_desk.get_case(case_ref, sender_actor)
         parts = self._to_case_parts(event.parts)
@@ -397,3 +445,13 @@ def _requested_team_binding(parts: Sequence[InboundPart]) -> tuple[TeamKind, str
                 raise ValidationError(f"请使用“{command} 团队名称”指定要绑定的{label}")
             return team_kind, team_name
     return None
+
+
+def _single_plaintext_userid(event: InboundEvent) -> str | None:
+    if event.quote_content is not None or len(event.parts) != 1:
+        return None
+    part = event.parts[0]
+    if not isinstance(part, InboundTextPart):
+        return None
+    userid = part.text.strip()
+    return userid or None

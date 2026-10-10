@@ -61,7 +61,7 @@ docker compose up --build
    WEB_BASE_URL=https://events.example.com
    ```
 
-   如果机器人创建者不是企业超级管理员，将 `WECOM_BOT_USERID_MODE` 设为 `open_userid`。worker 会通过已与机器人对接的自建应用，将回调中的加密 userid 转换为组织管理中使用的明文 userid。该应用的 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_CORP_SECRET` 和成员可见范围必须配置正确；转换失败时消息不会进入事件处理。
+   如果机器人创建者不是企业超级管理员，将 `WECOM_BOT_USERID_MODE` 设为 `open_userid`。worker 会保留回调中的加密 userid，并通过事件中心保存的绑定映射识别成员。管理员先在“组织与授权”登记成员的明文 userid；成员随后首次私聊机器人时，单独发送该明文 userid 完成绑定。研发群回复不要求成员绑定，事件记录中的发言人显示为研发团队名称。
 
 2. 可先用人工维护的通讯录/团队配置初始化路由。每个研发团队需配置纯文本 `lead_display_name` 作为负责人展示名；它不绑定用户或授权。`channels` 可以为空，因为群 `chatid` 会在后续由机器人回调取得：
 
@@ -69,7 +69,7 @@ docker compose up --build
    kefu-bootstrap routing.example.json
    ```
 
-3. 启动 `web` 并初始化总管理员（见下方说明）。总管理员在“组织与授权”中录入成员的明文企业微信 userid、姓名和团队角色；也可在此处创建团队。若机器人创建者不是企业超级管理员，需同时按上文配置 `WECOM_BOT_USERID_MODE=open_userid`。
+3. 启动 `web` 并初始化总管理员（见下方说明）。总管理员在“组织与授权”中录入成员的明文企业微信 userid、姓名和团队角色；也可在此处创建团队。若机器人创建者不是企业超级管理员，需同时按上文配置 `WECOM_BOT_USERID_MODE=open_userid`，并让成员在首次私聊机器人时发送已登记的明文 userid 完成绑定。
 
 4. 启动 `bot-worker` 并将机器人加入目标群。由已录入系统且具有对应团队管理员权限的成员，或总管理员，在群内发送 `@机器人 绑定研发团队 平台研发组` 或 `@机器人 绑定咨询队列 华东咨询队列`。名称必须与组织管理页中的团队名称完全一致。成功后，当前群会成为该团队的唯一活动通道，旧通道停用。已录入且获咨询队列授权的成员可私聊机器人发送文本或图文混排，机器人会把草稿确认卡片回到原会话。创建事件时选择研发团队，worker 向该团队绑定的研发群发送可引用消息，只标明处理团队，不指定个人经办人；后续转发也不再标明研发经办人。研发群内任意成员（即使尚未录入或加入研发团队）引用事件消息并 `@机器人` 后，回复会私聊当前咨询经办人，并在咨询队列已绑定群聊时同步发送到该群。
 
@@ -84,7 +84,7 @@ docker compose up --build
 - `AUTH_MODE=wecom_oauth`、`WEB_BASE_URL`、`WECOM_CORP_ID`、`WECOM_AGENT_ID` 和 `WECOM_CORP_SECRET`；
 - 让 `WEB_BASE_URL` 成为企业微信 OAuth/模板卡片信任的 HTTPS 域名；
 - `WECOM_BOT_ID`、`WECOM_BOT_SECRET`，以及推荐配置的 `WECOM_BOT_MENTION_NAME`。如果平台回调提供明确的 @ 标识，后者不是必须；否则它用于严格拒绝未 @ 机器人的群聊消息。
-- 机器人创建者不是企业超级管理员时，还需设置 `WECOM_BOT_USERID_MODE=open_userid`，并保证与机器人对接的自建应用凭据和成员可见范围允许把回调 userid 转换为明文 userid。
+- 机器人创建者不是企业超级管理员时，还需设置 `WECOM_BOT_USERID_MODE=open_userid`；每位需要私聊事件中心的成员都要在管理员登记后，私聊机器人发送一次自己的明文 userid 完成绑定。研发群回复可直接使用，无需绑定。
 
 长连接模式不需要 URL 回调的 Token 或 EncodingAESKey。企业微信机器人凭据和真实企业成员信息都不会写进仓库；未配置 Bot ID/Secret 时，worker 会在启动阶段明确失败，而不会错误地回退到模拟传输或 URL 回调。
 

@@ -148,6 +148,9 @@ class User(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     wecom_userid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    wecom_open_userid: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, unique=True, index=True
+    )
     display_name: Mapped[str] = mapped_column(String(256))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # A global administrator is intentionally a property of the stable

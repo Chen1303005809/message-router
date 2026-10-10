@@ -1269,7 +1269,7 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">用企业微信 userid 建立登录身份。咨询经办人必须属于咨询队列；研发事件归属整个研发团队，不单独指定个人经办人。</p>
+          <p class="panel-intro">用企业微信 userid 建立登录身份。机器人返回加密 userid 时，成员需先登记，再首次私聊机器人发送已登记的明文 userid 完成绑定；研发群回复无需绑定，发言人按团队名称显示。咨询经办人必须属于咨询队列；研发事件归属整个研发团队，不单独指定个人经办人。</p>
           <form class="search-form" method="get" action="{admin_path}">
             <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>

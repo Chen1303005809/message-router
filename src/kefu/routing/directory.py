@@ -12,9 +12,10 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from kefu.case_desk.errors import Forbidden, NotFound, RoutingUnavailable
+from kefu.case_desk.errors import Conflict, Forbidden, NotFound, RoutingUnavailable
 from kefu.persistence.models import (
     Case,
     MembershipRole,
@@ -56,11 +57,73 @@ class DatabaseRoutingDirectory:
     def get_user_by_wecom_userid(
         self, session: Session, wecom_userid: str, *, require_active: bool = True
     ) -> User:
-        user = session.scalar(select(User).where(User.wecom_userid == wecom_userid))
+        normalized_userid = wecom_userid.strip()
+        user = session.scalar(select(User).where(User.wecom_userid == normalized_userid))
+        if user is None:
+            user = session.scalar(
+                select(User).where(User.wecom_open_userid == normalized_userid)
+            )
         if user is None:
             raise NotFound("企业微信用户尚未初始化")
         if require_active and not user.active:
             raise RoutingUnavailable("企业微信用户已停用")
+        return user
+
+    def find_user_by_plain_wecom_userid(
+        self, session: Session, wecom_userid: str
+    ) -> User | None:
+        """Find the registered member by the plaintext ID they submit to bind."""
+        normalized_userid = wecom_userid.strip()
+        if not normalized_userid:
+            return None
+        return session.scalar(select(User).where(User.wecom_userid == normalized_userid))
+
+    def bind_wecom_open_userid(
+        self,
+        session: Session,
+        *,
+        open_userid: str,
+        wecom_userid: str,
+    ) -> User:
+        """Bind an unambiguous callback ID to an already registered member."""
+        normalized_open_userid = open_userid.strip()
+        normalized_userid = wecom_userid.strip()
+        if not normalized_open_userid or not normalized_userid:
+            raise ValidationErrorForDirectory("机器人身份和明文 userid 不能为空")
+
+        user = session.scalar(
+            select(User)
+            .where(User.wecom_userid == normalized_userid)
+            .with_for_update()
+        )
+        if user is None:
+            raise NotFound("事件中心尚未登记这个明文 userid，请联系管理员")
+        if not user.active:
+            raise RoutingUnavailable("该事件中心成员已停用，无法绑定机器人身份")
+        if normalized_open_userid == user.wecom_userid:
+            return user
+
+        canonical_collision = session.scalar(
+            select(User).where(User.wecom_userid == normalized_open_userid)
+        )
+        if canonical_collision is not None and canonical_collision.id != user.id:
+            raise Conflict("机器人返回的身份与另一位成员的明文 userid 冲突，无法绑定")
+
+        existing_owner = session.scalar(
+            select(User)
+            .where(User.wecom_open_userid == normalized_open_userid)
+            .with_for_update()
+        )
+        if existing_owner is not None and existing_owner.id != user.id:
+            raise Conflict("这个机器人身份已经绑定到另一位成员，无法重复绑定")
+        if user.wecom_open_userid and user.wecom_open_userid != normalized_open_userid:
+            raise Conflict("这个成员已经绑定了另一个机器人身份，请联系管理员处理")
+
+        user.wecom_open_userid = normalized_open_userid
+        try:
+            session.flush()
+        except IntegrityError as error:
+            raise Conflict("机器人身份已被其他成员绑定，请重试或联系管理员") from error
         return user
 
     def get_team(self, session: Session, team_id: UUID, *, kind: TeamKind | None = None) -> Team:

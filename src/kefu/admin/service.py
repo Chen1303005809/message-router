@@ -187,6 +187,11 @@ class Administration:
             )
             if existing is not None:
                 raise Conflict("该企业微信成员已经存在，请直接编辑已有成员")
+            existing_binding = session.scalar(
+                select(User).where(User.wecom_open_userid == normalized_userid)
+            )
+            if existing_binding is not None:
+                raise Conflict("该 userid 已作为机器人身份绑定，请联系管理员核对")
             user = User(
                 id=uuid4(),
                 wecom_userid=normalized_userid,
@@ -496,6 +501,11 @@ def initialize_global_admin(
     with session_factory() as session, session.begin():
         user = session.scalar(select(User).where(User.wecom_userid == normalized_userid))
         if user is None:
+            existing_binding = session.scalar(
+                select(User).where(User.wecom_open_userid == normalized_userid)
+            )
+            if existing_binding is not None:
+                raise Conflict("该 userid 已作为机器人身份绑定，不能作为总管理员账号")
             user = User(
                 id=uuid4(),
                 wecom_userid=normalized_userid,

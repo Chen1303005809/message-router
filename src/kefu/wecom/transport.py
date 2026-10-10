@@ -56,6 +56,7 @@ class InboundEvent:
     mentioned_bot: bool = False
     intent: MessageIntent = MessageIntent.HANDOFF
     metadata: Mapping[str, object] = field(default_factory=dict)
+    sender_open_userid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,9 +175,6 @@ class LongConnectionWeComAdapter:
         require_group_mention: bool = True,
         connect_timeout_seconds: float = 20,
         bot_userid_mode: str = "plain",
-        wecom_corp_id: str | None = None,
-        wecom_corp_secret: str | None = None,
-        wecom_agent_id: str | None = None,
         userid_resolver: WeComUserIdResolver | None = None,
         client: AiBotClient | None = None,
     ) -> None:
@@ -190,10 +188,7 @@ class LongConnectionWeComAdapter:
         self._require_group_mention = require_group_mention
         self._connect_timeout_seconds = connect_timeout_seconds
         self._userid_resolver = userid_resolver or WeComUserIdResolver(
-            mode=bot_userid_mode,
-            corp_id=wecom_corp_id,
-            corp_secret=wecom_corp_secret,
-            source_agent_id=wecom_agent_id,
+            mode=bot_userid_mode
         )
         self._client = client or OfficialAiBotClient(
             bot_id=self._bot_id,
@@ -375,6 +370,9 @@ class LongConnectionWeComAdapter:
         msgid = _required_callback_string(body, "msgid")
         sender = _mapping(body.get("from"), "企业微信回调缺少发送人")
         callback_userid = _required_callback_string(sender, "userid")
+        sender_open_userid = (
+            callback_userid if self._userid_resolver.is_open_userid_mode else None
+        )
         try:
             sender_userid = await asyncio.to_thread(
                 self._userid_resolver.resolve, callback_userid, msgid=msgid
@@ -400,6 +398,7 @@ class LongConnectionWeComAdapter:
             quote_content=_quote_text(body.get("quote")),
             mentioned_bot=self._is_bot_mentioned(body, parts, chattype),
             metadata={"wecom_raw_frame": raw_frame},
+            sender_open_userid=sender_open_userid,
         )
 
     async def _parts_from_body(self, body: Mapping[str, object]) -> tuple[InboundPart, ...]:
