@@ -35,6 +35,7 @@ from kefu.case_desk.contracts import (
     DeliveryView,
     DeliveryWork,
     DeliveryWorkItem,
+    DevelopmentGroupActor,
     DraftView,
     EntryView,
     ExtendCaseDeadline,
@@ -51,7 +52,6 @@ from kefu.case_desk.contracts import (
     TextPart,
     TransferConsultant,
     TransferDevTeam,
-    UnregisteredGroupActor,
     UpdateCaseMetadata,
     UserOption,
 )
@@ -172,7 +172,7 @@ class CaseDesk:
             raise ValueError("web_base_url 不能为空")
 
     def execute(
-        self, command: Command, actor: Actor | UnregisteredGroupActor | SystemActor
+        self, command: Command, actor: Actor | DevelopmentGroupActor | SystemActor
     ) -> CommandResult:
         """Apply a closed command set atomically and return its stable result."""
         with self._session_factory() as session, session.begin():
@@ -184,7 +184,7 @@ class CaseDesk:
                 return self._delivery_item_failed(session, command)
 
             if isinstance(command, PostFormalMessage) and isinstance(
-                actor, UnregisteredGroupActor
+                actor, DevelopmentGroupActor
             ):
                 return self._post_formal_message(session, command, actor)
             if not isinstance(actor, Actor):
@@ -806,16 +806,16 @@ class CaseDesk:
         self,
         session: Session,
         command: PostFormalMessage,
-        actor: Actor | UnregisteredGroupActor,
+        actor: Actor | DevelopmentGroupActor,
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         actor_user: User | None
         actor_name: str | None = None
-        if isinstance(actor, UnregisteredGroupActor):
+        if isinstance(actor, DevelopmentGroupActor):
             if command.side is not EntrySide.DEV or not command.origin_chatid:
-                raise Forbidden("未注册成员只能从研发群回复正式信息")
+                raise Forbidden("研发群成员只能从已绑定研发群回复正式信息")
             actor_user = None
-            actor_name = "研发群未注册成员"
+            actor_name = "研发群成员"
             side = EntrySide.DEV
         else:
             actor_user = self._directory.get_user(session, actor.user_id)
@@ -857,7 +857,7 @@ class CaseDesk:
                 "action": "post_formal_message",
                 **(
                     {"actor_wecom_userid": actor.wecom_userid}
-                    if isinstance(actor, UnregisteredGroupActor)
+                    if isinstance(actor, DevelopmentGroupActor)
                     else {}
                 ),
             },
