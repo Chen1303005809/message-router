@@ -332,10 +332,6 @@ def _reply_for_decision(decision: RelayDecision, web_base_url: str) -> InboundRe
             text="打开事件中心查看你有权限访问的事件。",
             actions=(ReplyAction("打开事件中心", f"{web_base_url}/events"),),
         )
-    if decision.disposition is RelayDisposition.IDENTITY_BOUND and decision.reply_text:
-        return InboundReply(title="身份登记完成", text=decision.reply_text)
-    if decision.disposition is RelayDisposition.IDENTITY_REQUIRED and decision.reply_text:
-        return InboundReply(title="请先登记身份", text=decision.reply_text)
     if decision.disposition is RelayDisposition.CHANNEL_BOUND and decision.reply_text:
         return InboundReply(title="研发群已绑定", text=decision.reply_text)
     if decision.disposition is RelayDisposition.CONSULT_CHANNEL_BOUND and decision.reply_text:

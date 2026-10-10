@@ -396,6 +396,25 @@ def create_app(
         except (CaseDeskError, ValueError, KeyError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
 
+    # The same operations are available as regular forms so an operator can
+    # complete the whole setup from a mobile H5 browser without a JS client.
+    @app.post("/admin/users", include_in_schema=False)
+    async def admin_create_user_form(request: Request) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            form = await _urlencoded_form(request)
+            administration.create_user(
+                actor,
+                wecom_userid=_required(form, "wecom_userid"),
+                display_name=_required(form, "display_name"),
+                is_global_admin=form.get("is_global_admin") == "on",
+            )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path("/admin"), status_code=303)
+
     @app.post("/admin/users/{user_id}", include_in_schema=False)
     async def admin_update_user_form(request: Request, user_id: UUID) -> RedirectResponse:
         actor = page_actor_or_login(request)
@@ -1235,7 +1254,7 @@ def _admin_dashboard(
     <main class="admin-main">
       <section class="hero-banner">
         <div><span class="status-dot"></span><strong>权限配置已启用</strong>
-          <p>咨询人员私聊机器人发送“绑定 姓名”后会自动登记；总管理员再为其完善姓名、加入团队并设置角色。</p>
+          <p>先录入企业微信成员，再将成员加入咨询团队或研发团队；角色为“管理员”的成员可以处理本团队的交接和群绑定。</p>
         </div>
         <span class="badge badge-blue">总管理员</span>
       </section>
@@ -1250,13 +1269,21 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">成员首次私聊机器人发送“绑定 姓名”即可自动登记，系统会从回调中读取身份。总管理员在此维护姓名、在岗状态和总管理员权限，并在团队卡片中分配团队及角色。</p>
+          <p class="panel-intro">用企业微信 userid 建立登录身份。咨询经办人必须属于咨询队列；研发事件归属整个研发团队，不单独指定个人经办人。</p>
           <form class="search-form" method="get" action="{admin_path}">
-            <input name="q" value="{search_value}" placeholder="搜索姓名或企业微信身份标识">
+            <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>
             {f'<a class="button-link" href="{admin_path}">清除</a>' if query else ''}
           </form>
-          <div class="permission-note"><span>新成员请先私聊机器人发送“绑定 姓名”。登记成功后会出现在下方成员列表，之后可在这里调整权限。</span></div>
+          <details class="add-box" open>
+            <summary>＋ 新增企业成员</summary>
+            <form method="post" action="{path_for('/admin/users')}" class="form-grid">
+              <label>显示名称<input name="display_name" required maxlength="256" placeholder="例如 张三"></label>
+              <label>企业微信 userid<input name="wecom_userid" required maxlength="128" placeholder="例如 zhangsan"></label>
+              <label class="check-label"><input type="checkbox" name="is_global_admin"> 同时设为总管理员</label>
+              <button class="primary" type="submit">添加成员</button>
+            </form>
+          </details>
           <div class="managed-list">{user_rows}</div>
         </div>
 
@@ -1279,7 +1306,7 @@ def _admin_dashboard(
 
       <section class="permission-note">
         <strong>授权规则</strong>
-          <span>成员及团队角色控制 H5 事件访问和团队操作；咨询群绑定仍需相应管理员。研发群成员可以在群内绑定研发群，并通过引用事件消息 @机器人回复；总管理员可管理全组织。</span>
+          <span>成员 = 可查看和处理团队事件；团队管理员 = 可在本团队内执行交接、转交和群聊绑定；总管理员 = 可管理全组织并查看全部事件。</span>
       </section>
     </main>
     """

@@ -36,11 +36,11 @@ class Actor:
 
 
 @dataclass(frozen=True, slots=True)
-class DevelopmentGroupActor:
-    """A WeCom member acting only through a bound development-group callback.
+class UnregisteredGroupActor:
+    """A WeCom member verified only by a bound development-group callback.
 
-    This identity is intentionally not resolved to a ``User`` or granted any
-    H5 permissions. It is accepted only for a formal reply whose origin is a
+    This identity is intentionally not persisted as a ``User`` or granted any
+    H5 permissions.  It is accepted only for a formal reply whose origin is a
     currently bound development-team group.
     """
 

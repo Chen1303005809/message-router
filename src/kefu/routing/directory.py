@@ -63,42 +63,6 @@ class DatabaseRoutingDirectory:
             raise RoutingUnavailable("企业微信用户已停用")
         return user
 
-    def register_user_from_wecom_callback(
-        self,
-        session: Session,
-        *,
-        wecom_userid: str,
-        display_name: str | None = None,
-    ) -> tuple[User, bool]:
-        """Create a regular member from the sender ID supplied by a DM callback."""
-        normalized_userid = wecom_userid.strip()
-        if not normalized_userid or len(normalized_userid) > 128:
-            raise ValidationErrorForDirectory("无法识别企业微信发送者身份，请稍后重试")
-        normalized_name = display_name.strip() if display_name else ""
-        if len(normalized_name) > 256:
-            raise ValidationErrorForDirectory("显示名称不能超过 256 个字符")
-        if not normalized_name:
-            normalized_name = f"待完善成员 {normalized_userid[-8:]}"
-
-        user = session.scalar(
-            select(User).where(User.wecom_userid == normalized_userid).with_for_update()
-        )
-        if user is not None:
-            if not user.active:
-                raise RoutingUnavailable("企业微信用户已停用")
-            return user, False
-
-        user = User(
-            id=uuid4(),
-            wecom_userid=normalized_userid,
-            display_name=normalized_name,
-            active=True,
-            is_global_admin=False,
-        )
-        session.add(user)
-        session.flush()
-        return user, True
-
     def get_team(self, session: Session, team_id: UUID, *, kind: TeamKind | None = None) -> Team:
         team = session.get(Team, team_id)
         if team is None:
@@ -229,18 +193,6 @@ class DatabaseRoutingDirectory:
             team_kind=TeamKind.DEV,
         )
 
-    def bind_dev_chat_from_group(
-        self, session: Session, *, team_name: str, chatid: str
-    ) -> TeamChannel:
-        """Bind a development team from its group callback without a sender lookup."""
-        return self._bind_team_chat(
-            session,
-            actor_id=None,
-            team_name=team_name,
-            chatid=chatid,
-            team_kind=TeamKind.DEV,
-        )
-
     def bind_team_chat(
         self,
         session: Session,
@@ -250,25 +202,7 @@ class DatabaseRoutingDirectory:
         chatid: str,
         team_kind: TeamKind,
     ) -> TeamChannel:
-        """Bind the current group to a team after checking the actor's role."""
-        return self._bind_team_chat(
-            session,
-            actor_id=actor_id,
-            team_name=team_name,
-            chatid=chatid,
-            team_kind=team_kind,
-        )
-
-    def _bind_team_chat(
-        self,
-        session: Session,
-        *,
-        actor_id: UUID | None,
-        team_name: str,
-        chatid: str,
-        team_kind: TeamKind,
-    ) -> TeamChannel:
-        """Apply a team binding, allowing an actorless call only for dev callbacks.
+        """Bind the current group to a team, under a team-admin check.
 
         This is the one safe exception to the normal manually-maintained
         directory: a group callback is the only reliable way for the bot to
@@ -290,18 +224,14 @@ class DatabaseRoutingDirectory:
             label = "在岗研发责任团队" if team_kind is TeamKind.DEV else "在岗咨询队列"
             raise RoutingUnavailable(f"未找到唯一的{label}")
         team = teams[0]
-        if actor_id is None:
-            if team_kind is not TeamKind.DEV:
-                raise Forbidden("只有研发群回调可以免成员身份绑定研发群")
-        else:
-            self.get_user(session, actor_id)
-            if not (
-                self.is_global_admin(session, actor_id)
-                or self.is_admin(session, user_id=actor_id, team_id=team.id)
-            ):
-                label = "研发团队管理员" if team_kind is TeamKind.DEV else "咨询队列管理员"
-                chat_label = "研发群" if team_kind is TeamKind.DEV else "咨询群"
-                raise Forbidden(f"只有该{label}可以绑定{chat_label}")
+        self.get_user(session, actor_id)
+        if not (
+            self.is_global_admin(session, actor_id)
+            or self.is_admin(session, user_id=actor_id, team_id=team.id)
+        ):
+            label = "研发团队管理员" if team_kind is TeamKind.DEV else "咨询队列管理员"
+            chat_label = "研发群" if team_kind is TeamKind.DEV else "咨询群"
+            raise Forbidden(f"只有该{label}可以绑定{chat_label}")
         existing = session.scalar(
             select(WeComChannel).where(WeComChannel.chatid == normalized_chatid)
         )

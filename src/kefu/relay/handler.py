@@ -16,10 +16,10 @@ from sqlalchemy.orm import Session
 from kefu.case_desk.contracts import (
     Actor,
     ContentPart,
-    DevelopmentGroupActor,
     ImagePart,
     PostFormalMessage,
     TextPart,
+    UnregisteredGroupActor,
 )
 from kefu.case_desk.errors import CaseDeskError, NotFound, ValidationError
 from kefu.case_desk.service import CaseDesk, utc_now
@@ -42,8 +42,6 @@ DEFAULT_DRAFT_TTL = timedelta(minutes=15)
 class RelayDisposition(StrEnum):
     DRAFT_SAVED = "draft_saved"
     FORWARDED = "forwarded"
-    IDENTITY_BOUND = "identity_bound"
-    IDENTITY_REQUIRED = "identity_required"
     CHANNEL_BOUND = "channel_bound"
     CONSULT_CHANNEL_BOUND = "consult_channel_bound"
     OPEN_EVENT_CENTER = "open_event_center"
@@ -157,34 +155,7 @@ class Relay:
     def _handle_single(
         self, event: InboundEvent, *, suppress_group_delivery: bool = False
     ) -> RelayDecision:
-        binding_name = _private_identity_binding_name(event.parts, event.quote_content)
-        if binding_name is not None:
-            created = self._register_user_from_private_message(
-                event.sender_userid, display_name=binding_name
-            )
-            if created:
-                reply_text = (
-                    "身份登记完成。系统已自动识别你的企业微信身份，无需填写 userid。"
-                    "请联系总管理员在“组织与授权”中完善姓名，并分配咨询团队和角色；"
-                    "权限开通后即可提交客户问题。"
-                )
-            else:
-                reply_text = (
-                    "你的企业微信身份已经登记。请联系总管理员在“组织与授权”中确认姓名，"
-                    "并分配咨询团队和角色。"
-                )
-            return RelayDecision(RelayDisposition.IDENTITY_BOUND, reply_text=reply_text)
-        try:
-            sender = self._user_for_wecom_userid(event.sender_userid)
-        except NotFound:
-            return RelayDecision(
-                RelayDisposition.IDENTITY_REQUIRED,
-                reply_text=(
-                    "当前企业微信身份尚未登记。请单独私聊机器人发送“绑定 姓名” "
-                    "（例如“绑定 张三”）；系统会自动识别发送者身份，无需填写 userid。"
-                    "登记后由总管理员在“组织与授权”中分配咨询团队和角色。"
-                ),
-            )
+        sender = self._user_for_wecom_userid(event.sender_userid)
         if self._is_my_cases_shortcut(event.parts, event.quote_content):
             return RelayDecision(RelayDisposition.OPEN_EVENT_CENTER)
         if event.quote_content:
@@ -229,20 +200,15 @@ class Relay:
         requested_binding = _requested_team_binding(event.parts)
         if requested_binding is not None:
             team_kind, team_name = requested_binding
+            sender = self._user_for_wecom_userid(event.sender_userid)
             with self._session_factory() as session, session.begin():
-                if team_kind is TeamKind.DEV:
-                    self._directory.bind_dev_chat_from_group(
-                        session, team_name=team_name, chatid=event.chatid
-                    )
-                else:
-                    sender = self._user_for_wecom_userid(event.sender_userid)
-                    self._directory.bind_team_chat(
-                        session,
-                        actor_id=sender,
-                        team_name=team_name,
-                        chatid=event.chatid,
-                        team_kind=team_kind,
-                    )
+                self._directory.bind_team_chat(
+                    session,
+                    actor_id=sender,
+                    team_name=team_name,
+                    chatid=event.chatid,
+                    team_kind=team_kind,
+                )
             if team_kind is TeamKind.CONSULT_QUEUE:
                 return RelayDecision(
                     RelayDisposition.CONSULT_CHANNEL_BOUND,
@@ -258,15 +224,18 @@ class Relay:
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
         case_ref = parse_quoted_case_ref(event.quote_content)
-        if side is EntrySide.DEV:
-            sender_actor: Actor | DevelopmentGroupActor = DevelopmentGroupActor(
-                event.sender_userid
+        try:
+            sender_actor: Actor | UnregisteredGroupActor = Actor(
+                self._user_for_wecom_userid(event.sender_userid)
             )
-        else:
-            sender_actor = Actor(self._user_for_wecom_userid(event.sender_userid))
+        except NotFound:
+            if side is not EntrySide.DEV:
+                raise
+            sender_actor = UnregisteredGroupActor(event.sender_userid)
         # The service makes the matching check under the same transaction that
-        # appends the entry. Development replies are scoped to the bound group;
-        # consultation replies still require an authorized, registered member.
+        # appends the entry; this preliminary read only avoids media work for a
+        # caller who cannot even view the claimed event. Unregistered members
+        # have no H5 identity, so the bound development group is their scope.
         if isinstance(sender_actor, Actor):
             self._case_desk.get_case(case_ref, sender_actor)
         parts = self._to_case_parts(event.parts)
@@ -354,24 +323,6 @@ class Relay:
             user = self._directory.get_user_by_wecom_userid(session, wecom_userid)
             return user.id
 
-    def _register_user_from_private_message(
-        self, wecom_userid: str, *, display_name: str | None
-    ) -> bool:
-        try:
-            with self._session_factory() as session, session.begin():
-                _, created = self._directory.register_user_from_wecom_callback(
-                    session,
-                    wecom_userid=wecom_userid,
-                    display_name=display_name,
-                )
-                return created
-        except IntegrityError:
-            # If two binding callbacks race, the unique WeCom ID leaves one
-            # account; read that account after the losing transaction rolls back.
-            with self._session_factory() as session:
-                self._directory.get_user_by_wecom_userid(session, wecom_userid)
-                return False
-
     def _previous_decision(self, msgid: str) -> RelayDecision | None:
         with self._session_factory() as session:
             record = session.scalar(select(InboundMessage).where(InboundMessage.msgid == msgid))
@@ -445,24 +396,4 @@ def _requested_team_binding(parts: Sequence[InboundPart]) -> tuple[TeamKind, str
             if not team_name:
                 raise ValidationError(f"请使用“{command} 团队名称”指定要绑定的{label}")
             return team_kind, team_name
-    return None
-
-
-def _private_identity_binding_name(
-    parts: Sequence[InboundPart], quote_content: str | None
-) -> str | None:
-    """Return the optional display name from a private ``绑定 [姓名]`` command."""
-    if (
-        quote_content is not None
-        or len(parts) != 1
-        or not isinstance(parts[0], InboundTextPart)
-    ):
-        return None
-    text = parts[0].text.strip()
-    if text == "绑定":
-        return ""
-    if len(text) > 2 and text[:2] == "绑定" and (
-        text[2].isspace() or text[2] in "：:"
-    ):
-        return text[3:].strip()
     return None
