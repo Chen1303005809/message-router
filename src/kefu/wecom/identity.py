@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 class WeComIdentityError(RuntimeError):
     """The callback identity could not be resolved to a canonical WeCom userid."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        api_errcode: int | str | None = None,
+        api_errmsg: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.api_errcode = api_errcode
+        self.api_errmsg = api_errmsg
+
 
 class WeComUserIdResolver:
     """Resolve bot callback IDs to the plain member userid used by the event desk.
@@ -122,12 +133,15 @@ class WeComUserIdResolver:
                 # request URLs with access tokens.
                 logger.error(
                     "WeCom open_userid conversion failed: msgid=%s open_userid=%s "
-                    "source_agentid=%s stage=%s reason=%s",
+                    "source_agentid=%s stage=%s reason=%s api_errcode=%s "
+                    "api_errmsg=%s",
                     msgid,
                     normalized_userid,
                     self._source_agent_id,
                     stage,
                     str(error),
+                    error.api_errcode,
+                    error.api_errmsg,
                 )
                 raise
             self._resolved_userids[normalized_userid] = userid
@@ -205,6 +219,22 @@ class WeComUserIdResolver:
                 result = json.loads(response.read().decode("utf-8"))
         except Exception as error:
             raise WeComIdentityError("企业微信身份转换服务暂时不可用") from error
-        if not isinstance(result, dict) or result.get("errcode", 0) != 0:
+        if not isinstance(result, dict):
             raise WeComIdentityError("企业微信无法转换该发送者身份")
+        api_errcode = result.get("errcode", 0)
+        if api_errcode != 0:
+            safe_errcode = (
+                api_errcode
+                if isinstance(api_errcode, int)
+                else api_errcode[:32]
+                if isinstance(api_errcode, str)
+                else None
+            )
+            api_errmsg = result.get("errmsg")
+            safe_errmsg = api_errmsg[:200] if isinstance(api_errmsg, str) else None
+            raise WeComIdentityError(
+                "企业微信无法转换该发送者身份",
+                api_errcode=safe_errcode,
+                api_errmsg=safe_errmsg,
+            )
         return result
