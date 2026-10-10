@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections.abc import Mapping
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 
 class WeComIdentityError(RuntimeError):
@@ -57,29 +60,85 @@ class WeComUserIdResolver:
             except ValueError as error:
                 raise ValueError("WECOM_AGENT_ID 必须是数字") from error
 
-    def resolve(self, callback_userid: str) -> str:
+    def resolve(self, callback_userid: str, *, msgid: str | None = None) -> str:
         """Return a plain userid, failing closed when encrypted-ID conversion fails."""
         normalized_userid = callback_userid.strip()
         if not normalized_userid:
             raise WeComIdentityError("企业微信回调缺少发送者身份")
         if self._mode == "plain":
+            logger.info(
+                "WeCom callback userid passed through unchanged: msgid=%s userid=%s",
+                msgid,
+                normalized_userid,
+            )
             return normalized_userid
 
         with self._lock:
             cached = self._resolved_userids.get(normalized_userid)
             if cached is not None:
+                logger.info(
+                    "WeCom open_userid conversion cache hit: msgid=%s "
+                    "open_userid=%s userid=%s",
+                    msgid,
+                    normalized_userid,
+                    cached,
+                )
                 return cached
 
-            token = self._get_access_token()
-            response = self._post_json(
-                f"{self._CONVERT_URL}?{urlencode({'access_token': token})}",
-                {
-                    "open_userid_list": [normalized_userid],
-                    "source_agentid": int(self._source_agent_id),
-                },
+            logger.info(
+                "WeCom open_userid conversion started: msgid=%s open_userid=%s "
+                "source_agentid=%s",
+                msgid,
+                normalized_userid,
+                self._source_agent_id,
             )
-            userid = self._plain_userid_from_response(response, normalized_userid)
+            stage = "获取 access_token"
+            try:
+                token = self._get_access_token()
+                logger.info(
+                    "WeCom open_userid conversion access token ready: msgid=%s "
+                    "open_userid=%s",
+                    msgid,
+                    normalized_userid,
+                )
+                stage = "调用 openuserid_to_userid 接口"
+                logger.info(
+                    "WeCom open_userid conversion request sent: msgid=%s "
+                    "open_userid=%s source_agentid=%s",
+                    msgid,
+                    normalized_userid,
+                    self._source_agent_id,
+                )
+                response = self._post_json(
+                    f"{self._CONVERT_URL}?{urlencode({'access_token': token})}",
+                    {
+                        "open_userid_list": [normalized_userid],
+                        "source_agentid": int(self._source_agent_id),
+                    },
+                )
+                userid = self._plain_userid_from_response(response, normalized_userid)
+            except WeComIdentityError as error:
+                # Log only the sanitized error string; exception chains may contain
+                # request URLs with access tokens.
+                logger.error(
+                    "WeCom open_userid conversion failed: msgid=%s open_userid=%s "
+                    "source_agentid=%s stage=%s reason=%s",
+                    msgid,
+                    normalized_userid,
+                    self._source_agent_id,
+                    stage,
+                    str(error),
+                )
+                raise
             self._resolved_userids[normalized_userid] = userid
+            logger.info(
+                "WeCom open_userid conversion succeeded: msgid=%s open_userid=%s "
+                "userid=%s source_agentid=%s",
+                msgid,
+                normalized_userid,
+                userid,
+                self._source_agent_id,
+            )
             return userid
 
     def _get_access_token(self) -> str:

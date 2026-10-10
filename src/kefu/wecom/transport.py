@@ -377,7 +377,7 @@ class LongConnectionWeComAdapter:
         callback_userid = _required_callback_string(sender, "userid")
         try:
             sender_userid = await asyncio.to_thread(
-                self._userid_resolver.resolve, callback_userid
+                self._userid_resolver.resolve, callback_userid, msgid=msgid
             )
         except WeComIdentityError as error:
             raise InboundPayloadError(str(error)) from error

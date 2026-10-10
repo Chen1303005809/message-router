@@ -373,8 +373,12 @@ async def run() -> None:
         if settings.wecom_deferred_passive_reply_enabled
         else None
     )
+    logger.info(
+        "bot-worker starting with transport=%s callback_userid_mode=%s",
+        settings.wecom_transport,
+        settings.wecom_bot_userid_mode,
+    )
     await transport.start()
-    logger.info("bot-worker started with transport=%s", settings.wecom_transport)
     try:
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(_delivery_loop(worker))
