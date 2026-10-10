@@ -121,6 +121,7 @@ services:
       WECOM_REQUIRE_GROUP_MENTION: ${WECOM_REQUIRE_GROUP_MENTION:-true}
       WECOM_LONG_CONNECTION_URL: ${WECOM_LONG_CONNECTION_URL:-}
       WECOM_CONNECT_TIMEOUT_SECONDS: ${WECOM_CONNECT_TIMEOUT_SECONDS:-20}
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:8000}
     depends_on:
       postgres:
         condition: service_healthy
