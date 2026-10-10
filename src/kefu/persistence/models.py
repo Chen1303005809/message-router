@@ -117,6 +117,8 @@ class PartKind(StrEnum):
 
 
 class DeliveryDestination(StrEnum):
+    # Kept to deserialize historical completed deliveries; new writes are
+    # group-only and the transport rejects this destination.
     USER = "user"
     CHAT = "chat"
 
@@ -148,9 +150,6 @@ class User(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     wecom_userid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    wecom_open_userid: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, unique=True, index=True
-    )
     display_name: Mapped[str] = mapped_column(String(256))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # A global administrator is intentionally a property of the stable
@@ -263,6 +262,7 @@ class Case(Base):
     current_consultant_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
+    consult_handler_name: Mapped[str] = mapped_column(String(256))
     current_dev_team_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("teams.id"), index=True
     )
@@ -341,44 +341,6 @@ class CaseEntryPart(Base):
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     entry_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("case_entries.id", ondelete="CASCADE")
-    )
-    position: Mapped[int] = mapped_column(Integer)
-    kind: Mapped[PartKind] = mapped_column(enum_column(PartKind))
-    text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    media_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("stored_media.id"), nullable=True
-    )
-
-
-class MessageDraft(Base):
-    __tablename__ = "message_drafts"
-    __table_args__ = (UniqueConstraint("source_msgid", name="uq_message_drafts_source_msgid"),)
-
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    owner_user_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("users.id"), index=True
-    )
-    source_msgid: Mapped[str] = mapped_column(String(256))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-
-class MessageDraftPart(Base):
-    __tablename__ = "message_draft_parts"
-    __table_args__ = (
-        UniqueConstraint("draft_id", "position", name="uq_message_draft_parts_draft_position"),
-        CheckConstraint("position >= 0", name="ck_message_draft_parts_nonnegative_position"),
-        CheckConstraint(
-            "(kind = 'text' AND text IS NOT NULL AND media_id IS NULL) OR "
-            "(kind = 'image' AND media_id IS NOT NULL AND text IS NULL)",
-            name="ck_message_draft_parts_payload_matches_kind",
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    draft_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("message_drafts.id", ondelete="CASCADE")
     )
     position: Mapped[int] = mapped_column(Integer)
     kind: Mapped[PartKind] = mapped_column(enum_column(PartKind))

@@ -603,83 +603,6 @@ def create_app(
             }
         )
 
-    @app.get("/drafts/{draft_id}/new", response_class=HTMLResponse)
-    async def new_case_page(request: Request, draft_id: UUID) -> Response:
-        actor = page_actor_or_login(request)
-        if isinstance(actor, RedirectResponse):
-            return actor
-        try:
-            draft = desk.get_draft(draft_id, actor)
-            queues = desk.list_consult_queues(actor)
-            dev_teams = desk.list_dev_teams(actor)
-        except CaseDeskError as error:
-            raise _http_error(error) from error
-        queue_options = "".join(
-            f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
-        )
-        dev_team_options = "".join(
-            f'<option value="{team.id}">{escape(team.name)}'
-            f"（负责人：{escape(team.lead_display_name or '未配置')}）</option>"
-            for team in dev_teams
-        )
-        body = f"""
-        <main class="create-main">
-          <a class="back-link" href="{external_path('/events')}">← 返回事件中心</a>
-          <header class="page-heading"><div class="eyebrow">建立跟踪事件</div>
-            <h1>创建新事件</h1><p class="muted">补全客户信息和紧急程度，明确后续责任团队。</p></header>
-          <section class="panel source-panel"><h2>客户问题原始消息</h2>
-            {_render_parts(draft.parts, None)}</section>
-          <form class="panel create-form" method="post">
-            <h2>事件信息</h2>
-            <label>事件标题 <input name="title" required maxlength="512"></label>
-            <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
-            <div class="form-row">
-              <label>联系人（选填） <input name="customer_contact_name" maxlength="256"></label>
-              <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" placeholder="电话、邮箱或其他联系方法"></label>
-            </div>
-            <label>紧急程度
-              <select name="priority">
-                <option value="normal">普通</option><option value="urgent">紧急</option>
-                <option value="severe">严重</option>
-              </select>
-            </label>
-            <div class="form-row">
-              <label>咨询团队 <select name="consult_queue_id" required>{queue_options}</select></label>
-              <label>研发处理团队 <select name="dev_team_id" required>{dev_team_options}</select></label>
-            </div>
-            <p class="muted">研发团队负责人姓名仅作展示，事件由团队共同处理，不会指定个人经办人。</p>
-            <p class="muted">默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可由咨询处理人调整。</p>
-            <button class="primary" type="submit">创建并发送给研发</button>
-          </form>
-        </main>
-        """
-        return HTMLResponse(_page("创建事件", body, body_class="case-create-page"))
-
-    @app.post("/drafts/{draft_id}/new", include_in_schema=False)
-    async def create_case_from_draft(request: Request, draft_id: UUID) -> RedirectResponse:
-        actor = page_actor_or_login(request)
-        if isinstance(actor, RedirectResponse):
-            return actor
-        form = await _urlencoded_form(request)
-        try:
-            result = desk.execute(
-                CreateCase(
-                    title=_required(form, "title"),
-                    consult_queue_id=UUID(_required(form, "consult_queue_id")),
-                    dev_team_id=UUID(_required(form, "dev_team_id")),
-                    customer_name=_required(form, "customer_name"),
-                    customer_contact_name=form.get("customer_contact_name"),
-                    customer_contact_method=form.get("customer_contact_method"),
-                    priority=CasePriority(form.get("priority", CasePriority.NORMAL.value)),
-                    draft_id=draft_id,
-                ),
-                actor,
-            )
-        except (CaseDeskError, ValueError) as error:
-            raise _http_error(_as_case_desk_error(error)) from error
-        assert result.case_ref is not None
-        return RedirectResponse(external_path(f"/events/{result.case_ref}"), status_code=303)
-
     @app.get("/events/new", response_class=HTMLResponse)
     async def new_case_form_page(request: Request) -> Response:
         actor = page_actor_or_login(request)
@@ -691,23 +614,26 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
         if not queues:
-            raise _http_error(Forbidden("你没有可用于创建事件的咨询团队权限"))
+            raise _http_error(
+                Forbidden("你没有可用的咨询队列权限，或所选咨询队列尚未绑定咨询群")
+            )
         queue_options = "".join(
             f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
         )
         dev_team_options = "".join(
             f'<option value="{team.id}">{escape(team.name)}'
-            f"（负责人：{escape(team.lead_display_name or '未配置')}）</option>"
+            f"（经办人：{escape(team.lead_display_name or team.name)}）</option>"
             for team in dev_teams
         )
         body = f"""
         <main class="create-main">
           <a class="back-link" href="{external_path('/events')}">← 返回事件中心</a>
-          <header class="page-heading"><div class="eyebrow">无需先私聊机器人</div>
+          <header class="page-heading"><div class="eyebrow">H5 事件中心</div>
             <h1>创建新事件</h1><p class="muted">填写问题和客户信息，补充图片后直接交给研发跟进。</p></header>
           <form class="panel create-form" method="post" action="{external_path('/events/new')}" enctype="multipart/form-data">
             <h2>事件信息</h2>
             <label>事件标题 <input name="title" required maxlength="512" placeholder="例如：订单提交后页面报错"></label>
+            <label>咨询经办显示名 <input name="consult_handler_name" required maxlength="256" placeholder="可填写姓名或团队内使用的称呼"></label>
             <label>问题描述 <textarea name="description" required maxlength="20000" rows="6" placeholder="描述客户现象、发生时间、影响范围和复现步骤"></textarea></label>
             {_image_upload_controls()}
             <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
@@ -729,7 +655,7 @@ def create_app(
             <label>研发处理团队 <select name="dev_team_id" required>
               <option value="" disabled selected>选择研发处理团队</option>{dev_team_options}
             </select></label>
-            <p class="muted">研发团队负责人姓名仅作展示，事件由团队共同处理，不会指定个人经办人。</p>
+            <p class="muted">咨询经办显示名由本事件填写，独立于登录账号；研发经办显示名沿用团队设置。群聊记录不按发送成员 userid 归属。</p>
             <p class="muted">描述文字必填，图片可选。默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可在详情中调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
@@ -747,6 +673,7 @@ def create_app(
             title = _required_form_text(form, "title")
             description = _required_form_text(form, "description")
             customer_name = _required_form_text(form, "customer_name")
+            consult_handler_name = _required_form_text(form, "consult_handler_name")
             customer_contact_name = _optional_form_text(form, "customer_contact_name")
             customer_contact_method = _optional_form_text(form, "customer_contact_method")
             consult_queue_id = UUID(_required_form_text(form, "consult_queue_id"))
@@ -758,6 +685,8 @@ def create_app(
                 raise ValidationError("问题描述不能超过 20000 个字符")
             if len(customer_name) > 256:
                 raise ValidationError("客户 / 企业名称不能超过 256 个字符")
+            if len(consult_handler_name) > 256:
+                raise ValidationError("咨询经办人不能超过 256 个字符")
             if customer_contact_name and len(customer_contact_name) > 256:
                 raise ValidationError("联系人不能超过 256 个字符")
             if customer_contact_method and len(customer_contact_method) > 256:
@@ -797,6 +726,7 @@ def create_app(
                     title=title,
                     consult_queue_id=consult_queue_id,
                     dev_team_id=dev_team_id,
+                    consult_handler_name=consult_handler_name,
                     customer_name=customer_name,
                     customer_contact_name=customer_contact_name,
                     customer_contact_method=customer_contact_method,
@@ -871,9 +801,10 @@ def create_app(
               <div><span>联系人</span><strong>{escape(case.customer_contact_name or '未填写')}</strong></div>
               <div><span>联系方式</span><strong>{escape(case.customer_contact_method or '未填写')}</strong></div>
               <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
-              <div><span>当前咨询处理人</span><strong>{escape(case.current_consultant_name or '未指定')}</strong></div>
+              <div><span>咨询经办显示名</span><strong>{escape(case.consult_handler_name)}</strong></div>
+              <div><span>当前咨询账号负责人</span><strong>{escape(case.current_consultant_name or '未指定')}</strong></div>
               <div><span>研发团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
-              <div><span>研发团队负责人（仅显示）</span><strong>{escape(case.current_dev_team_lead_display_name or '未配置')}</strong></div>
+              <div><span>研发经办人</span><strong>{escape(case.current_dev_team_lead_display_name or case.current_dev_team_name)}</strong></div>
               <div><span>创建时间</span><strong>{_format_datetime(case.created_at)}</strong></div>
               <div><span>截止时间</span><strong>{_format_datetime(case.deadline)}</strong></div>
               <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
@@ -1269,7 +1200,7 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">用企业微信 userid 建立登录身份。机器人返回加密 userid 时，成员需先登记，再首次私聊机器人发送已登记的明文 userid 完成绑定；研发群回复无需绑定，发言人按团队名称显示。咨询经办人必须属于咨询队列；研发事件归属整个研发团队，不单独指定个人经办人。</p>
+          <p class="panel-intro">企业微信 userid 用于 H5 登录和账号级权限。群聊绑定指令不校验发送人身份；群内正式回复按绑定侧别和事件标记记录。咨询经办显示名在创建事件时单独填写；研发显示名沿用团队负责人展示名。</p>
           <form class="search-form" method="get" action="{admin_path}">
             <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>
@@ -2625,6 +2556,7 @@ def _case_json(case: Any) -> dict[str, Any]:
         "created_at": case.created_at.isoformat(),
         "updated_at": case.updated_at.isoformat(),
         "consult_queue_name": case.consult_queue_name,
+        "consult_handler_name": case.consult_handler_name,
         "current_consultant_name": case.current_consultant_name,
         "current_dev_team_name": case.current_dev_team_name,
         "current_dev_team_lead_display_name": case.current_dev_team_lead_display_name,

@@ -27,10 +27,8 @@ class Settings:
     session_cookie_secure: bool
     wecom_bot_id: str | None = None
     wecom_bot_secret: str | None = None
-    wecom_bot_userid_mode: str = "plain"
     wecom_long_connection_url: str | None = None
     wecom_bot_mention_name: str | None = None
-    wecom_require_group_mention: bool = True
     wecom_connect_timeout_seconds: float = 20.0
     # Experimental only: hold a quoted developer-group callback in memory and
     # use it for a passive reply after the matching consultant-side message.
@@ -75,11 +73,8 @@ class Settings:
             in {"1", "true", "yes"},
             wecom_bot_id=os.getenv("WECOM_BOT_ID") or None,
             wecom_bot_secret=os.getenv("WECOM_BOT_SECRET") or None,
-            wecom_bot_userid_mode=os.getenv("WECOM_BOT_USERID_MODE", "plain"),
             wecom_long_connection_url=os.getenv("WECOM_LONG_CONNECTION_URL") or None,
             wecom_bot_mention_name=os.getenv("WECOM_BOT_MENTION_NAME") or None,
-            wecom_require_group_mention=os.getenv("WECOM_REQUIRE_GROUP_MENTION", "true").lower()
-            in {"1", "true", "yes"},
             wecom_connect_timeout_seconds=float(
                 os.getenv("WECOM_CONNECT_TIMEOUT_SECONDS", "20")
             ),

@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session
 from kefu.media.storage import ObjectStorage
 from kefu.persistence.models import DeliveryDestination, MessageIntent, PartKind, StoredMedia
 from kefu.wecom.aibot_client import AiBotClient, AiBotClientError, OfficialAiBotClient
-from kefu.wecom.identity import WeComIdentityError, WeComUserIdResolver
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,6 @@ class InboundEvent:
     """Normalized inbound envelope with no platform JSON in business code."""
 
     msgid: str
-    sender_userid: str
     chatid: str | None
     chattype: str
     parts: tuple[InboundPart, ...]
@@ -56,7 +54,6 @@ class InboundEvent:
     mentioned_bot: bool = False
     intent: MessageIntent = MessageIntent.HANDOFF
     metadata: Mapping[str, object] = field(default_factory=dict)
-    sender_open_userid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,18 +72,10 @@ class DeliveryReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class ReplyAction:
-    label: str
-    url: str
-
-
-@dataclass(frozen=True, slots=True)
 class InboundReply:
     """An immediate response to the inbound callback that prompted it."""
 
     text: str
-    title: str = "客户问题事件中心"
-    actions: tuple[ReplyAction, ...] = ()
 
 
 class WeComTransport(Protocol):
@@ -100,7 +89,7 @@ class WeComTransport(Protocol):
         """Yield normalized inbound callbacks from a long-lived connection."""
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
-        """Push one already-persisted item to a user or group conversation."""
+        """Push one already-persisted item to a group conversation."""
 
     async def reply(self, event: InboundEvent, reply: InboundReply) -> DeliveryReceipt:
         """Reply to the original callback without creating a durable delivery."""
@@ -142,6 +131,8 @@ class FakeWeComAdapter:
             yield self._inbound.pop(0)
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
+        if message.destination_type is DeliveryDestination.USER:
+            raise TransportError("机器人仅支持向已绑定群聊投递")
         if self._remaining_failures[message.req_id] > 0:
             self._remaining_failures[message.req_id] -= 1
             raise TransportError(f"planned failure for {message.req_id}")
@@ -172,10 +163,7 @@ class LongConnectionWeComAdapter:
         storage: ObjectStorage,
         ws_url: str | None = None,
         bot_mention_name: str | None = None,
-        require_group_mention: bool = True,
         connect_timeout_seconds: float = 20,
-        bot_userid_mode: str = "plain",
-        userid_resolver: WeComUserIdResolver | None = None,
         client: AiBotClient | None = None,
     ) -> None:
         self._bot_id = _nonempty(bot_id, "WECOM_BOT_ID")
@@ -185,11 +173,7 @@ class LongConnectionWeComAdapter:
         self._session_factory = session_factory
         self._storage = storage
         self._bot_mention_name = bot_mention_name.strip() if bot_mention_name else None
-        self._require_group_mention = require_group_mention
         self._connect_timeout_seconds = connect_timeout_seconds
-        self._userid_resolver = userid_resolver or WeComUserIdResolver(
-            mode=bot_userid_mode
-        )
         self._client = client or OfficialAiBotClient(
             bot_id=self._bot_id,
             secret=self._secret,
@@ -263,6 +247,8 @@ class LongConnectionWeComAdapter:
             yield await self._events.get()
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
+        if message.destination_type is DeliveryDestination.USER:
+            raise TransportError("机器人仅支持向已绑定群聊投递")
         if not self._started:
             await self.start()
         if not self._ready.is_set() or not self._client.is_connected:
@@ -312,16 +298,10 @@ class LongConnectionWeComAdapter:
         if not isinstance(raw_frame, Mapping):
             raise TransportError("入站消息缺少企业微信回调上下文，无法回复")
         try:
-            if reply.actions:
-                result = await self._client.reply_card(
-                    frame=cast(Mapping[str, object], raw_frame),
-                    card=_reply_card(reply),
-                )
-            else:
-                result = await self._client.reply_markdown(
-                    frame=cast(Mapping[str, object], raw_frame),
-                    content=reply.text,
-                )
+            result = await self._client.reply_markdown(
+                frame=cast(Mapping[str, object], raw_frame),
+                content=reply.text,
+            )
         except Exception as error:
             raise TransportError("企业微信被动回复失败") from error
         return DeliveryReceipt(
@@ -368,37 +348,33 @@ class LongConnectionWeComAdapter:
     async def _normalize_frame(self, frame: Mapping[str, object]) -> InboundEvent:
         body = _mapping(frame.get("body"), "企业微信回调缺少消息体")
         msgid = _required_callback_string(body, "msgid")
-        sender = _mapping(body.get("from"), "企业微信回调缺少发送人")
-        callback_userid = _required_callback_string(sender, "userid")
-        sender_open_userid = (
-            callback_userid if self._userid_resolver.is_open_userid_mode else None
-        )
-        try:
-            sender_userid = await asyncio.to_thread(
-                self._userid_resolver.resolve, callback_userid, msgid=msgid
-            )
-        except WeComIdentityError as error:
-            raise InboundPayloadError(str(error)) from error
         chattype = _required_callback_string(body, "chattype")
         if chattype not in {"single", "group"}:
             raise InboundPayloadError("消息会话类型不受支持")
         chatid = body.get("chatid")
         if chatid is not None and not isinstance(chatid, str):
             raise InboundPayloadError("企业微信群聊标识无效")
+        if chattype == "single":
+            # Private messages have no product flow. Skip parsing content or
+            # sender identity, and retain no callback context.
+            return InboundEvent(
+                msgid=msgid,
+                chatid=chatid,
+                chattype=chattype,
+                parts=(),
+            )
         if chattype == "group" and not chatid:
             raise InboundPayloadError("企业微信群聊消息缺少 chatid")
-        parts = await self._parts_from_body(body)
         raw_frame = _copy_frame(frame)
+        parts = await self._parts_from_body(body)
         return InboundEvent(
             msgid=msgid,
-            sender_userid=sender_userid,
             chatid=chatid,
             chattype=chattype,
             parts=parts,
             quote_content=_quote_text(body.get("quote")),
             mentioned_bot=self._is_bot_mentioned(body, parts, chattype),
             metadata={"wecom_raw_frame": raw_frame},
-            sender_open_userid=sender_open_userid,
         )
 
     async def _parts_from_body(self, body: Mapping[str, object]) -> tuple[InboundPart, ...]:
@@ -446,8 +422,6 @@ class LongConnectionWeComAdapter:
     ) -> bool:
         if chattype != "group":
             return False
-        if not self._require_group_mention:
-            return True
         for mention_field in ("mentioned_bot", "is_at", "is_mentioned", "at_bot"):
             if body.get(mention_field) is True:
                 return True
@@ -474,15 +448,12 @@ class LongConnectionWeComAdapter:
     def _error_event(self, frame: Mapping[str, object], error_message: str) -> InboundEvent:
         body = frame.get("body")
         body_map = body if isinstance(body, Mapping) else {}
-        sender = body_map.get("from")
-        sender_map = sender if isinstance(sender, Mapping) else {}
         msgid = body_map.get("msgid")
         safe_msgid = (
             msgid.strip() if isinstance(msgid, str) and msgid.strip() else f"invalid-{uuid4()}"
         )
         return InboundEvent(
             msgid=safe_msgid,
-            sender_userid=str(sender_map.get("userid") or ""),
             chatid=body_map.get("chatid") if isinstance(body_map.get("chatid"), str) else None,
             chattype=str(body_map.get("chattype") or "single"),
             parts=(),
@@ -644,24 +615,6 @@ def _copy_value(value: object) -> object:
     if isinstance(value, list):
         return [_copy_value(item) for item in value]
     return value
-
-
-def _reply_card(reply: InboundReply) -> dict[str, object]:
-    actions: list[dict[str, object]] = []
-    for action in reply.actions[:3]:
-        parsed = urlparse(action.url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise TransportError("企业微信回复卡片包含无效跳转地址")
-        actions.append({"type": 1, "title": action.label[:13], "url": action.url})
-    if not actions:
-        raise TransportError("企业微信回复卡片缺少有效操作")
-    return {
-        "card_type": "text_notice",
-        "main_title": {"title": reply.title[:26], "desc": reply.text[:30]},
-        "jump_list": actions,
-        "card_action": {"type": 1, "url": actions[0]["url"]},
-        "task_id": f"kefu_reply_{uuid4().hex}",
-    }
 
 
 def _platform_result(result: Mapping[str, object]) -> dict[str, object]:

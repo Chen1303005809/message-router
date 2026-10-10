@@ -36,15 +36,10 @@ class Actor:
 
 
 @dataclass(frozen=True, slots=True)
-class DevelopmentGroupActor:
-    """A development-team identity verified by a bound group callback.
+class GroupActor:
+    """A side identity established by the active binding for a group chat."""
 
-    Group replies are attributed to the team rather than an individual. This
-    identity is intentionally not persisted as a ``User`` or granted H5
-    permissions and is accepted only for formal replies from the bound group.
-    """
-
-    wecom_userid: str
+    side: EntrySide
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +70,13 @@ class CreateCase:
     title: str
     consult_queue_id: UUID
     dev_team_id: UUID
+    consult_handler_name: str
     customer_name: str | None = None
     customer_contact_name: str | None = None
     customer_contact_method: str | None = None
     priority: CasePriority = CasePriority.NORMAL
     parts: tuple[ContentPart, ...] = ()
     source_msgid: str | None = None
-    draft_id: UUID | None = None
     related_case_id: UUID | None = None
 
 
@@ -116,7 +111,6 @@ class PostFormalMessage:
     side: EntrySide | None = None
     origin_chatid: str | None = None
     suppress_delivery: bool = False
-    suppress_consult_group_delivery: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +264,7 @@ class CaseView:
     consult_queue_name: str
     current_consultant_id: UUID | None
     current_consultant_name: str | None
+    consult_handler_name: str
     current_dev_team_id: UUID
     current_dev_team_name: str
     current_dev_team_lead_display_name: str | None
@@ -348,13 +343,6 @@ class DeliveryWork:
     case_ref: str
     entry_id: UUID
     items: tuple[DeliveryWorkItem, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class DraftView:
-    id: UUID
-    expires_at: datetime
-    parts: tuple[PartView, ...]
 
 
 @dataclass(frozen=True, slots=True)

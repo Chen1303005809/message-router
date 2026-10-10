@@ -12,10 +12,9 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from kefu.case_desk.errors import Conflict, Forbidden, NotFound, RoutingUnavailable
+from kefu.case_desk.errors import Forbidden, NotFound, RoutingUnavailable
 from kefu.persistence.models import (
     Case,
     MembershipRole,
@@ -60,70 +59,9 @@ class DatabaseRoutingDirectory:
         normalized_userid = wecom_userid.strip()
         user = session.scalar(select(User).where(User.wecom_userid == normalized_userid))
         if user is None:
-            user = session.scalar(
-                select(User).where(User.wecom_open_userid == normalized_userid)
-            )
-        if user is None:
             raise NotFound("企业微信用户尚未初始化")
         if require_active and not user.active:
             raise RoutingUnavailable("企业微信用户已停用")
-        return user
-
-    def find_user_by_plain_wecom_userid(
-        self, session: Session, wecom_userid: str
-    ) -> User | None:
-        """Find the registered member by the plaintext ID they submit to bind."""
-        normalized_userid = wecom_userid.strip()
-        if not normalized_userid:
-            return None
-        return session.scalar(select(User).where(User.wecom_userid == normalized_userid))
-
-    def bind_wecom_open_userid(
-        self,
-        session: Session,
-        *,
-        open_userid: str,
-        wecom_userid: str,
-    ) -> User:
-        """Bind an unambiguous callback ID to an already registered member."""
-        normalized_open_userid = open_userid.strip()
-        normalized_userid = wecom_userid.strip()
-        if not normalized_open_userid or not normalized_userid:
-            raise ValidationErrorForDirectory("机器人身份和明文 userid 不能为空")
-
-        user = session.scalar(
-            select(User)
-            .where(User.wecom_userid == normalized_userid)
-            .with_for_update()
-        )
-        if user is None:
-            raise NotFound("事件中心尚未登记这个明文 userid，请联系管理员")
-        if not user.active:
-            raise RoutingUnavailable("该事件中心成员已停用，无法绑定机器人身份")
-        if normalized_open_userid == user.wecom_userid:
-            return user
-
-        canonical_collision = session.scalar(
-            select(User).where(User.wecom_userid == normalized_open_userid)
-        )
-        if canonical_collision is not None and canonical_collision.id != user.id:
-            raise Conflict("机器人返回的身份与另一位成员的明文 userid 冲突，无法绑定")
-
-        existing_owner = session.scalar(
-            select(User)
-            .where(User.wecom_open_userid == normalized_open_userid)
-            .with_for_update()
-        )
-        if existing_owner is not None and existing_owner.id != user.id:
-            raise Conflict("这个机器人身份已经绑定到另一位成员，无法重复绑定")
-        if user.wecom_open_userid and user.wecom_open_userid != normalized_open_userid:
-            raise Conflict("这个成员已经绑定了另一个机器人身份，请联系管理员处理")
-
-        user.wecom_open_userid = normalized_open_userid
-        try:
-            session.flush()
-        except IntegrityError as error:
-            raise Conflict("机器人身份已被其他成员绑定，请重试或联系管理员") from error
         return user
 
     def get_team(self, session: Session, team_id: UUID, *, kind: TeamKind | None = None) -> Team:
@@ -186,9 +124,7 @@ class DatabaseRoutingDirectory:
 
     def active_channel(self, session: Session, team_id: UUID) -> TeamChannel:
         """Resolve the required active channel for a development team."""
-        channel = self._active_channel(session, team_id, kind=TeamKind.DEV, optional=False)
-        assert channel is not None
-        return channel
+        return self._active_channel(session, team_id, kind=TeamKind.DEV)
 
     def team_kind_for_chatid(self, session: Session, chatid: str) -> TeamKind | None:
         """Resolve an active bound group to its organization side."""
@@ -206,21 +142,16 @@ class DatabaseRoutingDirectory:
             return None
         return team.kind
 
-    def active_consult_channel(self, session: Session, queue_id: UUID) -> TeamChannel | None:
-        """Resolve an optional active channel for a consultation queue.
-
-        Queues can continue using consultant DMs until a consultation group is
-        bound. Inactive queues also do not receive group copies, preserving the
-        primary DM route for existing cases.
-        """
+    def active_consult_channel(self, session: Session, queue_id: UUID) -> TeamChannel:
+        """Resolve the required active group for a consultation queue."""
         team = session.get(Team, queue_id)
         if team is None:
             raise NotFound("咨询队列不存在")
         if team.kind is not TeamKind.CONSULT_QUEUE:
             raise ValidationErrorForDirectory("团队类型不匹配")
         if not team.active:
-            return None
-        return self._active_channel(session, queue_id, kind=TeamKind.CONSULT_QUEUE, optional=True)
+            raise RoutingUnavailable("咨询队列已停用")
+        return self._active_channel(session, queue_id, kind=TeamKind.CONSULT_QUEUE)
 
     def _active_channel(
         self,
@@ -228,8 +159,7 @@ class DatabaseRoutingDirectory:
         team_id: UUID,
         *,
         kind: TeamKind,
-        optional: bool,
-    ) -> TeamChannel | None:
+    ) -> TeamChannel:
         team = self.get_team(session, team_id, kind=kind)
         channels = session.scalars(
             select(WeComChannel).where(
@@ -237,40 +167,24 @@ class DatabaseRoutingDirectory:
                 WeComChannel.active.is_(True),
             )
         ).all()
-        if optional and not channels:
-            return None
         if len(channels) != 1 or channels[0].initialized_at is None:
             label = "研发团队" if kind is TeamKind.DEV else "咨询队列"
             raise RoutingUnavailable(f"{label}没有唯一且已初始化的群聊通道")
         return TeamChannel(team_id=team.id, chatid=channels[0].chatid)
 
-    def bind_dev_chat(
-        self, session: Session, *, actor_id: UUID, team_name: str, chatid: str
-    ) -> TeamChannel:
-        """Bind the current group to one development team."""
-        return self.bind_team_chat(
-            session,
-            actor_id=actor_id,
-            team_name=team_name,
-            chatid=chatid,
-            team_kind=TeamKind.DEV,
-        )
-
     def bind_team_chat(
         self,
         session: Session,
         *,
-        actor_id: UUID,
         team_name: str,
         chatid: str,
         team_kind: TeamKind,
     ) -> TeamChannel:
-        """Bind the current group to a team, under a team-admin check.
+        """Bind the current group to a team by its configured name.
 
-        This is the one safe exception to the normal manually-maintained
-        directory: a group callback is the only reliable way for the bot to
-        discover its opaque ``chatid``. Existing cases retain their stable team
-        ownership; only that team's live communication channel changes.
+        The group callback supplies the opaque ``chatid``. Group membership is
+        not resolved; the team name and channel conflict checks define the
+        binding. H5 callers enforce their own authorization before calling.
         """
         normalized_team_name = team_name.strip()
         normalized_chatid = chatid.strip()
@@ -287,14 +201,6 @@ class DatabaseRoutingDirectory:
             label = "在岗研发责任团队" if team_kind is TeamKind.DEV else "在岗咨询队列"
             raise RoutingUnavailable(f"未找到唯一的{label}")
         team = teams[0]
-        self.get_user(session, actor_id)
-        if not (
-            self.is_global_admin(session, actor_id)
-            or self.is_admin(session, user_id=actor_id, team_id=team.id)
-        ):
-            label = "研发团队管理员" if team_kind is TeamKind.DEV else "咨询队列管理员"
-            chat_label = "研发群" if team_kind is TeamKind.DEV else "咨询群"
-            raise Forbidden(f"只有该{label}可以绑定{chat_label}")
         existing = session.scalar(
             select(WeComChannel).where(WeComChannel.chatid == normalized_chatid)
         )

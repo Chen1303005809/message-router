@@ -35,10 +35,9 @@ from kefu.case_desk.contracts import (
     DeliveryView,
     DeliveryWork,
     DeliveryWorkItem,
-    DevelopmentGroupActor,
-    DraftView,
     EntryView,
     ExtendCaseDeadline,
+    GroupActor,
     ImagePart,
     MediaAccess,
     Page,
@@ -75,8 +74,6 @@ from kefu.persistence.models import (
     DeliveryStatus,
     EntrySide,
     LifecycleStatus,
-    MessageDraft,
-    MessageDraftPart,
     MessageIntent,
     PartKind,
     StoredMedia,
@@ -172,7 +169,7 @@ class CaseDesk:
             raise ValueError("web_base_url 不能为空")
 
     def execute(
-        self, command: Command, actor: Actor | DevelopmentGroupActor | SystemActor
+        self, command: Command, actor: Actor | GroupActor | SystemActor
     ) -> CommandResult:
         """Apply a closed command set atomically and return its stable result."""
         with self._session_factory() as session, session.begin():
@@ -183,9 +180,7 @@ class CaseDesk:
                     return self._delivery_item_succeeded(session, command)
                 return self._delivery_item_failed(session, command)
 
-            if isinstance(command, PostFormalMessage) and isinstance(
-                actor, DevelopmentGroupActor
-            ):
+            if isinstance(command, PostFormalMessage) and isinstance(actor, GroupActor):
                 return self._post_formal_message(session, command, actor)
             if not isinstance(actor, Actor):
                 raise Forbidden("此操作需要已认证的人员身份")
@@ -370,44 +365,20 @@ class CaseDesk:
             team_ids,
         )
 
-    def get_draft(self, draft_id: UUID, viewer: Actor) -> DraftView:
-        """Return the original ordered draft only to the person who sent it."""
-        with self._session_factory() as session:
-            draft = session.get(MessageDraft, draft_id)
-            if draft is None:
-                raise NotFound("消息草稿不存在")
-            if draft.owner_user_id != viewer.user_id:
-                raise Forbidden("你不能查看其他人的消息草稿")
-            if draft.consumed_at is not None:
-                raise Conflict("消息草稿已经被用于创建事件")
-            if _as_utc(draft.expires_at) <= utc_now():
-                raise ValidationError("消息草稿已过期，请重新发送问题")
-            parts = session.scalars(
-                select(MessageDraftPart)
-                .where(MessageDraftPart.draft_id == draft.id)
-                .order_by(MessageDraftPart.position.asc())
-            ).all()
-            return DraftView(
-                id=draft.id,
-                expires_at=_as_utc(draft.expires_at),
-                parts=tuple(
-                    PartView(
-                        position=part.position,
-                        kind=part.kind,
-                        text=part.text,
-                        media_id=part.media_id,
-                    )
-                    for part in parts
-                ),
-            )
-
     def list_consult_queues(self, viewer: Actor) -> tuple[TeamOption, ...]:
         with self._session_factory() as session:
             self._directory.get_user(session, viewer.user_id)
             teams = self._directory.active_teams_for_user(
                 session, user_id=viewer.user_id, kind=TeamKind.CONSULT_QUEUE
             )
-            return tuple(TeamOption(id=team.id, name=team.name) for team in teams)
+            routable: list[TeamOption] = []
+            for team in teams:
+                try:
+                    self._directory.active_consult_channel(session, team.id)
+                except RoutingUnavailable:
+                    continue
+                routable.append(TeamOption(id=team.id, name=team.name))
+            return tuple(routable)
 
     def list_dev_teams(self, viewer: Actor) -> tuple[TeamOption, ...]:
         """List routable development teams, including their display-only lead labels."""
@@ -605,8 +576,8 @@ class CaseDesk:
                 self._directory.assert_case_visible(session, actor.user_id, existing_case)
                 return self._result(existing_case, existing.id, idempotent=True)
 
-        parts, draft_source_msgid = self._parts_for_create(session, command, actor.user_id)
-        source_msgid = self._clean_source_msgid(command.source_msgid) or draft_source_msgid
+        parts = self._validate_parts(command.parts)
+        source_msgid = self._clean_source_msgid(command.source_msgid)
         if source_msgid is not None:
             existing = self._existing_source_entry(session, source_msgid)
             if existing is not None:
@@ -618,8 +589,10 @@ class CaseDesk:
             session, command.dev_team_id, kind=TeamKind.DEV
         )
         channel = self._directory.active_channel(session, dev_team.id)
+        self._directory.active_consult_channel(session, command.consult_queue_id)
         title = self._validated_title(command.title, parts)
         customer_name = self._validated_customer_name(command.customer_name)
+        consult_handler_name = self._validated_handler_name(command.consult_handler_name)
         related_case_id = self._validated_related_case(session, command.related_case_id)
         created_at = utc_now()
         case = Case(
@@ -639,6 +612,7 @@ class CaseDesk:
             waiting_on=WaitingOn.CONSULT,
             consult_queue_id=command.consult_queue_id,
             current_consultant_id=actor.user_id,
+            consult_handler_name=consult_handler_name,
             current_dev_team_id=channel.team_id,
             creator_id=actor.user_id,
             related_case_id=related_case_id,
@@ -653,6 +627,7 @@ class CaseDesk:
             kind=CaseEntryKind.FORMAL_MESSAGE,
             side=EntrySide.CONSULT,
             actor_user=actor_user,
+            actor_name=consult_handler_name,
             intent=MessageIntent.HANDOFF,
             source_msgid=source_msgid,
             metadata={"action": "create_case"},
@@ -667,10 +642,6 @@ class CaseDesk:
             waiting_on_after_delivery=WaitingOn.DEV,
             dev_team_name=dev_team.name,
         )
-        if command.draft_id is not None:
-            draft = session.get(MessageDraft, command.draft_id)
-            assert draft is not None  # _parts_for_create already validates it.
-            draft.consumed_at = utc_now()
         return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
     def _update_case_metadata(
@@ -806,39 +777,40 @@ class CaseDesk:
         self,
         session: Session,
         command: PostFormalMessage,
-        actor: Actor | DevelopmentGroupActor,
+        actor: Actor | GroupActor,
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         actor_user: User | None
         actor_name: str | None = None
-        if isinstance(actor, DevelopmentGroupActor):
-            if command.side is not EntrySide.DEV or not command.origin_chatid:
-                raise Forbidden("研发团队身份只能从已绑定的研发群回复正式信息")
+        if isinstance(actor, GroupActor):
+            if command.side is not actor.side or not command.origin_chatid:
+                raise Forbidden("群聊身份与消息侧别不匹配")
+            origin_kind = self._directory.team_kind_for_chatid(
+                session, command.origin_chatid
+            )
+            if actor.side is EntrySide.CONSULT:
+                expected_kind = TeamKind.CONSULT_QUEUE
+            elif actor.side is EntrySide.DEV:
+                expected_kind = TeamKind.DEV
+            else:
+                expected_kind = None
+            if expected_kind is None or origin_kind is not expected_kind:
+                raise Forbidden("当前群聊未绑定到对应的事件沟通侧")
             actor_user = None
-            actor_name = "研发团队"
-            side = EntrySide.DEV
+            side = actor.side
+            if side is EntrySide.CONSULT:
+                actor_name = case.consult_handler_name
+            else:
+                dev_team = self._directory.get_team(
+                    session, case.current_dev_team_id, kind=TeamKind.DEV
+                )
+                actor_name = dev_team.lead_display_name or dev_team.name
         else:
             actor_user = self._directory.get_user(session, actor.user_id)
             side = cast(
                 EntrySide,
                 self._directory.side_for_actor(session, actor.user_id, case, command.side),
             )
-        if command.suppress_delivery and side is not EntrySide.CONSULT:
-            raise ValidationError("只有咨询侧群聊投递可以使用被动回复替代")
-        if command.suppress_consult_group_delivery and side is not EntrySide.DEV:
-            raise ValidationError("只有研发侧回复可以使用咨询群被动回复替代")
-        if side is EntrySide.CONSULT and command.origin_chatid is not None:
-            channel = self._directory.active_consult_channel(session, case.consult_queue_id)
-            if channel is None or channel.chatid != command.origin_chatid:
-                raise Forbidden("咨询正式回复必须来自当前咨询队列绑定的群聊")
-        if side is EntrySide.DEV and command.origin_chatid is not None:
-            channel = self._directory.active_channel(session, case.current_dev_team_id)
-            if channel.chatid != command.origin_chatid:
-                raise Forbidden("研发正式回复必须来自当前研发责任团队绑定的群聊")
-            dev_team = self._directory.get_team(
-                session, case.current_dev_team_id, kind=TeamKind.DEV
-            )
-            actor_name = dev_team.name
         existing = self._existing_source_entry(session, command.source_msgid)
         if existing is not None:
             if existing.case_id != case.id:
@@ -857,14 +829,7 @@ class CaseDesk:
             actor_name=actor_name,
             intent=command.intent,
             source_msgid=self._clean_source_msgid(command.source_msgid),
-            metadata={
-                "action": "post_formal_message",
-                **(
-                    {"actor_wecom_userid": actor.wecom_userid}
-                    if isinstance(actor, DevelopmentGroupActor)
-                    else {}
-                ),
-            },
+            metadata={"action": "post_formal_message"},
         )
         self._add_parts(session, entry, parts)
         destination_type, destination_address = self._destination_for_side(session, case, side)
@@ -893,33 +858,6 @@ class CaseDesk:
                 item_platform_result=item_platform_result,
             )
         ]
-        if side is EntrySide.DEV:
-            consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
-            if consult_channel is not None:
-                defer_consult_channel = command.suppress_consult_group_delivery
-                delivery_ids.append(
-                    self._create_formal_delivery(
-                        session,
-                        case=case,
-                        entry=entry,
-                        destination_type=DeliveryDestination.CHAT,
-                        destination_address=consult_channel.chatid,
-                        waiting_on_after_delivery=None,
-                        delivery_status=(
-                            DeliveryStatus.SENT if defer_consult_channel else DeliveryStatus.PENDING
-                        ),
-                        item_status=(
-                            DeliveryItemStatus.SENT
-                            if defer_consult_channel
-                            else DeliveryItemStatus.PENDING
-                        ),
-                        item_platform_result=(
-                            {"delivery_mode": DEFERRED_PASSIVE_PENDING_MODE}
-                            if defer_consult_channel
-                            else None
-                        ),
-                    )
-                )
         case.version += 1
         return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
 
@@ -949,36 +887,22 @@ class CaseDesk:
                 "to_consultant": new_consultant.display_name,
             },
         )
-        delivery_ids = [
-            self._create_notice_delivery(
-                session,
-                entry=entry,
-                case=case,
-                destination_type=DeliveryDestination.USER,
-                destination_address=new_consultant.wecom_userid,
-                content=(
-                    "你已成为本事件的咨询经办人。"
-                    "请查看事件中心中的完整时间线和当前下一步。"
-                ),
-            )
-        ]
-        consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
-        if consult_channel is not None:
-            delivery_ids.append(
-                self._create_notice_delivery(
-                    session,
-                    entry=entry,
-                    case=case,
-                    destination_type=DeliveryDestination.CHAT,
-                    destination_address=consult_channel.chatid,
-                    content=(
-                        f"咨询经办人已由{old_consultant or '未指定'}转交给"
-                        f"{new_consultant.display_name}。"
-                        f"请后续由{new_consultant.display_name}继续跟进。"
-                    ),
-                )
-            )
-        return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
+        consult_channel = self._directory.active_consult_channel(
+            session, case.consult_queue_id
+        )
+        delivery_id = self._create_notice_delivery(
+            session,
+            entry=entry,
+            case=case,
+            destination_type=DeliveryDestination.CHAT,
+            destination_address=consult_channel.chatid,
+            content=(
+                f"咨询经办已由{old_consultant or '未指定'}转交给"
+                f"{new_consultant.display_name}。"
+                f"请后续由{new_consultant.display_name}继续跟进。"
+            ),
+        )
+        return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
     def _transfer_dev_team(
         self, session: Session, command: TransferDevTeam, actor: Actor
@@ -1284,34 +1208,6 @@ class CaseDesk:
             delivery.next_attempt_at = utc_now() + RETRY_DELAYS[delivery.attempts - 1]
         return self._result(case, entry.id)
 
-    def _parts_for_create(
-        self, session: Session, command: CreateCase, owner_id: UUID
-    ) -> tuple[tuple[ContentPart, ...], str | None]:
-        if command.draft_id is None:
-            return self._validate_parts(command.parts), None
-        if command.parts:
-            raise ValidationError("从消息草稿创建事件时不能修改原始内容")
-        draft = session.scalar(
-            select(MessageDraft).where(MessageDraft.id == command.draft_id).with_for_update()
-        )
-        if draft is None:
-            raise NotFound("消息草稿不存在")
-        if draft.owner_user_id != owner_id:
-            raise Forbidden("你不能使用其他人的消息草稿")
-        if draft.consumed_at is not None:
-            raise Conflict("消息草稿已经被用于创建事件")
-        if _as_utc(draft.expires_at) <= utc_now():
-            raise ValidationError("消息草稿已过期，请重新发送问题")
-        draft_parts = session.scalars(
-            select(MessageDraftPart)
-            .where(MessageDraftPart.draft_id == draft.id)
-            .order_by(MessageDraftPart.position.asc())
-        ).all()
-        return (
-            self._validate_parts(tuple(self._draft_part_from_orm(part) for part in draft_parts)),
-            draft.source_msgid,
-        )
-
     def _validate_parts(self, parts: Sequence[ContentPart]) -> tuple[ContentPart, ...]:
         if not parts:
             raise ValidationError("正式消息至少需要一个文字或图片片段")
@@ -1359,6 +1255,16 @@ class CaseDesk:
 
     def _validated_customer_name(self, name: str | None) -> str:
         return (name or "").strip() or "未录入"
+
+    def _validated_handler_name(self, name: str) -> str:
+        if not isinstance(name, str):
+            raise ValidationError("咨询经办人必须是文本")
+        normalized = name.strip()
+        if not normalized:
+            raise ValidationError("咨询经办人不能为空")
+        if len(normalized) > 256:
+            raise ValidationError("咨询经办人不能超过 256 个字符")
+        return normalized
 
     def _validated_related_case(
         self, session: Session, related_case_id: UUID | None
@@ -1448,7 +1354,7 @@ class CaseDesk:
                 case_title=case.title,
                 speaker_name=_original_speaker_name(entry),
                 assignee_name=(
-                    self._user_name(session, case.current_consultant_id)
+                    case.consult_handler_name
                     if entry.side is EntrySide.DEV
                     else None
                 ),
@@ -1546,10 +1452,8 @@ class CaseDesk:
             channel = self._directory.active_channel(session, case.current_dev_team_id)
             return DeliveryDestination.CHAT, channel.chatid
         if side is EntrySide.DEV:
-            if case.current_consultant_id is None:
-                raise RoutingUnavailable("事件没有当前咨询经办人")
-            consultant = self._directory.get_user(session, case.current_consultant_id)
-            return DeliveryDestination.USER, consultant.wecom_userid
+            channel = self._directory.active_consult_channel(session, case.consult_queue_id)
+            return DeliveryDestination.CHAT, channel.chatid
         raise ValidationError("系统记录没有正式消息投递目标")
 
     def _opposite_waiting_side(self, side: EntrySide) -> WaitingOn:
@@ -1648,24 +1552,11 @@ class CaseDesk:
         assert part.media_id is not None
         return ImagePart(part.media_id)
 
-    def _draft_part_from_orm(self, part: MessageDraftPart) -> ContentPart:
-        if part.kind is PartKind.TEXT:
-            assert part.text is not None
-            return TextPart(part.text)
-        assert part.media_id is not None
-        return ImagePart(part.media_id)
-
     def _user_name(self, session: Session, user_id: UUID | None) -> str | None:
         if user_id is None:
             return None
         user = self._directory.get_user(session, user_id, require_active=False)
         return user.display_name
-
-    def _user_wecom_userid(self, session: Session, user_id: UUID | None) -> str | None:
-        if user_id is None:
-            return None
-        user = self._directory.get_user(session, user_id, require_active=False)
-        return user.wecom_userid
 
     def _result(
         self,
@@ -1826,6 +1717,7 @@ class CaseDesk:
             ),
             current_consultant_id=case.current_consultant_id,
             current_consultant_name=self._user_name(session, case.current_consultant_id),
+            consult_handler_name=case.consult_handler_name,
             current_dev_team_id=case.current_dev_team_id,
             current_dev_team_name=dev_team.name if dev_team else "未知团队",
             current_dev_team_lead_display_name=dev_team.lead_display_name if dev_team else None,

@@ -1,10 +1,9 @@
-"""Translate normalized WeCom callbacks into explicit CaseDesk commands."""
+"""Translate normalized WeCom group callbacks into CaseDesk commands."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from enum import StrEnum
 from typing import cast
 from uuid import UUID, uuid4
@@ -14,38 +13,25 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kefu.case_desk.contracts import (
-    Actor,
     ContentPart,
-    DevelopmentGroupActor,
+    GroupActor,
     ImagePart,
     PostFormalMessage,
     TextPart,
 )
-from kefu.case_desk.errors import CaseDeskError, NotFound, ValidationError
-from kefu.case_desk.service import CaseDesk, utc_now
+from kefu.case_desk.errors import CaseDeskError, ValidationError
+from kefu.case_desk.service import CaseDesk
 from kefu.media.storage import MediaIngestError, MediaIngestor
-from kefu.persistence.models import (
-    EntrySide,
-    InboundMessage,
-    MessageDraft,
-    MessageDraftPart,
-    PartKind,
-    TeamKind,
-)
+from kefu.persistence.models import EntrySide, InboundMessage, PartKind, TeamKind
 from kefu.relay.references import parse_quoted_case_ref
 from kefu.routing.directory import DatabaseRoutingDirectory
 from kefu.wecom.transport import InboundEvent, InboundImagePart, InboundPart, InboundTextPart
 
-DEFAULT_DRAFT_TTL = timedelta(minutes=15)
-
 
 class RelayDisposition(StrEnum):
-    DRAFT_SAVED = "draft_saved"
     FORWARDED = "forwarded"
     CHANNEL_BOUND = "channel_bound"
     CONSULT_CHANNEL_BOUND = "consult_channel_bound"
-    IDENTITY_BOUND = "identity_bound"
-    OPEN_EVENT_CENTER = "open_event_center"
     IGNORED = "ignored"
     REJECTED = "rejected"
     PROCESSING = "processing"
@@ -55,7 +41,6 @@ class RelayDisposition(StrEnum):
 class RelayDecision:
     disposition: RelayDisposition
     case_ref: str | None = None
-    draft_id: UUID | None = None
     reply_text: str | None = None
     idempotent: bool = False
     delivery_ids: tuple[UUID, ...] = ()
@@ -64,7 +49,6 @@ class RelayDecision:
         return {
             "disposition": self.disposition.value,
             "case_ref": self.case_ref,
-            "draft_id": str(self.draft_id) if self.draft_id else None,
             "reply_text": self.reply_text,
             "idempotent": self.idempotent,
             "delivery_ids": [str(delivery_id) for delivery_id in self.delivery_ids],
@@ -72,7 +56,12 @@ class RelayDecision:
 
     @classmethod
     def from_json(cls, data: Mapping[str, object]) -> RelayDecision:
-        draft_id = data.get("draft_id")
+        try:
+            disposition = RelayDisposition(str(data["disposition"]))
+        except (KeyError, ValueError):
+            # Old single-chat outcomes are no longer actionable, but their
+            # idempotency rows can remain after deployment.
+            disposition = RelayDisposition.IGNORED
         raw_delivery_ids = data.get("delivery_ids")
         delivery_ids = (
             tuple(UUID(str(delivery_id)) for delivery_id in raw_delivery_ids)
@@ -80,9 +69,8 @@ class RelayDecision:
             else ()
         )
         return cls(
-            disposition=RelayDisposition(str(data["disposition"])),
+            disposition=disposition,
             case_ref=cast(str | None, data.get("case_ref")),
-            draft_id=UUID(str(draft_id)) if draft_id else None,
             reply_text=cast(str | None, data.get("reply_text")),
             idempotent=True,
             delivery_ids=delivery_ids,
@@ -90,7 +78,7 @@ class RelayDecision:
 
 
 class Relay:
-    """Enforce explicit message affiliation before calling the event service."""
+    """Handle group binding commands and mentions in bound group chats."""
 
     def __init__(
         self,
@@ -98,22 +86,18 @@ class Relay:
         case_desk: CaseDesk,
         media_ingestor: MediaIngestor | None = None,
         directory: DatabaseRoutingDirectory | None = None,
-        draft_ttl: timedelta = DEFAULT_DRAFT_TTL,
     ) -> None:
         self._session_factory = session_factory
         self._case_desk = case_desk
         self._media_ingestor = media_ingestor
         self._directory = directory or DatabaseRoutingDirectory()
-        self._draft_ttl = draft_ttl
 
-    def handle(
-        self,
-        event: InboundEvent,
-        *,
-        suppress_group_delivery: bool = False,
-        suppress_consult_group_delivery: bool = False,
-    ) -> RelayDecision:
+    def handle(self, event: InboundEvent, *, suppress_delivery: bool = False) -> RelayDecision:
         """Classify a callback exactly once and return a transport-neutral decision."""
+        if event.chattype != "group":
+            # Ignore private messages before inspecting payload errors or
+            # executing any legacy single-chat behavior.
+            return RelayDecision(RelayDisposition.IGNORED)
         msgid = event.msgid.strip()
         if not msgid or len(msgid) > 256:
             return RelayDecision(
@@ -127,17 +111,8 @@ class Relay:
             decode_error = event.metadata.get("decode_error")
             if isinstance(decode_error, str) and decode_error:
                 decision = RelayDecision(RelayDisposition.REJECTED, reply_text=decode_error)
-            elif event.chattype == "single":
-                decision = self._handle_single(
-                    event, suppress_group_delivery=suppress_group_delivery
-                )
-            elif event.chattype == "group":
-                decision = self._handle_group(
-                    event,
-                    suppress_consult_group_delivery=suppress_consult_group_delivery,
-                )
             else:
-                decision = RelayDecision(RelayDisposition.IGNORED)
+                decision = self._handle_group(event, suppress_delivery=suppress_delivery)
         except (CaseDeskError, MediaIngestError) as error:
             decision = RelayDecision(RelayDisposition.REJECTED, reply_text=str(error))
         return self._remember_decision(msgid, decision)
@@ -153,95 +128,8 @@ class Relay:
             return EntrySide.DEV
         return None
 
-    def _handle_single(
-        self, event: InboundEvent, *, suppress_group_delivery: bool = False
-    ) -> RelayDecision:
-        if event.sender_open_userid:
-            try:
-                sender = self._user_for_wecom_userid(event.sender_userid)
-            except NotFound as error:
-                submitted_userid = _single_plaintext_userid(event)
-                if submitted_userid is not None:
-                    with self._session_factory() as session:
-                        registered_user = self._directory.find_user_by_plain_wecom_userid(
-                            session, submitted_userid
-                        )
-                    if registered_user is not None:
-                        with self._session_factory() as session, session.begin():
-                            registered_user = self._directory.bind_wecom_open_userid(
-                                session,
-                                open_userid=event.sender_open_userid,
-                                wecom_userid=submitted_userid,
-                            )
-                        return RelayDecision(
-                            RelayDisposition.IDENTITY_BOUND,
-                            reply_text=(
-                                "已将当前机器人身份绑定到事件中心成员"
-                                f"「{registered_user.display_name}」。"
-                                "现在可以直接私聊机器人发送消息。"
-                            ),
-                        )
-                raise ValidationError(
-                    "机器人身份尚未绑定。请先让管理员在事件中心登记你的明文 userid，"
-                    "再单独私聊机器人发送该 userid 完成绑定。"
-                ) from error
-            else:
-                submitted_userid = _single_plaintext_userid(event)
-                if submitted_userid is not None:
-                    with self._session_factory() as session:
-                        registered_user = self._directory.find_user_by_plain_wecom_userid(
-                            session, submitted_userid
-                        )
-                    if registered_user is not None and registered_user.id == sender:
-                        return RelayDecision(
-                            RelayDisposition.IDENTITY_BOUND,
-                            reply_text=(
-                                f"当前机器人身份已绑定到「{registered_user.display_name}」。"
-                            ),
-                        )
-                    if registered_user is not None:
-                        raise ValidationError(
-                            "当前机器人身份已绑定到其他成员，不能通过私聊修改。"
-                            "如需更正，请联系事件中心管理员。"
-                        )
-        else:
-            sender = self._user_for_wecom_userid(event.sender_userid)
-        if self._is_my_cases_shortcut(event.parts, event.quote_content):
-            return RelayDecision(RelayDisposition.OPEN_EVENT_CENTER)
-        if event.quote_content:
-            case_ref = parse_quoted_case_ref(event.quote_content)
-            parts = self._to_case_parts(event.parts)
-            result = self._case_desk.execute(
-                PostFormalMessage(
-                    case_ref=case_ref,
-                    expected_version=None,
-                    parts=parts,
-                    intent=event.intent,
-                    source_msgid=event.msgid,
-                    side=EntrySide.CONSULT,
-                    suppress_delivery=suppress_group_delivery,
-                ),
-                Actor(sender),
-            )
-            return RelayDecision(
-                RelayDisposition.FORWARDED,
-                case_ref=result.case_ref,
-                idempotent=result.idempotent,
-                delivery_ids=result.delivery_ids,
-            )
-        parts = self._to_case_parts(event.parts)
-        draft_id = self._save_draft(owner_user_id=sender, source_msgid=event.msgid, parts=parts)
-        return RelayDecision(
-            RelayDisposition.DRAFT_SAVED,
-            draft_id=draft_id,
-            reply_text="已保存为消息草稿。请选择“创建新事件”或添加到已有事件。",
-        )
-
     def _handle_group(
-        self,
-        event: InboundEvent,
-        *,
-        suppress_consult_group_delivery: bool = False,
+        self, event: InboundEvent, *, suppress_delivery: bool = False
     ) -> RelayDecision:
         if not event.mentioned_bot:
             return RelayDecision(RelayDisposition.IGNORED)
@@ -250,11 +138,9 @@ class Relay:
         requested_binding = _requested_team_binding(event.parts)
         if requested_binding is not None:
             team_kind, team_name = requested_binding
-            sender = self._user_for_wecom_userid(event.sender_userid)
             with self._session_factory() as session, session.begin():
                 self._directory.bind_team_chat(
                     session,
-                    actor_id=sender,
                     team_name=team_name,
                     chatid=event.chatid,
                     team_kind=team_kind,
@@ -268,24 +154,13 @@ class Relay:
                 RelayDisposition.CHANNEL_BOUND,
                 reply_text=f"已将当前群绑定为研发团队「{team_name}」的沟通群。",
             )
+
         side = self.group_side_for_chatid(event.chatid)
         if side is None:
             raise ValidationError("当前群聊尚未绑定为咨询队列或研发责任团队")
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
         case_ref = parse_quoted_case_ref(event.quote_content)
-        if side is EntrySide.DEV:
-            # The bound development group is the acting identity. Member
-            # userid mapping is intentionally unnecessary for team replies.
-            sender_actor = DevelopmentGroupActor(event.sender_userid)
-        else:
-            sender_actor = Actor(self._user_for_wecom_userid(event.sender_userid))
-        # The service makes the matching check under the same transaction that
-        # appends the entry; this preliminary read only avoids media work for a
-        # consultant who cannot even view the claimed event. The bound
-        # development group is the scope for all developer-side replies.
-        if isinstance(sender_actor, Actor):
-            self._case_desk.get_case(case_ref, sender_actor)
         parts = self._to_case_parts(event.parts)
         result = self._case_desk.execute(
             PostFormalMessage(
@@ -296,9 +171,9 @@ class Relay:
                 source_msgid=event.msgid,
                 side=side,
                 origin_chatid=event.chatid,
-                suppress_consult_group_delivery=suppress_consult_group_delivery,
+                suppress_delivery=suppress_delivery,
             ),
-            sender_actor,
+            GroupActor(side),
         )
         return RelayDecision(
             RelayDisposition.FORWARDED,
@@ -325,51 +200,6 @@ class Relay:
             else:
                 raise ValidationError("消息包含不支持的内容类型")
         return tuple(parts)
-
-    def _save_draft(
-        self, *, owner_user_id: UUID, source_msgid: str, parts: Sequence[ContentPart]
-    ) -> UUID:
-        with self._session_factory() as session, session.begin():
-            existing = session.scalar(
-                select(MessageDraft)
-                .where(MessageDraft.source_msgid == source_msgid)
-                .with_for_update()
-            )
-            if existing is not None:
-                return existing.id
-            draft = MessageDraft(
-                id=uuid4(),
-                owner_user_id=owner_user_id,
-                source_msgid=source_msgid,
-                expires_at=utc_now() + self._draft_ttl,
-            )
-            session.add(draft)
-            for position, part in enumerate(parts):
-                if isinstance(part, TextPart):
-                    record = MessageDraftPart(
-                        id=uuid4(),
-                        draft_id=draft.id,
-                        position=position,
-                        kind=PartKind.TEXT,
-                        text=part.text,
-                        media_id=None,
-                    )
-                else:
-                    record = MessageDraftPart(
-                        id=uuid4(),
-                        draft_id=draft.id,
-                        position=position,
-                        kind=PartKind.IMAGE,
-                        text=None,
-                        media_id=part.media_id,
-                    )
-                session.add(record)
-            return draft.id
-
-    def _user_for_wecom_userid(self, wecom_userid: str) -> UUID:
-        with self._session_factory() as session:
-            user = self._directory.get_user_by_wecom_userid(session, wecom_userid)
-            return user.id
 
     def _previous_decision(self, msgid: str) -> RelayDecision | None:
         with self._session_factory() as session:
@@ -398,22 +228,12 @@ class Relay:
                 session.add(InboundMessage(id=uuid4(), msgid=msgid, result_json=decision.as_json()))
                 return decision
         except IntegrityError:
-            # Another worker won the unique msgid race.  A duplicate business
-            # entry is still prevented by draft/entry source_msgid constraints.
+            # Another worker won the unique msgid race; duplicate case entries
+            # are still prevented by the source_msgid constraint.
             previous = self._previous_decision(msgid)
             if previous is not None:
                 return previous
             return RelayDecision(RelayDisposition.PROCESSING, idempotent=True)
-
-    def _is_my_cases_shortcut(
-        self, parts: Sequence[InboundPart], quote_content: str | None
-    ) -> bool:
-        return (
-            quote_content is None
-            and len(parts) == 1
-            and isinstance(parts[0], InboundTextPart)
-            and parts[0].text.strip() == "我的事件"
-        )
 
     def complete_deferred_deliveries(self, delivery_ids: Sequence[UUID]) -> int:
         """Finalize deliveries represented by a successful passive reply."""
@@ -445,13 +265,3 @@ def _requested_team_binding(parts: Sequence[InboundPart]) -> tuple[TeamKind, str
                 raise ValidationError(f"请使用“{command} 团队名称”指定要绑定的{label}")
             return team_kind, team_name
     return None
-
-
-def _single_plaintext_userid(event: InboundEvent) -> str | None:
-    if event.quote_content is not None or len(event.parts) != 1:
-        return None
-    part = event.parts[0]
-    if not isinstance(part, InboundTextPart):
-        return None
-    userid = part.text.strip()
-    return userid or None

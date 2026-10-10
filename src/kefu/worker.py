@@ -29,7 +29,6 @@ from kefu.wecom.transport import (
     InboundImagePart,
     InboundReply,
     LongConnectionWeComAdapter,
-    ReplyAction,
     WeComTransport,
 )
 
@@ -60,9 +59,7 @@ def _transport_from_settings(
             storage=storage,
             ws_url=settings.wecom_long_connection_url,
             bot_mention_name=settings.wecom_bot_mention_name,
-            require_group_mention=settings.wecom_require_group_mention,
             connect_timeout_seconds=settings.wecom_connect_timeout_seconds,
-            bot_userid_mode=settings.wecom_bot_userid_mode,
         )
     raise ValueError(f"不支持的企业微信传输模式：{settings.wecom_transport}")
 
@@ -84,30 +81,26 @@ async def _inbound_loop(
     *,
     relay: Relay,
     transport: WeComTransport,
-    web_base_url: str,
     deferred_replies: DeferredPassiveReplyStore | None = None,
 ) -> None:
     async for event in transport.events():
         try:
-            if event.chattype == "single":
-                origin_side = EntrySide.CONSULT
-            elif event.chattype == "group":
+            if event.chattype == "group":
                 origin_side = relay.group_side_for_chatid(event.chatid)
             else:
                 origin_side = None
-            suppress_group_delivery, suppress_consult_group_delivery = await asyncio.to_thread(
+            suppress_delivery = await asyncio.to_thread(
                 _deferred_delivery_suppression,
                 event=event,
                 deferred_replies=deferred_replies,
                 origin_side=origin_side,
             )
             # Database and object-store adapters are synchronous; do not stall
-            # heartbeats while they write a draft or a formal entry.
+            # heartbeats while they write a formal entry.
             decision = await asyncio.to_thread(
                 relay.handle,
                 event,
-                suppress_group_delivery=suppress_group_delivery,
-                suppress_consult_group_delivery=suppress_consult_group_delivery,
+                suppress_delivery=suppress_delivery,
             )
         except Exception:
             logger.exception("relay failed for WeCom msgid=%s", event.msgid)
@@ -118,7 +111,7 @@ async def _inbound_loop(
             decision.disposition,
             decision.case_ref,
         )
-        reply = _reply_for_decision(decision, web_base_url)
+        reply = _reply_for_decision(decision)
         pending = await asyncio.to_thread(
             _defer_group_callback,
             event=event,
@@ -137,7 +130,7 @@ async def _inbound_loop(
             try:
                 await transport.reply(event, reply)
             except Exception:
-                # The formal event/draft is already durable. A reply failure must
+                # The formal group event is already durable. A reply failure must
                 # not cause the platform callback to be processed a second time.
                 logger.exception("failed to reply to WeCom msgid=%s", event.msgid)
         await _release_deferred_callback(
@@ -147,8 +140,7 @@ async def _inbound_loop(
             transport=transport,
             relay=relay,
             origin_side=origin_side,
-            suppress_group_delivery=suppress_group_delivery,
-            suppress_consult_group_delivery=suppress_consult_group_delivery,
+            suppress_delivery=suppress_delivery,
         )
 
 
@@ -184,22 +176,22 @@ def _deferred_delivery_suppression(
     event: InboundEvent,
     deferred_replies: DeferredPassiveReplyStore | None,
     origin_side: EntrySide | None,
-) -> tuple[bool, bool]:
-    """Return which active delivery is replaced by a matching passive callback."""
+) -> bool:
+    """Return whether a matching passive group callback replaces the delivery."""
     if (
         deferred_replies is None
         or origin_side is None
         or not event.quote_content
         or any(isinstance(part, InboundImagePart) for part in event.parts)
     ):
-        return False, False
+        return False
     try:
         case_ref = parse_quoted_case_ref(event.quote_content)
     except CaseDeskError:
-        return False, False
+        return False
     if origin_side is EntrySide.CONSULT:
-        return deferred_replies.has_match(case_ref, origin_side=EntrySide.DEV), False
-    return False, deferred_replies.has_match(case_ref, origin_side=EntrySide.CONSULT)
+        return deferred_replies.has_match(case_ref, origin_side=EntrySide.DEV)
+    return deferred_replies.has_match(case_ref, origin_side=EntrySide.CONSULT)
 
 
 async def _release_deferred_callback(
@@ -210,8 +202,7 @@ async def _release_deferred_callback(
     transport: WeComTransport,
     relay: Relay,
     origin_side: EntrySide | None,
-    suppress_group_delivery: bool,
-    suppress_consult_group_delivery: bool,
+    suppress_delivery: bool,
 ) -> None:
     if (
         deferred_replies is None
@@ -231,8 +222,7 @@ async def _release_deferred_callback(
     )
     deferred_delivery_ids = _deferred_delivery_ids(
         decision.delivery_ids,
-        suppress_group_delivery=suppress_group_delivery,
-        suppress_consult_group_delivery=suppress_consult_group_delivery,
+        suppress_delivery=suppress_delivery,
     )
     if pending is None:
         if deferred_delivery_ids:
@@ -284,16 +274,9 @@ async def _release_deferred_callback(
 def _deferred_delivery_ids(
     delivery_ids: tuple[UUID, ...],
     *,
-    suppress_group_delivery: bool,
-    suppress_consult_group_delivery: bool,
+    suppress_delivery: bool,
 ) -> tuple[UUID, ...]:
-    if suppress_group_delivery:
-        return delivery_ids
-    if suppress_consult_group_delivery:
-        # The first delivery is the consultant DM; subsequent copies go to
-        # the optional consultation group and are the only items being deferred.
-        return delivery_ids[1:]
-    return ()
+    return delivery_ids if suppress_delivery else ()
 
 
 async def _restore_deferred_deliveries(
@@ -314,31 +297,14 @@ async def _acknowledge_deferred_reply(
         logger.exception("failed to acknowledge deferred passive reply req_id=%s", pending.req_id)
 
 
-def _reply_for_decision(decision: RelayDecision, web_base_url: str) -> InboundReply | None:
+def _reply_for_decision(decision: RelayDecision) -> InboundReply | None:
     """Turn relay outcomes into low-noise, callback-bound bot responses."""
     if decision.idempotent:
         return None
-    if decision.disposition is RelayDisposition.IDENTITY_BOUND and decision.reply_text:
-        return InboundReply(title="机器人身份绑定成功", text=decision.reply_text)
-    if decision.disposition is RelayDisposition.DRAFT_SAVED and decision.draft_id is not None:
-        return InboundReply(
-            title="消息草稿已保存",
-            text=decision.reply_text or "请选择下一步操作。",
-            actions=(
-                ReplyAction("创建新事件", f"{web_base_url}/drafts/{decision.draft_id}/new"),
-                ReplyAction("事件中心", f"{web_base_url}/events"),
-            ),
-        )
-    if decision.disposition is RelayDisposition.OPEN_EVENT_CENTER:
-        return InboundReply(
-            title="客户问题事件中心",
-            text="打开事件中心查看你有权限访问的事件。",
-            actions=(ReplyAction("打开事件中心", f"{web_base_url}/events"),),
-        )
     if decision.disposition is RelayDisposition.CHANNEL_BOUND and decision.reply_text:
-        return InboundReply(title="研发群已绑定", text=decision.reply_text)
+        return InboundReply(text=decision.reply_text)
     if decision.disposition is RelayDisposition.CONSULT_CHANNEL_BOUND and decision.reply_text:
-        return InboundReply(title="咨询群已绑定", text=decision.reply_text)
+        return InboundReply(text=decision.reply_text)
     if decision.disposition is RelayDisposition.REJECTED and decision.reply_text:
         return InboundReply(text=decision.reply_text)
     return None
@@ -373,9 +339,8 @@ async def run() -> None:
         else None
     )
     logger.info(
-        "bot-worker starting with transport=%s callback_userid_mode=%s",
+        "bot-worker starting with transport=%s",
         settings.wecom_transport,
-        settings.wecom_bot_userid_mode,
     )
     await transport.start()
     try:
@@ -385,7 +350,6 @@ async def run() -> None:
                 _inbound_loop(
                     relay=relay,
                     transport=transport,
-                    web_base_url=settings.web_base_url,
                     deferred_replies=deferred_replies,
                 )
             )

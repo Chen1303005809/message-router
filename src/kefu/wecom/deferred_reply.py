@@ -229,7 +229,6 @@ class DeferredPassiveReplyStore:
             req_id=record.req_id,
             event=InboundEvent(
                 msgid=record.msgid,
-                sender_userid="",
                 chatid=None,
                 chattype="group",
                 parts=(),
@@ -267,7 +266,17 @@ def _raw_frame(event: InboundEvent) -> dict[str, object] | None:
     raw_frame = event.metadata.get("wecom_raw_frame")
     if not isinstance(raw_frame, Mapping):
         return None
-    return dict(cast(Mapping[str, object], raw_frame))
+    clean_frame = dict(cast(Mapping[str, object], raw_frame))
+    body = clean_frame.get("body")
+    if isinstance(body, Mapping):
+        clean_body = dict(body)
+        sender = clean_body.get("from")
+        if isinstance(sender, Mapping):
+            clean_sender = dict(sender)
+            clean_sender.pop("userid", None)
+            clean_body["from"] = clean_sender
+        clean_frame["body"] = clean_body
+    return clean_frame
 
 
 def _callback_req_id(event: InboundEvent) -> str | None:

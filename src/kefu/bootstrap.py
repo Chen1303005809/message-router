@@ -60,12 +60,6 @@ def _upsert_users(session: Session, values: Sequence[object]) -> dict[str, User]
         display_name = _string(item, "display_name")
         user = session.scalar(select(User).where(User.wecom_userid == wecom_userid))
         if user is None:
-            if session.scalar(
-                select(User).where(User.wecom_open_userid == wecom_userid)
-            ) is not None:
-                raise BootstrapConfigError(
-                    f"userid {wecom_userid} 已作为机器人身份绑定，不能重复注册"
-                )
             user = User(
                 id=uuid4(),
                 wecom_userid=wecom_userid,
@@ -91,12 +85,6 @@ def _upsert_global_admin(session: Session, raw: object) -> User:
     display_name = raw_display_name.strip()
     user = session.scalar(select(User).where(User.wecom_userid == wecom_userid))
     if user is None:
-        if session.scalar(
-            select(User).where(User.wecom_open_userid == wecom_userid)
-        ) is not None:
-            raise BootstrapConfigError(
-                f"userid {wecom_userid} 已作为机器人身份绑定，不能设为总管理员"
-            )
         user = User(
             id=uuid4(),
             wecom_userid=wecom_userid,
