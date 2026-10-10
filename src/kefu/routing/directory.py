@@ -241,6 +241,18 @@ class DatabaseRoutingDirectory:
             team_kind=TeamKind.DEV,
         )
 
+    def bind_consult_chat_from_group(
+        self, session: Session, *, team_name: str, chatid: str
+    ) -> TeamChannel:
+        """Bind a consultation queue from its group callback without a sender lookup."""
+        return self._bind_team_chat(
+            session,
+            actor_id=None,
+            team_name=team_name,
+            chatid=chatid,
+            team_kind=TeamKind.CONSULT_QUEUE,
+        )
+
     def bind_team_chat(
         self,
         session: Session,
@@ -268,7 +280,7 @@ class DatabaseRoutingDirectory:
         chatid: str,
         team_kind: TeamKind,
     ) -> TeamChannel:
-        """Apply a team binding, allowing an actorless call only for dev callbacks.
+        """Apply a team binding, allowing actorless calls only from group callbacks.
 
         This is the one safe exception to the normal manually-maintained
         directory: a group callback is the only reliable way for the bot to
@@ -290,10 +302,7 @@ class DatabaseRoutingDirectory:
             label = "在岗研发责任团队" if team_kind is TeamKind.DEV else "在岗咨询队列"
             raise RoutingUnavailable(f"未找到唯一的{label}")
         team = teams[0]
-        if actor_id is None:
-            if team_kind is not TeamKind.DEV:
-                raise Forbidden("只有研发群回调可以免成员身份绑定研发群")
-        else:
+        if actor_id is not None:
             self.get_user(session, actor_id)
             if not (
                 self.is_global_admin(session, actor_id)

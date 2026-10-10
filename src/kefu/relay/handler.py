@@ -235,13 +235,8 @@ class Relay:
                         session, team_name=team_name, chatid=event.chatid
                     )
                 else:
-                    sender = self._user_for_wecom_userid(event.sender_userid)
-                    self._directory.bind_team_chat(
-                        session,
-                        actor_id=sender,
-                        team_name=team_name,
-                        chatid=event.chatid,
-                        team_kind=team_kind,
+                    self._directory.bind_consult_chat_from_group(
+                        session, team_name=team_name, chatid=event.chatid
                     )
             if team_kind is TeamKind.CONSULT_QUEUE:
                 return RelayDecision(
