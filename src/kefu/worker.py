@@ -30,6 +30,7 @@ from kefu.wecom.transport import (
     InboundImagePart,
     InboundReply,
     LongConnectionWeComAdapter,
+    TransportDisplacedError,
     WeComTransport,
 )
 
@@ -381,16 +382,30 @@ async def run() -> None:
         settings.wecom_transport,
         database_target_fingerprint(engine.url),
     )
-    await transport.start()
     try:
-        async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(_delivery_loop(worker))
-            tasks.create_task(
-                _inbound_loop(
-                    relay=relay,
-                    transport=transport,
-                    deferred_replies=deferred_replies,
+        await transport.start()
+    except TransportDisplacedError:
+        logger.critical(
+            "[GROUP-TRACE] bot_worker_stopped reason=connection_displaced "
+            "action=remove_duplicate_worker_then_restart"
+        )
+        await transport.close()
+        return
+    try:
+        try:
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(_delivery_loop(worker))
+                tasks.create_task(
+                    _inbound_loop(
+                        relay=relay,
+                        transport=transport,
+                        deferred_replies=deferred_replies,
+                    )
                 )
+        except* TransportDisplacedError:
+            logger.critical(
+                "[GROUP-TRACE] bot_worker_stopped reason=connection_displaced "
+                "action=remove_duplicate_worker_then_restart"
             )
     finally:
         await transport.close()

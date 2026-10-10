@@ -80,8 +80,10 @@ docker compose up --build
 ```bash
 journalctl -u kefu-web -u kefu-worker -f | grep '\[GROUP-TRACE\]'
 # Docker Compose 部署：
-docker compose logs -f web worker | grep '\[GROUP-TRACE\]'
+docker compose logs -f web bot-worker | grep '\[GROUP-TRACE\]'
 ```
+
+如果看到 `bot_connection_displaced`，说明当前连接收到了同一 Bot ID 的新连接顶替事件。检查所有主机上的容器和 systemd 进程，确保只运行一个使用该 Bot ID 的 `bot-worker`；被顶替的 worker 会退出，避免自动重连后继续争抢连接。Docker Compose 的 worker 使用 `on-failure`，不会在这类正常退出后立即重启。
 
 ### 首次初始化总管理员
 

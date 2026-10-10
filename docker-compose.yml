@@ -11,6 +11,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    ports:
+      - "0.0.0.0:18085:5432"
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
 
@@ -89,7 +91,7 @@ services:
       migrate:
         condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "0.0.0.0:18084:8000"
     healthcheck:
       test:
         [
@@ -106,7 +108,9 @@ services:
   bot-worker:
     build: .
     command: ["kefu-worker"]
-    restart: unless-stopped
+    # A worker displaced by another connection exits cleanly; avoid restarting
+    # it into a loop that keeps contesting the same Bot ID.
+    restart: on-failure
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kefu}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-kefu}
       OBJECT_STORAGE_BACKEND: s3

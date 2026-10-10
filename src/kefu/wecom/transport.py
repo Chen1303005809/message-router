@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from kefu.media.storage import ObjectStorage
+from kefu.observability import opaque_id_fingerprint
 from kefu.persistence.models import DeliveryDestination, MessageIntent, PartKind, StoredMedia
 from kefu.wecom.aibot_client import AiBotClient, AiBotClientError, OfficialAiBotClient
 
@@ -103,6 +104,10 @@ class InboundPayloadError(TransportError):
     pass
 
 
+class TransportDisplacedError(TransportError):
+    """The server replaced this bot connection with another active instance."""
+
+
 class FakeWeComAdapter:
     """Deterministic test transport that records calls and can fail by req_id."""
 
@@ -184,6 +189,7 @@ class LongConnectionWeComAdapter:
         self._start_lock = asyncio.Lock()
         self._started = False
         self._closed = False
+        self._displaced = asyncio.Event()
         self._last_connection_error: Exception | None = None
 
     async def start(self) -> None:
@@ -191,22 +197,33 @@ class LongConnectionWeComAdapter:
         async with self._start_lock:
             if self._closed:
                 raise TransportError("企业微信长连接已经关闭")
+            if self._displaced.is_set():
+                raise TransportDisplacedError(
+                    "企业微信长连接已被另一实例顶替，请确认同一 Bot ID 只有一个 worker"
+                )
             if self._started:
                 return
             self._client.on("message", self._on_raw_message)
             self._client.on("authenticated", self._on_authenticated)
             self._client.on("disconnected", self._on_disconnected)
+            self._client.on("reconnecting", self._on_reconnecting)
             self._client.on("error", self._on_connection_error)
+            self._client.on("event.disconnected_event", self._on_displaced_by_new_connection)
             self._started = True
             connect_task = asyncio.create_task(self._client.connect())
             ready_task = asyncio.create_task(self._ready.wait())
+            displaced_task = asyncio.create_task(self._displaced.wait())
             deadline = asyncio.get_running_loop().time() + self._connect_timeout_seconds
             try:
                 done, _ = await asyncio.wait(
-                    (connect_task, ready_task),
+                    (connect_task, ready_task, displaced_task),
                     timeout=self._connect_timeout_seconds,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if displaced_task in done:
+                    raise TransportDisplacedError(
+                        "企业微信长连接已被另一实例顶替，请确认同一 Bot ID 只有一个 worker"
+                    )
                 if ready_task in done:
                     return
                 if not done:
@@ -215,7 +232,21 @@ class LongConnectionWeComAdapter:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError
-                await asyncio.wait_for(ready_task, timeout=remaining)
+                done, _ = await asyncio.wait(
+                    (ready_task, displaced_task),
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if displaced_task in done:
+                    raise TransportDisplacedError(
+                        "企业微信长连接已被另一实例顶替，请确认同一 Bot ID 只有一个 worker"
+                    )
+                if ready_task not in done:
+                    raise TimeoutError
+            except TransportDisplacedError:
+                self._started = False
+                self._client.disconnect()
+                raise
             except TimeoutError as error:
                 self._started = False
                 self._client.disconnect()
@@ -226,7 +257,7 @@ class LongConnectionWeComAdapter:
                 self._client.disconnect()
                 raise TransportError("企业微信长连接启动失败") from error
             finally:
-                for task in (connect_task, ready_task):
+                for task in (connect_task, ready_task, displaced_task):
                     if not task.done():
                         task.cancel()
                         try:
@@ -244,11 +275,29 @@ class LongConnectionWeComAdapter:
     async def events(self) -> AsyncIterator[InboundEvent]:
         await self.start()
         while not self._closed:
-            yield await self._events.get()
+            event_task = asyncio.create_task(self._events.get())
+            displaced_task = asyncio.create_task(self._displaced.wait())
+            done, pending = await asyncio.wait(
+                (event_task, displaced_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if displaced_task in done:
+                raise TransportDisplacedError(
+                    "企业微信长连接已被另一实例顶替，请确认同一 Bot ID 只有一个 worker"
+                )
+            yield event_task.result()
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
         if message.destination_type is DeliveryDestination.USER:
             raise TransportError("机器人仅支持向已绑定群聊投递")
+        if self._displaced.is_set():
+            raise TransportDisplacedError(
+                "企业微信长连接已被另一实例顶替，请确认同一 Bot ID 只有一个 worker"
+            )
         if not self._started:
             await self.start()
         if not self._ready.is_set() or not self._client.is_connected:
@@ -311,18 +360,44 @@ class LongConnectionWeComAdapter:
     def _on_authenticated(self, *_: object) -> None:
         self._last_connection_error = None
         self._ready.set()
-        logger.info("WeCom long connection authenticated")
+        logger.info(
+            "[GROUP-TRACE] websocket_authenticated bot_id_fp=%s",
+            opaque_id_fingerprint(self._bot_id),
+        )
 
     def _on_disconnected(self, reason: object = "", *_: object) -> None:
         self._ready.clear()
-        logger.warning("WeCom long connection disconnected: %s", reason)
+        logger.warning("[GROUP-TRACE] websocket_disconnected reason=%s", reason)
+
+    def _on_reconnecting(self, attempt: object = None, *_: object) -> None:
+        logger.warning("[GROUP-TRACE] websocket_reconnecting attempt=%s", attempt)
+
+    def _on_displaced_by_new_connection(self, *_: object) -> None:
+        """Stop the SDK's reconnect loop after another session takes this Bot ID."""
+        self._displaced.set()
+        self._ready.clear()
+        self._started = False
+        logger.critical(
+            "[GROUP-TRACE] bot_connection_displaced bot_id_fp=%s action=stop_and_exit "
+            "reason=another_connection_for_same_bot_id",
+            opaque_id_fingerprint(self._bot_id),
+        )
+        try:
+            # SDK 1.0.2 otherwise treats the socket close as transient and can
+            # reconnect, displacing the other process in return.
+            self._client.disconnect()
+        except Exception:
+            logger.exception(
+                "[GROUP-TRACE] failed_to_stop_displaced_connection bot_id_fp=%s",
+                opaque_id_fingerprint(self._bot_id),
+            )
 
     def _on_connection_error(self, error: object = None, *_: object) -> None:
         self._last_connection_error = (
             error if isinstance(error, Exception) else TransportError(str(error))
         )
         self._ready.clear()
-        logger.warning("WeCom long connection error: %s", error)
+        logger.warning("[GROUP-TRACE] websocket_error: %s", error)
 
     def _on_raw_message(self, frame: object, *_: object) -> None:
         if not isinstance(frame, Mapping):
