@@ -17,6 +17,7 @@ from kefu.media.storage import (
     ObjectStorage,
     object_storage_from_settings,
 )
+from kefu.observability import database_target_fingerprint, opaque_id_fingerprint
 from kefu.persistence.database import create_engine_from_url, create_session_factory
 from kefu.persistence.models import EntrySide
 from kefu.relay.delivery import DeliveryWorker
@@ -84,11 +85,30 @@ async def _inbound_loop(
     deferred_replies: DeferredPassiveReplyStore | None = None,
 ) -> None:
     async for event in transport.events():
+        if event.chattype == "group":
+            logger.info(
+                "[GROUP-TRACE] callback_received msgid=%s chatid_fp=%s chatid_len=%s "
+                "mentioned=%s quote_present=%s part_count=%s",
+                event.msgid,
+                opaque_id_fingerprint(event.chatid),
+                len((event.chatid or "").strip()),
+                event.mentioned_bot,
+                bool(event.quote_content),
+                len(event.parts),
+            )
+        elif event.chattype == "single":
+            logger.info("[GROUP-TRACE] private_message_ignored msgid=%s", event.msgid)
         try:
-            if event.chattype == "group":
-                origin_side = relay.group_side_for_chatid(event.chatid)
-            else:
-                origin_side = None
+            origin_side_resolved = (
+                event.chattype == "group"
+                and event.mentioned_bot
+                and not relay.is_channel_binding_attempt(event)
+            )
+            origin_side = (
+                await asyncio.to_thread(relay.group_side_for_chatid, event.chatid)
+                if origin_side_resolved
+                else None
+            )
             suppress_delivery = await asyncio.to_thread(
                 _deferred_delivery_suppression,
                 event=event,
@@ -101,15 +121,24 @@ async def _inbound_loop(
                 relay.handle,
                 event,
                 suppress_delivery=suppress_delivery,
+                origin_side=origin_side,
+                origin_side_resolved=origin_side_resolved,
             )
         except Exception:
-            logger.exception("relay failed for WeCom msgid=%s", event.msgid)
+            logger.exception(
+                "[GROUP-TRACE] relay_failed msgid=%s chatid_fp=%s",
+                event.msgid,
+                opaque_id_fingerprint(event.chatid),
+            )
             continue
         logger.info(
-            "processed WeCom msgid=%s disposition=%s case_ref=%s",
+            "[GROUP-TRACE] callback_processed msgid=%s chatid_fp=%s disposition=%s "
+            "case_ref=%s idempotent=%s",
             event.msgid,
+            opaque_id_fingerprint(event.chatid),
             decision.disposition,
             decision.case_ref,
+            decision.idempotent,
         )
         reply = _reply_for_decision(decision)
         pending = await asyncio.to_thread(
@@ -129,10 +158,19 @@ async def _inbound_loop(
         elif reply is not None:
             try:
                 await transport.reply(event, reply)
+                logger.info(
+                    "[GROUP-TRACE] callback_reply_sent msgid=%s chatid_fp=%s",
+                    event.msgid,
+                    opaque_id_fingerprint(event.chatid),
+                )
             except Exception:
                 # The formal group event is already durable. A reply failure must
                 # not cause the platform callback to be processed a second time.
-                logger.exception("failed to reply to WeCom msgid=%s", event.msgid)
+                logger.exception(
+                    "[GROUP-TRACE] callback_reply_failed msgid=%s chatid_fp=%s",
+                    event.msgid,
+                    opaque_id_fingerprint(event.chatid),
+                )
         await _release_deferred_callback(
             event=event,
             decision=decision,
@@ -339,8 +377,9 @@ async def run() -> None:
         else None
     )
     logger.info(
-        "bot-worker starting with transport=%s",
+        "[GROUP-TRACE] bot_worker_starting transport=%s database_target_fp=%s",
         settings.wecom_transport,
+        database_target_fingerprint(engine.url),
     )
     await transport.start()
     try:

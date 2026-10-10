@@ -7,6 +7,7 @@ replace it without changing the case desk commands.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -15,6 +16,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from kefu.case_desk.errors import Forbidden, NotFound, RoutingUnavailable
+from kefu.observability import opaque_id_fingerprint
 from kefu.persistence.models import (
     Case,
     MembershipRole,
@@ -24,6 +26,8 @@ from kefu.persistence.models import (
     User,
     WeComChannel,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -128,18 +132,63 @@ class DatabaseRoutingDirectory:
 
     def team_kind_for_chatid(self, session: Session, chatid: str) -> TeamKind | None:
         """Resolve an active bound group to its organization side."""
+        normalized_chatid = chatid.strip()
+        if not normalized_chatid:
+            logger.warning("[GROUP-TRACE] route_lookup result=miss reason=empty_chatid")
+            return None
+        chatid_fp = opaque_id_fingerprint(normalized_chatid)
         channel = session.scalar(
-            select(WeComChannel).where(
-                WeComChannel.chatid == chatid,
-                WeComChannel.active.is_(True),
-                WeComChannel.initialized_at.is_not(None),
-            )
+            select(WeComChannel).where(WeComChannel.chatid == normalized_chatid)
         )
         if channel is None:
+            logger.warning(
+                "[GROUP-TRACE] route_lookup result=miss reason=channel_not_found chatid_fp=%s",
+                chatid_fp,
+            )
+            return None
+        if not channel.active:
+            logger.warning(
+                "[GROUP-TRACE] route_lookup result=miss "
+                "reason=channel_inactive chatid_fp=%s channel_id=%s",
+                chatid_fp,
+                channel.id,
+            )
+            return None
+        if channel.initialized_at is None:
+            logger.warning(
+                "[GROUP-TRACE] route_lookup result=miss "
+                "reason=channel_not_initialized chatid_fp=%s channel_id=%s",
+                chatid_fp,
+                channel.id,
+            )
             return None
         team = session.get(Team, channel.team_id)
-        if team is None or not team.active:
+        if team is None:
+            logger.warning(
+                "[GROUP-TRACE] route_lookup result=miss "
+                "reason=team_not_found chatid_fp=%s channel_id=%s team_id=%s",
+                chatid_fp,
+                channel.id,
+                channel.team_id,
+            )
             return None
+        if not team.active:
+            logger.warning(
+                "[GROUP-TRACE] route_lookup result=miss "
+                "reason=team_inactive chatid_fp=%s channel_id=%s team_id=%s",
+                chatid_fp,
+                channel.id,
+                team.id,
+            )
+            return None
+        logger.debug(
+            "[GROUP-TRACE] route_lookup result=matched "
+            "chatid_fp=%s channel_id=%s team_id=%s team_kind=%s",
+            chatid_fp,
+            channel.id,
+            team.id,
+            team.kind,
+        )
         return team.kind
 
     def active_consult_channel(self, session: Session, queue_id: UUID) -> TeamChannel:

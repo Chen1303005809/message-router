@@ -8,6 +8,7 @@ The web layer only translates forms/JSON into these operations.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from kefu.case_desk.contracts import Actor
 from kefu.case_desk.errors import Conflict, Forbidden, NotFound, ValidationError
+from kefu.observability import opaque_id_fingerprint
 from kefu.persistence.models import (
     MembershipRole,
     Team,
@@ -27,6 +29,8 @@ from kefu.persistence.models import (
     WeComChannel,
 )
 from kefu.routing.directory import DatabaseRoutingDirectory, TeamChannel
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -379,12 +383,22 @@ class Administration:
             team = session.get(Team, team_id)
             if team is None:
                 raise NotFound("团队不存在")
-            return self._directory.bind_team_chat(
+            channel = self._directory.bind_team_chat(
                 session,
                 team_name=team.name,
                 chatid=normalized_chatid,
                 team_kind=team.kind,
             )
+            team_kind = team.kind
+            team_name = team.name
+        logger.info(
+            "[GROUP-TRACE] h5_binding_committed chatid_fp=%s team_id=%s team_kind=%s team_name=%r",
+            opaque_id_fingerprint(channel.chatid),
+            channel.team_id,
+            team_kind,
+            team_name,
+        )
+        return channel
 
     def _assert_admin(self, session: Session, actor: Actor) -> User:
         return self._directory.assert_global_admin(session, actor.user_id)

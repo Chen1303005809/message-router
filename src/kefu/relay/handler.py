@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -22,10 +23,13 @@ from kefu.case_desk.contracts import (
 from kefu.case_desk.errors import CaseDeskError, ValidationError
 from kefu.case_desk.service import CaseDesk
 from kefu.media.storage import MediaIngestError, MediaIngestor
-from kefu.persistence.models import EntrySide, InboundMessage, PartKind, TeamKind
+from kefu.observability import opaque_id_fingerprint
+from kefu.persistence.models import EntrySide, InboundMessage, TeamKind
 from kefu.relay.references import parse_quoted_case_ref
 from kefu.routing.directory import DatabaseRoutingDirectory
 from kefu.wecom.transport import InboundEvent, InboundImagePart, InboundPart, InboundTextPart
+
+logger = logging.getLogger(__name__)
 
 
 class RelayDisposition(StrEnum):
@@ -92,7 +96,14 @@ class Relay:
         self._media_ingestor = media_ingestor
         self._directory = directory or DatabaseRoutingDirectory()
 
-    def handle(self, event: InboundEvent, *, suppress_delivery: bool = False) -> RelayDecision:
+    def handle(
+        self,
+        event: InboundEvent,
+        *,
+        suppress_delivery: bool = False,
+        origin_side: EntrySide | None = None,
+        origin_side_resolved: bool = False,
+    ) -> RelayDecision:
         """Classify a callback exactly once and return a transport-neutral decision."""
         if event.chattype != "group":
             # Ignore private messages before inspecting payload errors or
@@ -112,10 +123,31 @@ class Relay:
             if isinstance(decode_error, str) and decode_error:
                 decision = RelayDecision(RelayDisposition.REJECTED, reply_text=decode_error)
             else:
-                decision = self._handle_group(event, suppress_delivery=suppress_delivery)
+                decision = self._handle_group(
+                    event,
+                    suppress_delivery=suppress_delivery,
+                    origin_side=origin_side,
+                    origin_side_resolved=origin_side_resolved,
+                )
         except (CaseDeskError, MediaIngestError) as error:
+            logger.warning(
+                "[GROUP-TRACE] message_rejected msgid=%s chatid_fp=%s error=%s",
+                msgid,
+                opaque_id_fingerprint(event.chatid),
+                error,
+            )
             decision = RelayDecision(RelayDisposition.REJECTED, reply_text=str(error))
         return self._remember_decision(msgid, decision)
+
+    @staticmethod
+    def is_channel_binding_attempt(event: InboundEvent) -> bool:
+        """Identify binding commands before route lookup, including malformed ones."""
+        commands = ("绑定研发团队", "绑定咨询队列")
+        return event.chattype == "group" and any(
+            isinstance(part, InboundTextPart)
+            and any(command in part.text for command in commands)
+            for part in event.parts
+        )
 
     def group_side_for_chatid(self, chatid: str | None) -> EntrySide | None:
         if not chatid:
@@ -129,7 +161,12 @@ class Relay:
         return None
 
     def _handle_group(
-        self, event: InboundEvent, *, suppress_delivery: bool = False
+        self,
+        event: InboundEvent,
+        *,
+        suppress_delivery: bool = False,
+        origin_side: EntrySide | None = None,
+        origin_side_resolved: bool = False,
     ) -> RelayDecision:
         if not event.mentioned_bot:
             return RelayDecision(RelayDisposition.IGNORED)
@@ -145,6 +182,13 @@ class Relay:
                     chatid=event.chatid,
                     team_kind=team_kind,
                 )
+            logger.info(
+                "[GROUP-TRACE] binding_committed msgid=%s chatid_fp=%s team_kind=%s team_name=%r",
+                event.msgid,
+                opaque_id_fingerprint(event.chatid),
+                team_kind,
+                team_name,
+            )
             if team_kind is TeamKind.CONSULT_QUEUE:
                 return RelayDecision(
                     RelayDisposition.CONSULT_CHANNEL_BOUND,
@@ -155,9 +199,19 @@ class Relay:
                 reply_text=f"已将当前群绑定为研发团队「{team_name}」的沟通群。",
             )
 
-        side = self.group_side_for_chatid(event.chatid)
+        side = (
+            origin_side
+            if origin_side_resolved
+            else self.group_side_for_chatid(event.chatid)
+        )
         if side is None:
             raise ValidationError("当前群聊尚未绑定为咨询队列或研发责任团队")
+        logger.info(
+            "[GROUP-TRACE] route_selected msgid=%s chatid_fp=%s origin_side=%s",
+            event.msgid,
+            opaque_id_fingerprint(event.chatid),
+            side,
+        )
         if not event.quote_content:
             raise ValidationError("请引用机器人发送的文字片段后再 @机器人 回复")
         case_ref = parse_quoted_case_ref(event.quote_content)
@@ -174,6 +228,16 @@ class Relay:
                 suppress_delivery=suppress_delivery,
             ),
             GroupActor(side),
+        )
+        logger.info(
+            "[GROUP-TRACE] message_recorded msgid=%s chatid_fp=%s origin_side=%s "
+            "case_ref=%s idempotent=%s delivery_count=%s",
+            event.msgid,
+            opaque_id_fingerprint(event.chatid),
+            side,
+            result.case_ref,
+            result.idempotent,
+            len(result.delivery_ids),
         )
         return RelayDecision(
             RelayDisposition.FORWARDED,

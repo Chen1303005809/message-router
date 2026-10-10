@@ -75,6 +75,14 @@ docker compose up --build
 
 4. 启动 `bot-worker` 并将机器人加入目标群。在目标群发送 `@机器人 绑定研发团队 平台研发组` 或 `@机器人 绑定咨询队列 华东咨询队列`。绑定命令只检查团队名称、团队类型和群聊绑定冲突，不检查发言人的 userid、成员关系或管理员角色。创建可往返转发的事件前必须绑定咨询群和研发群；H5 新建事件时填写咨询经办显示名，研发显示名沿用团队负责人字段。任一已绑定咨询侧或研发侧群中的成员都可引用带唯一有效事件标记的机器人消息并 `@机器人` 回复，系统按群绑定侧别记账并转发到事件当前归属的对侧群，不核对来源群是否对应该事件当前团队。咨询经办交接通知发送到咨询群。
 
+排查群聊问题时，搜索 `[GROUP-TRACE]`。同一 `chatid_fp` 可关联群回调、绑定提交、路由结果和投递目标；`route_lookup` 会说明未命中的原因（例如群未登记、绑定未初始化、绑定停用或团队停用）。`web_app_configured` 与 `bot_worker_starting` 的 `database_target_fp` 应一致。指纹不会暴露原始群聊标识。
+
+```bash
+journalctl -u kefu-web -u kefu-worker -f | grep '\[GROUP-TRACE\]'
+# Docker Compose 部署：
+docker compose logs -f web worker | grep '\[GROUP-TRACE\]'
+```
+
 ### 首次初始化总管理员
 
 总管理员是企业微信成员身份，不使用额外密码。部署时可以在 `.env` 设置

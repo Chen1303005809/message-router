@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from decimal import Decimal, DecimalException
@@ -62,6 +63,7 @@ from kefu.media.storage import (
     ObjectStorage,
     object_storage_from_settings,
 )
+from kefu.observability import database_target_fingerprint
 from kefu.persistence.database import create_engine_from_url, create_session_factory
 from kefu.persistence.models import (
     MAX_DEADLINE_INCREMENT_MINUTES,
@@ -83,6 +85,8 @@ from kefu.persistence.models import (
 from kefu.web.auth import AuthenticationError, WebAuthenticator
 from kefu.wecom.transport import InboundImagePart
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(
     *,
@@ -92,8 +96,11 @@ def create_app(
     storage: ObjectStorage | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    database_target_fp = "injected-session-factory"
     if session_factory is None:
-        session_factory = create_session_factory(create_engine_from_url(settings.database_url))
+        engine = create_engine_from_url(settings.database_url)
+        database_target_fp = database_target_fingerprint(engine.url)
+        session_factory = create_session_factory(engine)
     desk = CaseDesk(session_factory, web_base_url=settings.web_base_url)
     administration = Administration(session_factory)
     authenticator = authenticator or WebAuthenticator(session_factory, settings)
@@ -104,6 +111,10 @@ def create_app(
             wecom_userid=settings.initial_admin_wecom_userid,
             display_name=settings.initial_admin_display_name,
         )
+    logger.info(
+        "[GROUP-TRACE] web_app_configured database_target_fp=%s",
+        database_target_fp,
+    )
     app = FastAPI(title="客户问题事件中心", version="0.1.0")
 
     def external_path(path: str) -> str:

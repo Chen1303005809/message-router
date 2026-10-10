@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from kefu.case_desk.contracts import (
@@ -10,7 +11,10 @@ from kefu.case_desk.contracts import (
     DeliveryItemSucceeded,
 )
 from kefu.case_desk.service import CaseDesk
+from kefu.observability import opaque_id_fingerprint
 from kefu.wecom.transport import OutboundMessage, WeComTransport
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +36,7 @@ class DeliveryWorker:
         sent_items = 0
         failed_bundles = 0
         for bundle in work_items:
+            destination_fp = opaque_id_fingerprint(bundle.destination_address)
             for item in bundle.items:
                 try:
                     receipt = await self._transport.send(
@@ -44,6 +49,22 @@ class DeliveryWorker:
                         )
                     )
                 except Exception as error:  # Transport errors must become durable state.
+                    safe_error = (
+                        str(error)
+                        .replace(bundle.destination_address, f"<target:{destination_fp}>")
+                        .replace("\n", " ")[:240]
+                    )
+                    logger.warning(
+                        "[GROUP-TRACE] delivery_failed delivery_id=%s item_id=%s "
+                        "req_id=%s case_ref=%s destination_type=%s destination_fp=%s error=%s",
+                        bundle.id,
+                        item.id,
+                        item.req_id,
+                        bundle.case_ref,
+                        bundle.destination_type,
+                        destination_fp,
+                        safe_error or type(error).__name__,
+                    )
                     self._case_desk.execute(
                         DeliveryItemFailed(
                             delivery_id=bundle.id,
@@ -55,6 +76,16 @@ class DeliveryWorker:
                     )
                     failed_bundles += 1
                     break
+                logger.info(
+                    "[GROUP-TRACE] delivery_sent delivery_id=%s item_id=%s req_id=%s "
+                    "case_ref=%s destination_type=%s destination_fp=%s",
+                    bundle.id,
+                    item.id,
+                    item.req_id,
+                    bundle.case_ref,
+                    bundle.destination_type,
+                    destination_fp,
+                )
                 self._case_desk.execute(
                     DeliveryItemSucceeded(
                         delivery_id=bundle.id,
