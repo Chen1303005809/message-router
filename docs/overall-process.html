@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>客户问题事件中心 · 整体流程</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f4f7fb;
+      --ink: #18304d;
+      --muted: #61738b;
+      --line: #d6e0ec;
+      --blue: #155eef;
+      --blue-soft: #eaf1ff;
+      --blue-deep: #123c98;
+      --green: #087a54;
+      --green-soft: #e5f7ef;
+      --amber: #9a5b00;
+      --amber-soft: #fff2cc;
+      --purple: #6941c6;
+      --purple-soft: #f2edff;
+      --surface: #ffffff;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    }
+    .page {
+      width: min(100%, 1700px);
+      margin: 0 auto;
+      padding: 34px 30px 30px;
+    }
+    .hero { margin: 0 auto 22px; max-width: 1400px; }
+    .eyebrow {
+      margin-bottom: 8px;
+      color: var(--blue);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .14em;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 3vw, 46px);
+      line-height: 1.18;
+      letter-spacing: -.025em;
+    }
+    .subtitle {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: clamp(15px, 1.4vw, 19px);
+      line-height: 1.65;
+    }
+    .diagram-shell {
+      max-width: 1600px;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid #dce5f0;
+      border-radius: 24px;
+      background: var(--surface);
+      box-shadow: 0 18px 55px rgba(27, 60, 103, .10);
+    }
+    svg { display: block; width: 100%; height: auto; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    @media (max-width: 760px) {
+      .page { padding: 20px 12px; }
+      .diagram-shell { border-radius: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div class="eyebrow">客户问题事件中心 · END-TO-END FLOW</div>
+      <h1>从客户问题进入，到客户确认闭环</h1>
+      <p class="subtitle">企业微信机器人负责快速进入与跨群传递，H5 事件中心负责结构化管理；事件编号、责任团队、时间线和投递状态贯穿全流程。</p>
+    </header>
+
+    <section class="diagram-shell" aria-labelledby="diagram-title">
+      <h2 id="diagram-title" class="sr-only">客户问题事件中心整体协作流程图</h2>
+      <svg viewBox="0 0 1600 960" role="img" aria-labelledby="svg-title svg-desc" xmlns="http://www.w3.org/2000/svg">
+        <title id="svg-title">客户问题事件中心整体协作流程</title>
+        <desc id="svg-desc">咨询人员通过企业微信机器人或 H5 创建事件，事件被路由到研发责任团队，研发正式回复后由咨询向客户确认，最终关闭或重新打开事件。底部展示事件编号、当前等待方、团队路由和可靠投递四项贯穿规则。</desc>
+
+        <defs>
+          <linearGradient id="headerGlow" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#eef4ff"/>
+            <stop offset="1" stop-color="#f8fbff"/>
+          </linearGradient>
+          <linearGradient id="eventGlow" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#155eef"/>
+            <stop offset="1" stop-color="#3b82f6"/>
+          </linearGradient>
+          <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+            <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#18304d" flood-opacity=".10"/>
+          </filter>
+          <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L12,6 L0,12 Z" fill="#155eef"/>
+          </marker>
+          <marker id="arrowGreen" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L12,6 L0,12 Z" fill="#087a54"/>
+          </marker>
+          <marker id="arrowPurple" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L12,6 L0,12 Z" fill="#6941c6"/>
+          </marker>
+          <marker id="arrowAmber" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L12,6 L0,12 Z" fill="#9a5b00"/>
+          </marker>
+          <style>
+            .s-title { fill: #18304d; font-size: 24px; font-weight: 700; }
+            .s-body { fill: #61738b; font-size: 17px; font-weight: 500; }
+            .s-small { fill: #61738b; font-size: 15px; font-weight: 500; }
+            .s-small[fill="#155eef"] { fill: #155eef; }
+            .s-small[fill="#087a54"] { fill: #087a54; }
+            .s-small[fill="#6941c6"] { fill: #6941c6; }
+            .s-small[fill="#9a5b00"] { fill: #9a5b00; }
+            .s-label { fill: #18304d; font-size: 18px; font-weight: 700; }
+            .s-white-title { fill: #ffffff; font-size: 22px; font-weight: 700; }
+            .s-white-body { fill: #eaf1ff; font-size: 15px; font-weight: 500; }
+            .step-number { fill: #ffffff; font-size: 17px; font-weight: 800; text-anchor: middle; dominant-baseline: central; }
+            .center { text-anchor: middle; }
+            .middle { dominant-baseline: central; }
+          </style>
+        </defs>
+
+        <!-- Diagram background -->
+        <rect width="1600" height="960" fill="#ffffff"/>
+        <rect x="0" y="0" width="1600" height="176" fill="url(#headerGlow)"/>
+        <path d="M0 176 H1600" stroke="#dce5f0"/>
+
+        <!-- Header inside the figure -->
+        <text x="76" y="62" class="s-small" fill="#155eef">核心业务链路</text>
+        <text x="76" y="106" class="s-title" font-size="31">一件问题，一个事件；一条时间线，直到客户闭环</text>
+        <text x="76" y="142" class="s-body">即时沟通保留效率，事件模型补足责任、历史、权限和可靠投递。</text>
+        <g transform="translate(1260 56)">
+          <rect width="260" height="72" rx="18" fill="#ffffff" stroke="#cbd9ee"/>
+          <circle cx="30" cy="36" r="10" fill="#155eef"/>
+          <text x="54" y="31" class="s-label" font-size="16">产品目标</text>
+          <text x="54" y="52" class="s-small">可见 · 可交接 · 可追踪 · 可闭环</text>
+        </g>
+
+        <!-- Lanes -->
+        <rect x="58" y="208" width="1484" height="174" rx="24" fill="#f7faff" stroke="#dce7f5"/>
+        <rect x="58" y="402" width="1484" height="192" rx="24" fill="#f6fcf9" stroke="#d9eee5"/>
+        <rect x="58" y="614" width="1484" height="138" rx="24" fill="#fbf9ff" stroke="#e7dffc"/>
+
+        <!-- Lane labels -->
+        <g transform="translate(84 230)">
+          <rect width="132" height="36" rx="18" fill="#eaf1ff"/>
+          <circle cx="20" cy="18" r="6" fill="#155eef"/>
+          <text x="36" y="24" class="s-label" font-size="15">咨询侧</text>
+        </g>
+        <text x="84" y="296" class="s-small">收集客户信息、创建事件、推进客户确认</text>
+
+        <g transform="translate(84 424)">
+          <rect width="132" height="36" rx="18" fill="#e5f7ef"/>
+          <circle cx="20" cy="18" r="6" fill="#087a54"/>
+          <text x="36" y="24" class="s-label" font-size="15">研发侧</text>
+        </g>
+        <text x="84" y="490" class="s-small">团队受理、定位分析、正式反馈</text>
+
+        <g transform="translate(84 636)">
+          <rect width="132" height="36" rx="18" fill="#f2edff"/>
+          <circle cx="20" cy="18" r="6" fill="#6941c6"/>
+          <text x="36" y="24" class="s-label" font-size="15">事件中心</text>
+        </g>
+        <text x="84" y="702" class="s-small">统一编号、权限、时间线、状态和投递</text>
+
+        <!-- Entry points -->
+        <g transform="translate(280 224)" filter="url(#softShadow)">
+          <rect width="250" height="122" rx="18" fill="#ffffff" stroke="#bcd0f5" stroke-width="2"/>
+          <circle cx="32" cy="34" r="16" fill="#eaf1ff"/>
+          <path d="M24 34h16M32 26v16" stroke="#155eef" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="60" y="39" class="s-title" font-size="20">企业微信机器人</text>
+          <text x="24" y="76" class="s-body" font-size="15">单聊提交文字 / 图文</text>
+          <text x="24" y="100" class="s-small">引用事件消息继续跟进</text>
+        </g>
+        <g transform="translate(560 224)" filter="url(#softShadow)">
+          <rect width="250" height="122" rx="18" fill="#ffffff" stroke="#bcd0f5" stroke-width="2"/>
+          <circle cx="32" cy="34" r="16" fill="#eaf1ff"/>
+          <path d="M24 29h16M24 36h12M24 43h9" stroke="#155eef" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="60" y="39" class="s-title" font-size="20">H5 事件中心</text>
+          <text x="24" y="76" class="s-body" font-size="15">结构化创建 / 列表 / 详情</text>
+          <text x="24" y="100" class="s-small">资料、期限、状态和交接</text>
+        </g>
+
+        <!-- Entry convergence -->
+        <path d="M405 346 C405 368 505 370 660 370" fill="none" stroke="#155eef" stroke-width="3" marker-end="url(#arrowBlue)"/>
+        <path d="M685 346 C685 358 660 360 660 370" fill="none" stroke="#155eef" stroke-width="3" marker-end="url(#arrowBlue)"/>
+
+        <!-- Event creation spine -->
+        <g transform="translate(860 222)" filter="url(#softShadow)">
+          <rect width="600" height="136" rx="22" fill="url(#eventGlow)"/>
+          <text x="30" y="42" class="s-white-title">创建事件 · 形成统一业务身份</text>
+          <text x="30" y="73" class="s-white-body">事件编号 〔KF·XXXXXXX〕 贯穿机器人、群聊和 H5</text>
+          <g transform="translate(30 91)">
+            <rect width="118" height="28" rx="14" fill="#ffffff" fill-opacity=".18"/>
+            <text x="59" y="19" class="s-white-body center" font-size="13">咨询队列</text>
+            <rect x="130" width="150" height="28" rx="14" fill="#ffffff" fill-opacity=".18"/>
+            <text x="205" y="19" class="s-white-body center" font-size="13">研发责任团队</text>
+            <rect x="292" width="118" height="28" rx="14" fill="#ffffff" fill-opacity=".18"/>
+            <text x="351" y="19" class="s-white-body center" font-size="13">紧急程度</text>
+            <rect x="422" width="118" height="28" rx="14" fill="#ffffff" fill-opacity=".18"/>
+            <text x="481" y="19" class="s-white-body center" font-size="13">客户资料</text>
+          </g>
+        </g>
+        <path d="M810 285 H852" fill="none" stroke="#155eef" stroke-width="3" marker-end="url(#arrowBlue)"/>
+
+        <!-- Main process line -->
+        <path d="M172 520 H1430" fill="none" stroke="#c9d6e7" stroke-width="4"/>
+        <path d="M172 520 H1430" fill="none" stroke="#087a54" stroke-opacity=".25" stroke-width="12"/>
+
+        <!-- Step 1 -->
+        <g transform="translate(272 438)">
+          <circle cx="0" cy="82" r="23" fill="#155eef"/>
+          <text x="0" y="82" class="step-number">1</text>
+          <rect x="30" y="0" width="190" height="112" rx="18" fill="#ffffff" stroke="#bcd0f5" stroke-width="2"/>
+          <text x="50" y="36" class="s-title" font-size="19">咨询提交</text>
+          <text x="50" y="66" class="s-body" font-size="15">描述现象、影响范围</text>
+          <text x="50" y="90" class="s-small">补充截图和复现信息</text>
+        </g>
+
+        <!-- Step 2 -->
+        <g transform="translate(560 438)">
+          <circle cx="0" cy="82" r="23" fill="#155eef"/>
+          <text x="0" y="82" class="step-number">2</text>
+          <rect x="30" y="0" width="210" height="112" rx="18" fill="#ffffff" stroke="#bcd0f5" stroke-width="2"/>
+          <text x="50" y="36" class="s-title" font-size="19">事件路由</text>
+          <text x="50" y="66" class="s-body" font-size="15">咨询队列 → 研发团队</text>
+          <text x="50" y="90" class="s-small">投递到当前研发群</text>
+        </g>
+
+        <!-- Step 3 -->
+        <g transform="translate(866 438)">
+          <circle cx="0" cy="82" r="23" fill="#087a54"/>
+          <text x="0" y="82" class="step-number">3</text>
+          <rect x="30" y="0" width="210" height="112" rx="18" fill="#ffffff" stroke="#b8dfce" stroke-width="2"/>
+          <text x="50" y="36" class="s-title" font-size="19">研发处理</text>
+          <text x="50" y="66" class="s-body" font-size="15">团队受理、定位分析</text>
+          <text x="50" y="90" class="s-small">必要时挂起再恢复</text>
+        </g>
+
+        <!-- Step 4 -->
+        <g transform="translate(1172 438)">
+          <circle cx="0" cy="82" r="23" fill="#087a54"/>
+          <text x="0" y="82" class="step-number">4</text>
+          <rect x="30" y="0" width="210" height="112" rx="18" fill="#ffffff" stroke="#b8dfce" stroke-width="2"/>
+          <text x="50" y="36" class="s-title" font-size="19">正式回复</text>
+          <text x="50" y="66" class="s-body" font-size="15">引用普通消息 + @机器人</text>
+          <text x="50" y="90" class="s-small">结果、版本、验证方式</text>
+        </g>
+
+        <!-- Arrow labels on main line -->
+        <g transform="translate(478 505)">
+          <rect width="72" height="30" rx="15" fill="#eaf1ff"/>
+          <text x="36" y="20" class="s-small center" fill="#155eef">等待研发</text>
+        </g>
+        <g transform="translate(784 505)">
+          <rect width="72" height="30" rx="15" fill="#eaf1ff"/>
+          <text x="36" y="20" class="s-small center" fill="#155eef">进入团队</text>
+        </g>
+        <g transform="translate(1090 505)">
+          <rect width="72" height="30" rx="15" fill="#e5f7ef"/>
+          <text x="36" y="20" class="s-small center" fill="#087a54">处理中</text>
+        </g>
+
+        <!-- Connector from formal response to consultation -->
+        <path d="M1280 550 C1280 590 820 606 566 672" fill="none" stroke="#6941c6" stroke-width="3" marker-end="url(#arrowPurple)"/>
+        <g transform="translate(1080 566)">
+          <rect width="118" height="28" rx="14" fill="#e5f7ef"/>
+          <text x="59" y="19" class="s-small center" fill="#087a54">等待咨询</text>
+        </g>
+
+        <!-- Consultation confirmation and close -->
+        <g transform="translate(280 631)">
+          <rect width="286" height="82" rx="18" fill="#ffffff" stroke="#d9cafa" stroke-width="2"/>
+          <circle cx="30" cy="30" r="14" fill="#f2edff"/>
+          <path d="M23 30l5 5 9-11" fill="none" stroke="#6941c6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="58" y="35" class="s-title" font-size="19">咨询向客户确认</text>
+          <text x="24" y="64" class="s-body" font-size="15">交付方案、收集验证结果</text>
+        </g>
+        <g transform="translate(650 631)">
+          <rect width="286" height="82" rx="18" fill="#ffffff" stroke="#d9cafa" stroke-width="2"/>
+          <circle cx="30" cy="30" r="14" fill="#f2edff"/>
+          <path d="M23 30h14M30 23v14" stroke="#6941c6" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="58" y="35" class="s-title" font-size="19">补充或继续跟进</text>
+          <text x="24" y="64" class="s-body" font-size="15">引用原事件，不重复建单</text>
+        </g>
+        <path d="M566 672 H636" fill="none" stroke="#6941c6" stroke-width="3" marker-end="url(#arrowPurple)"/>
+
+        <g transform="translate(1020 631)">
+          <rect width="410" height="82" rx="18" fill="#18304d"/>
+          <circle cx="32" cy="31" r="15" fill="#ffffff" fill-opacity=".15"/>
+          <path d="M25 31l5 5 10-12" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="62" y="35" class="s-white-title" font-size="19">客户确认解决 · 关闭事件</text>
+          <text x="24" y="64" class="s-white-body" font-size="15">未解决时重新打开，明确下一步责任方</text>
+        </g>
+        <g transform="translate(566 642)">
+          <text x="35" y="18" class="s-small" fill="#6941c6">未解决 / 需补充</text>
+        </g>
+
+        <!-- Resolved branch and follow-up loop -->
+        <path d="M566 672 C700 585 890 585 1008 672" fill="none" stroke="#18304d" stroke-width="3" marker-end="url(#arrowBlue)"/>
+        <g transform="translate(730 582)">
+          <rect width="118" height="28" rx="14" fill="#edf0f4"/>
+          <text x="59" y="19" class="s-small center">客户已确认</text>
+        </g>
+        <path d="M790 631 C790 594 940 592 940 560" fill="none" stroke="#087a54" stroke-width="3" stroke-dasharray="8 7" marker-end="url(#arrowGreen)"/>
+        <text x="852" y="604" class="s-small" fill="#087a54">回到研发处理</text>
+
+        <!-- Feedback loop -->
+        <path d="M1388 713 C1510 713 1510 384 1295 384 C1135 384 1040 395 1040 438" fill="none" stroke="#9a5b00" stroke-width="3" stroke-dasharray="9 8" marker-end="url(#arrowAmber)"/>
+        <g transform="translate(1382 430)">
+          <rect width="126" height="34" rx="17" fill="#fff2cc"/>
+          <text x="63" y="22" class="s-small center" fill="#9a5b00">问题未解决 · 重开</text>
+        </g>
+
+        <!-- Cross-cutting rules -->
+        <text x="800" y="790" class="s-label center" font-size="18">四项贯穿规则</text>
+        <path d="M118 814 H1482" stroke="#d6e0ec"/>
+        <g transform="translate(118 834)">
+          <rect width="300" height="80" rx="16" fill="#f7faff" stroke="#d8e5f8"/>
+          <circle cx="31" cy="40" r="15" fill="#eaf1ff"/>
+          <text x="31" y="46" class="s-label center" fill="#155eef">#</text>
+          <text x="62" y="35" class="s-label" font-size="17">事件编号关联</text>
+          <text x="62" y="59" class="s-small">不靠猜测最近事件</text>
+        </g>
+        <g transform="translate(454 834)">
+          <rect width="300" height="80" rx="16" fill="#f6fcf9" stroke="#d9eee5"/>
+          <circle cx="31" cy="40" r="15" fill="#e5f7ef"/>
+          <path d="M24 40h14" stroke="#087a54" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="62" y="35" class="s-label" font-size="17">当前等待方</text>
+          <text x="62" y="59" class="s-small">明确下一步由谁处理</text>
+        </g>
+        <g transform="translate(790 834)">
+          <rect width="300" height="80" rx="16" fill="#fbf9ff" stroke="#e7dffc"/>
+          <circle cx="31" cy="40" r="15" fill="#f2edff"/>
+          <path d="M24 35h14M24 42h10" stroke="#6941c6" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="62" y="35" class="s-label" font-size="17">团队路由</text>
+          <text x="62" y="59" class="s-small">群聊变化不改变事件归属</text>
+        </g>
+        <g transform="translate(1126 834)">
+          <rect width="356" height="80" rx="16" fill="#fffaf0" stroke="#f0dfb7"/>
+          <circle cx="31" cy="40" r="15" fill="#fff2cc"/>
+          <path d="M24 40h14M31 33v14" stroke="#9a5b00" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="62" y="35" class="s-label" font-size="17">可靠投递 + 时间线</text>
+          <text x="62" y="59" class="s-small">先保存，再发送，可追踪</text>
+        </g>
+      </svg>
+    </section>
+  </main>
+</body>
+</html>
