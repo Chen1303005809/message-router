@@ -666,8 +666,11 @@ def create_app(
             <label>研发处理团队 <select name="dev_team_id" required>
               <option value="" disabled selected>选择研发处理团队</option>{dev_team_options}
             </select></label>
+            <label>截止时间（选填）
+              <input name="deadline" type="datetime-local" step="60">
+            </label>
             <p class="muted">咨询经办显示名由本事件填写，独立于登录账号；研发经办显示名沿用团队设置。群聊记录不按发送成员 userid 归属。</p>
-            <p class="muted">描述文字必填，图片可选。默认截止时间为创建后 3 小时，临近期限提醒默认提前 24 小时；创建后可在详情中调整。</p>
+            <p class="muted">描述文字必填，图片可选。截止时间按中国标准时间填写；留空时默认为创建后 3 小时。临近期限提醒默认提前 24 小时，创建后也可在详情中调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
         </main>
@@ -690,6 +693,7 @@ def create_app(
             consult_queue_id = UUID(_required_form_text(form, "consult_queue_id"))
             dev_team_id = UUID(_required_form_text(form, "dev_team_id"))
             priority = CasePriority(_optional_form_text(form, "priority") or "normal")
+            deadline = _parse_local_deadline(_optional_form_text(form, "deadline"))
             if len(title) > 512:
                 raise ValidationError("事件标题不能超过 512 个字符")
             if len(description) > 20_000:
@@ -742,6 +746,7 @@ def create_app(
                     customer_contact_name=customer_contact_name,
                     customer_contact_method=customer_contact_method,
                     priority=priority,
+                    deadline=deadline,
                     parts=tuple(parts),
                 ),
                 actor,
@@ -1565,6 +1570,12 @@ h2 { color: #23344f; }
   transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
 }
 .case-card:hover { border-color: #b6c9f3; box-shadow: 0 8px 20px #162a4610; transform: translateY(-1px); }
+.case-card-link { display: grid; gap: 8px; color: inherit; text-decoration: none; }
+.case-card-link:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; border-radius: 6px; }
+.case-card-action { justify-self: end; margin: 0; }
+.case-card-action button.status-action-accept { min-height: 36px; padding: 7px 13px; border: 1px solid transparent; border-radius: 9px; color: #fff; background: #285fe8; font-size: 13px; font-weight: 750; cursor: pointer; }
+.case-card-action button.status-action-accept:hover { background: #174bc4; }
+.case-card-action button.status-action-accept:focus-visible { outline: 3px solid #9db8ff; outline-offset: 2px; }
 .case-card-top, .case-card-meta, .case-card-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .case-card-title { font-size: 16px; font-weight: 750; line-height: 1.4; }
 .case-customer { font-size: 13px; color: #41516a; }
@@ -1979,6 +1990,18 @@ def _format_datetime(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=ZoneInfo("UTC"))
     return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+
+
+def _parse_local_deadline(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        deadline = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValidationError("截止时间格式无效") from error
+    if deadline.tzinfo is not None:
+        raise ValidationError("截止时间格式无效")
+    return deadline.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
 def _half_hour_hours_to_minutes(value: str, label: str) -> int:
@@ -2534,8 +2557,26 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
     customer_name = escape(summary.customer_name or "未录入")
     updated_at = _format_datetime(summary.updated_at)
     case_path = path_for(f"/events/{case_ref}")
+    accept_form = ""
+    if (
+        summary.can_accept
+        and summary.lifecycle_status is LifecycleStatus.OPEN
+        and summary.status in {
+            CaseStatus.PENDING_CONFIRMATION,
+            CaseStatus.WAITING_CUSTOMER,
+            CaseStatus.SUSPENDED,
+        }
+    ):
+        accept_action = path_for(f"/events/{case_ref}/status")
+        accept_form = (
+            f'<form class="case-card-action" method="post" action="{accept_action}">'
+            f'<input type="hidden" name="version" value="{summary.version}">'
+            f'<input type="hidden" name="status" value="{CaseStatus.IN_PROGRESS.value}">'
+            '<button type="submit" class="status-action-accept">受理</button></form>'
+        )
     return (
-        f'<a class="case-card" href="{case_path}">'
+        '<article class="case-card">'
+        f'<a class="case-card-link" href="{case_path}">'
         f'<div class="case-card-top"><strong class="case-card-title">{title}</strong>'
         f'<div class="case-card-badges">{_priority_badge(summary.priority)}'
         f"{_case_status_badge(summary.status)}{_waiting_badge(summary.waiting_on)}"
@@ -2543,7 +2584,7 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
         f'<div class="case-customer">客户 / 企业：{customer_name}</div>'
         f'<div class="case-card-meta"><span class="case-ref">〔KF·{case_ref}〕</span>'
         f"<span>截止 {_format_datetime(summary.deadline)}</span>"
-        f"<span>最近更新 {updated_at}</span></div></a>"
+        f"<span>最近更新 {updated_at}</span></div></a>{accept_form}</article>"
     )
 
 

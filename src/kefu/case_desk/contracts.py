@@ -78,6 +78,7 @@ class CreateCase:
     parts: tuple[ContentPart, ...] = ()
     source_msgid: str | None = None
     related_case_id: UUID | None = None
+    deadline: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +297,7 @@ class CaseSummary:
     current_consultant_id: UUID | None
     updated_at: datetime
     version: int
+    can_accept: bool = False
 
 
 @dataclass(frozen=True, slots=True)

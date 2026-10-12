@@ -95,6 +95,27 @@ class DatabaseRoutingDirectory:
     def is_member(self, session: Session, *, user_id: UUID, team_id: UUID) -> bool:
         return self.active_membership(session, user_id=user_id, team_id=team_id) is not None
 
+    def active_team_ids(
+        self,
+        session: Session,
+        *,
+        user_id: UUID,
+        team_kind: TeamKind | None = None,
+        now: datetime | None = None,
+    ) -> frozenset[UUID]:
+        now = now or utc_now()
+        valid_from, valid_until = self._current_membership_conditions(now)
+        statement = select(TeamMembership.team_id).where(
+            TeamMembership.user_id == user_id,
+            valid_from,
+            valid_until,
+        )
+        if team_kind is not None:
+            statement = statement.join(Team, Team.id == TeamMembership.team_id).where(
+                Team.kind == team_kind
+            )
+        return frozenset(session.scalars(statement).all())
+
     def is_admin(self, session: Session, *, user_id: UUID, team_id: UUID) -> bool:
         membership = self.active_membership(session, user_id=user_id, team_id=team_id)
         return membership is not None and membership.role is MembershipRole.ADMIN

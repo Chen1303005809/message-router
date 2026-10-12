@@ -295,8 +295,17 @@ class CaseDesk:
             ).all()
             has_more = len(cases) > page_size
             visible_cases = cases[:page_size]
+            developer_team_ids = self._directory.active_team_ids(
+                session,
+                user_id=viewer.user_id,
+                team_kind=TeamKind.DEV,
+                now=now,
+            )
             return Page(
-                items=tuple(self._case_summary(case) for case in visible_cases),
+                items=tuple(
+                    self._case_summary(case, developer_team_ids)
+                    for case in visible_cases
+                ),
                 offset=offset,
                 next_offset=offset + page_size if has_more else None,
             )
@@ -595,6 +604,13 @@ class CaseDesk:
         consult_handler_name = self._validated_handler_name(command.consult_handler_name)
         related_case_id = self._validated_related_case(session, command.related_case_id)
         created_at = utc_now()
+        deadline = created_at + timedelta(hours=DEFAULT_CASE_DEADLINE_HOURS)
+        if command.deadline is not None:
+            if command.deadline.tzinfo is None or command.deadline.utcoffset() is None:
+                raise ValidationError("截止时间必须包含时区")
+            deadline = command.deadline.astimezone(UTC)
+            if deadline <= created_at:
+                raise ValidationError("截止时间必须晚于当前时间")
         case = Case(
             id=uuid4(),
             case_ref=self._new_unique_case_ref(session),
@@ -603,7 +619,7 @@ class CaseDesk:
             customer_contact_name=_clean_optional_text(command.customer_contact_name),
             customer_contact_method=_clean_optional_text(command.customer_contact_method),
             priority=command.priority,
-            deadline=created_at + timedelta(hours=DEFAULT_CASE_DEADLINE_HOURS),
+            deadline=deadline,
             approaching_window_minutes=DEFAULT_APPROACHING_WINDOW_MINUTES,
             lifecycle_status=LifecycleStatus.OPEN,
             status=CaseStatus.PENDING_CONFIRMATION,
@@ -1745,7 +1761,7 @@ class CaseDesk:
             ),
         )
 
-    def _case_summary(self, case: Case) -> CaseSummary:
+    def _case_summary(self, case: Case, developer_team_ids: frozenset[UUID]) -> CaseSummary:
         return CaseSummary(
             case_ref=case.case_ref,
             title=case.title,
@@ -1760,4 +1776,5 @@ class CaseDesk:
             current_consultant_id=case.current_consultant_id,
             updated_at=_as_utc(case.updated_at),
             version=case.version,
+            can_accept=case.current_dev_team_id in developer_team_ids,
         )
