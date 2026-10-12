@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 from urllib.request import urlopen
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ SESSION_COOKIE = "kefu_session"
 OAUTH_STATE_COOKIE = "kefu_oauth_state"
 SESSION_TTL = timedelta(hours=8)
 OAUTH_STATE_TTL_SECONDS = 600
+_LOGGER = logging.getLogger(__name__)
 
 
 class AuthenticationError(CaseDeskError):
@@ -92,8 +94,19 @@ class WeComOAuthClient:
             with urlopen(f"{endpoint}?{query}", timeout=5) as response:  # noqa: S310
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception as error:
+            _LOGGER.warning(
+                "WeCom OAuth request failed endpoint=%s error_type=%s",
+                urlsplit(endpoint).path,
+                type(error).__name__,
+            )
             raise AuthenticationError("企业微信身份验证暂时不可用") from error
         if not isinstance(payload, dict) or payload.get("errcode", 0) != 0:
+            errcode = payload.get("errcode") if isinstance(payload, dict) else None
+            _LOGGER.warning(
+                "WeCom OAuth response rejected endpoint=%s errcode=%r",
+                urlsplit(endpoint).path,
+                errcode,
+            )
             raise AuthenticationError("企业微信身份验证失败")
         return payload
 
@@ -165,6 +178,7 @@ class WebAuthenticator:
             raise AuthenticationError("企业微信登录状态校验失败")
         client = self._oauth_client or WeComOAuthClient(self._settings)
         wecom_userid = client.user_id_for_code(code)
+        _LOGGER.info("WeCom OAuth identity resolved wecom_userid=%s", wecom_userid)
         with self._session_factory() as session:
             user = self._directory.get_user_by_wecom_userid(session, wecom_userid)
         raw_token = secrets.token_urlsafe(48)
