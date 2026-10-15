@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from kefu.case_desk.errors import CaseDeskError
+from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
 from kefu.media.storage import (
@@ -87,6 +88,26 @@ async def _inbound_loop(
 ) -> None:
     async for event in transport.events():
         if event.chattype == "group":
+            raw_quote = _raw_quote(event)
+            raw_quote_refs = sorted(_case_refs_in_value(raw_quote))
+            normalized_quote_refs = sorted(parse_case_refs(event.quote_content or ""))
+            raw_body = _raw_body(event)
+            raw_message_type = _log_label(raw_body.get("msgtype")) if raw_body else "unknown"
+            raw_quote_type = _quote_type_for_log(raw_quote)
+            logger.info(
+                "[INBOUND-DIAG] callback_normalized msgid=%s message_type=%s "
+                "quote_type=%s quote_present=%s quote_chars=%s normalized_quote_refs=%s "
+                "raw_quote_refs=%s part_types=%s decode_error=%s",
+                event.msgid,
+                raw_message_type,
+                raw_quote_type,
+                bool(event.quote_content),
+                len(event.quote_content or ""),
+                ",".join(normalized_quote_refs) or "none",
+                ",".join(raw_quote_refs) or "none",
+                ",".join(type(part).__name__ for part in event.parts) or "none",
+                event.metadata.get("decode_error", "none"),
+            )
             logger.info(
                 "[GROUP-TRACE] callback_received msgid=%s chatid_fp=%s chatid_len=%s "
                 "mentioned=%s quote_present=%s part_count=%s",
@@ -181,6 +202,52 @@ async def _inbound_loop(
             origin_side=origin_side,
             suppress_delivery=suppress_delivery,
         )
+
+
+def _raw_body(event: InboundEvent) -> Mapping[str, object] | None:
+    frame = event.metadata.get("wecom_raw_frame")
+    if not isinstance(frame, Mapping):
+        return None
+    body = frame.get("body")
+    return body if isinstance(body, Mapping) else None
+
+
+def _raw_quote(event: InboundEvent) -> object | None:
+    body = _raw_body(event)
+    return body.get("quote") if body is not None else None
+
+
+def _case_refs_in_value(value: object, depth: int = 0) -> set[str]:
+    """Find only safe event-reference markers inside a raw quote payload."""
+    if depth > 8:
+        return set()
+    if isinstance(value, str):
+        return set(parse_case_refs(value))
+    if isinstance(value, Mapping):
+        refs: set[str] = set()
+        for child in list(value.values())[:100]:
+            refs.update(_case_refs_in_value(child, depth + 1))
+        return refs
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        refs: set[str] = set()
+        for child in value[:100]:
+            refs.update(_case_refs_in_value(child, depth + 1))
+        return refs
+    return set()
+
+
+def _log_label(value: object) -> str:
+    if not isinstance(value, str):
+        return type(value).__name__ if value is not None else "absent"
+    return " ".join(value.split())[:64] or "empty"
+
+
+def _quote_type_for_log(value: object) -> str:
+    if value is None:
+        return "absent"
+    if isinstance(value, Mapping):
+        return _log_label(value.get("msgtype"))
+    return type(value).__name__
 
 
 def _defer_group_callback(

@@ -8,6 +8,7 @@ delivery worker sends persisted text/image items through the same interface.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import mimetypes
 from collections import defaultdict
@@ -403,6 +404,7 @@ class LongConnectionWeComAdapter:
         if not isinstance(frame, Mapping):
             logger.warning("ignored non-object WeCom callback")
             return
+        self._log_inbound_frame(frame)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -410,13 +412,50 @@ class LongConnectionWeComAdapter:
             return
         loop.create_task(self._normalize_and_queue(cast(Mapping[str, object], frame)))
 
+    @staticmethod
+    def _log_inbound_frame(frame: Mapping[str, object]) -> None:
+        body = frame.get("body")
+        body_map = body if isinstance(body, Mapping) else {}
+        quote = body_map.get("quote")
+        quote_type = _quote_type_for_log(quote)
+        chatid = body_map.get("chatid")
+        logger.info(
+            "[INBOUND-DIAG] callback_frame_received msgid=%s chattype=%s "
+            "chatid_fp=%s message_type=%s body_shape=%s quote_present=%s "
+            "quote_type=%s quote_shape=%s",
+            _log_string(body_map.get("msgid")),
+            _log_string(body_map.get("chattype")),
+            opaque_id_fingerprint(chatid if isinstance(chatid, str) else None),
+            _log_string(body_map.get("msgtype")),
+            json.dumps(_shape_for_log(body_map), ensure_ascii=False, separators=(",", ":")),
+            quote is not None,
+            quote_type,
+            json.dumps(_shape_for_log(quote), ensure_ascii=False, separators=(",", ":")),
+        )
+        logger.info(
+            "[INBOUND-DIAG] callback_raw_frame msgid=%s payload=%s",
+            _log_string(body_map.get("msgid")),
+            _callback_frame_for_log(frame),
+        )
+
     async def _normalize_and_queue(self, frame: Mapping[str, object]) -> None:
         try:
             event = await self._normalize_frame(frame)
         except InboundPayloadError as error:
+            body = frame.get("body")
+            body_map = body if isinstance(body, Mapping) else {}
+            if body_map.get("chattype") == "group":
+                logger.warning(
+                    "[INBOUND-DIAG] callback_decode_failed msgid=%s message_type=%s "
+                    "quote_type=%s error=%s",
+                    _log_string(body_map.get("msgid")),
+                    _log_string(body_map.get("msgtype")),
+                    _quote_type_for_log(body_map.get("quote")),
+                    error,
+                )
             event = self._error_event(frame, str(error))
         except Exception:
-            logger.exception("failed to normalize WeCom callback")
+            logger.exception("[INBOUND-DIAG] failed_to_normalize_callback")
             event = self._error_event(frame, "消息内容解析失败，请重新发送。")
         await self._events.put(event)
 
@@ -561,6 +600,62 @@ def _mapping(value: object, error_message: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise InboundPayloadError(error_message)
     return cast(Mapping[str, object], value)
+
+
+def _log_string(value: object) -> str:
+    if not isinstance(value, str):
+        return type(value).__name__ if value is not None else "absent"
+    return " ".join(value.split())[:64] or "empty"
+
+
+def _quote_type_for_log(value: object) -> str:
+    if value is None:
+        return "absent"
+    if isinstance(value, Mapping):
+        return _log_string(value.get("msgtype"))
+    return type(value).__name__
+
+
+def _callback_frame_for_log(frame: Mapping[str, object]) -> str:
+    try:
+        return json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(frame)
+
+
+def _shape_for_log(value: object, depth: int = 0) -> object:
+    """Describe callback structure without copying message text or credentials."""
+    if depth >= 4 and isinstance(value, (Mapping, Sequence)) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return {"type": "object" if isinstance(value, Mapping) else "array", "truncated": True}
+    if isinstance(value, Mapping):
+        fields: dict[str, object] = {}
+        keys = sorted(value, key=str)
+        for key in keys[:24]:
+            fields[str(key)[:64]] = _shape_for_log(value[key], depth + 1)
+        result: dict[str, object] = {"type": "object", "fields": fields}
+        if len(keys) > 24:
+            result["omitted_fields"] = len(keys) - 24
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        result = {"type": "array", "length": len(value)}
+        if value:
+            result["first_item"] = _shape_for_log(value[0], depth + 1)
+        return result
+    if isinstance(value, str):
+        return {"type": "string", "length": len(value)}
+    if isinstance(value, (bytes, bytearray)):
+        return {"type": "bytes", "length": len(value)}
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, (int, float)):
+        return {"type": type(value).__name__}
+    if depth >= 4:
+        return {"type": type(value).__name__, "truncated": True}
+    return {"type": type(value).__name__}
 
 
 def _required_callback_string(data: Mapping[str, object], key: str) -> str:
