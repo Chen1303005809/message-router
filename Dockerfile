@@ -12,7 +12,10 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY alembic.ini ./
 COPY alembic ./alembic
-RUN python -m pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" .
+COPY docker/patch_aibot_sdk.py /tmp/patch_aibot_sdk.py
+RUN python -m pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" . \
+    && python /tmp/patch_aibot_sdk.py \
+    && rm /tmp/patch_aibot_sdk.py
 
 EXPOSE 8000
 
