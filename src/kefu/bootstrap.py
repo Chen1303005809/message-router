@@ -79,7 +79,7 @@ def _upsert_users(session: Session, values: Sequence[object]) -> dict[str, User]
 def _upsert_global_admin(session: Session, raw: object) -> User:
     item = _object(raw, "global_admin")
     wecom_userid = _string(item, "wecom_userid")
-    raw_display_name = item.get("display_name", "事件中心总管理员")
+    raw_display_name = item.get("display_name", "问题中心总管理员")
     if not isinstance(raw_display_name, str) or not raw_display_name.strip():
         raise BootstrapConfigError("global_admin 的 display_name 不能为空")
     display_name = raw_display_name.strip()

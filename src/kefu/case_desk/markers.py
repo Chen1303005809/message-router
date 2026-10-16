@@ -25,7 +25,7 @@ def normalize_case_ref(case_ref: str) -> str:
     if len(normalized) != DEFAULT_CASE_REF_LENGTH or any(
         character not in CROCKFORD_ALPHABET for character in normalized
     ):
-        raise ValidationError("事件引用标记格式无效")
+        raise ValidationError("问题引用标记格式无效")
     return normalized
 
 

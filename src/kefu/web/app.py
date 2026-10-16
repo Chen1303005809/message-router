@@ -1,18 +1,18 @@
 # ruff: noqa: E501
 
-"""Server-rendered H5 event center with no business rules of its own."""
+"""Server-rendered H5 issue workspace with no business rules of its own."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
 from hmac import compare_digest
 from html import escape
 from typing import Any
 from urllib.parse import parse_qs, urlencode
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
@@ -28,6 +28,11 @@ from kefu.admin.service import (
     ManagedTeamMember,
     ManagedUser,
     initialize_global_admin,
+)
+from kefu.agent.service import (
+    Agent,
+    AgentConfigurationError,
+    build_tool_registry,
 )
 from kefu.case_desk.contracts import (
     Actor,
@@ -56,6 +61,9 @@ from kefu.case_desk.errors import (
 )
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
+from kefu.inspection.service import IssueInspectionService
+from kefu.issues.contracts import IssueFields, IssueIntake
+from kefu.issues.service import IssueManagement, map_image_placeholders
 from kefu.media.storage import (
     MAX_IMAGE_BYTES,
     MediaIngestError,
@@ -63,6 +71,9 @@ from kefu.media.storage import (
     ObjectStorage,
     object_storage_from_settings,
 )
+from kefu.messages.push import MessagePush
+from kefu.messages.receiver import MessageReceiver
+from kefu.messages.recipients import RecipientResolver
 from kefu.observability import database_target_fingerprint
 from kefu.persistence.database import create_engine_from_url, create_session_factory
 from kefu.persistence.models import (
@@ -79,9 +90,11 @@ from kefu.persistence.models import (
     MembershipRole,
     MessageIntent,
     PartKind,
+    StoredMedia,
     TeamKind,
     WaitingOn,
 )
+from kefu.relay.handler import Relay
 from kefu.web.auth import AuthenticationError, WebAuthenticator
 from kefu.wecom.transport import InboundImagePart
 
@@ -105,6 +118,30 @@ def create_app(
     administration = Administration(session_factory)
     authenticator = authenticator or WebAuthenticator(session_factory, settings)
     storage = storage or _storage_from_settings(settings)
+    media_ingestor = MediaIngestor(session_factory, storage)
+    issue_management = IssueManagement(
+        session_factory,
+        desk,
+        settings,
+        storage=storage,
+    )
+    message_push = MessagePush(session_factory)
+    relay = Relay(session_factory, desk, media_ingestor=media_ingestor)
+    message_receiver = MessageReceiver(relay, message_push)
+    recipient_resolver = RecipientResolver(session_factory)
+    inspection = IssueInspectionService(
+        session_factory,
+        message_receiver,
+        recipient_resolver,
+        settings,
+    )
+    agent_tools = build_tool_registry(
+        issue_management,
+        inspection,
+        message_receiver,
+        recipient_resolver,
+    )
+    agent = Agent(settings, agent_tools)
     if settings.initial_admin_wecom_userid:
         initialize_global_admin(
             session_factory,
@@ -115,7 +152,16 @@ def create_app(
         "[GROUP-TRACE] web_app_configured database_target_fp=%s",
         database_target_fp,
     )
-    app = FastAPI(title="客户问题事件中心", version="0.1.0")
+    app = FastAPI(title="问题工作台", version="0.1.0")
+    app.state.modules = {
+        "issues": issue_management,
+        "inspection": inspection,
+        "message_receiver": message_receiver,
+        "message_push": message_push,
+        "agent": agent,
+        "agent_tools": agent_tools,
+        "recipient_resolver": recipient_resolver,
+    }
 
     def external_path(path: str) -> str:
         """Build a browser path that preserves an optional proxy mount prefix."""
@@ -125,6 +171,33 @@ def create_app(
         if not mount_path or path == mount_path or path.startswith(f"{mount_path}/"):
             return path
         return f"{mount_path}{path}"
+
+    @app.middleware("http")
+    async def legacy_event_routes(request: Request, call_next):
+        path = request.url.path
+        mount_path = settings.web_mount_path
+        internal_path = (
+            path[len(mount_path) :]
+            if mount_path and path.startswith(f"{mount_path}/")
+            else path
+        )
+        if internal_path == "/events" or internal_path.startswith("/events/"):
+            new_path = "/issues" + internal_path[len("/events") :]
+            if internal_path == "/events/new" and request.method == "POST":
+                status_code = 303
+            else:
+                status_code = 307
+            destination = external_path(new_path)
+            if request.url.query:
+                destination = f"{destination}?{request.url.query}"
+            return RedirectResponse(destination, status_code=status_code)
+        if internal_path == "/api/events" or internal_path.startswith("/api/events/"):
+            new_path = "/api/issues" + internal_path[len("/api/events") :]
+            destination = external_path(new_path)
+            if request.url.query:
+                destination = f"{destination}?{request.url.query}"
+            return RedirectResponse(destination, status_code=307)
+        return await call_next(request)
 
     def actor_or_error(request: Request) -> Actor:
         try:
@@ -158,12 +231,12 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
-        return RedirectResponse(external_path("/events"), status_code=302)
+        return RedirectResponse(external_path("/issues/new"), status_code=302)
 
     @app.get("/auth/login", include_in_schema=False)
     async def login(next: str | None = None) -> RedirectResponse:
         try:
-            return authenticator.begin_login(next or external_path("/events"))
+            return authenticator.begin_login(next or external_path("/issues/new"))
         except CaseDeskError as error:
             raise _http_error(error) from error
 
@@ -173,6 +246,10 @@ def create_app(
             return authenticator.complete_login(request, code=code, state=state)
         except CaseDeskError as error:
             raise _http_error(error) from error
+
+    @app.on_event("shutdown")
+    async def close_agent_client() -> None:
+        await agent.close()
 
     @app.get("/setup", response_class=HTMLResponse, include_in_schema=False)
     async def setup_page() -> Response:
@@ -192,16 +269,16 @@ def create_app(
         )
         body = f"""
         <main class="setup-card">
-          <div class="eyebrow">首次使用 · H5 事件管理中心</div>
+          <div class="eyebrow">首次使用 · H5 问题管理中心</div>
           <h1>初始化总管理员</h1>
           <p class="muted">总管理员使用企业微信 userid 登录，不单独设置密码。初始化完成后，人员授权、团队配置和研发/咨询群绑定都可以在管理中心可视化完成。</p>
           <div class="notice">{escape(token_hint)}</div>
-          <form method="post" action="{external_path('/setup')}">
+          <form method="post" action="{external_path("/setup")}">
             <label>企业微信 userid
               <input name="wecom_userid" required maxlength="128" placeholder="例如 zhangsan">
             </label>
             <label>显示名称
-              <input name="display_name" required maxlength="256" value="事件中心总管理员">
+              <input name="display_name" required maxlength="256" value="问题中心总管理员">
             </label>
             <label>初始化令牌
               <input name="token" type="password" autocomplete="off" placeholder="生产环境必填">
@@ -232,6 +309,268 @@ def create_app(
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path("/admin"), status_code=303)
+
+    @app.get("/issues/new", response_class=HTMLResponse)
+    async def new_issue_intake_page(request: Request) -> Response:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            queues = issue_management.list_consult_queues(actor)
+            dev_teams = issue_management.list_dev_teams(actor)
+            issue_management.cleanup_expired_drafts()
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        if not queues:
+            raise _http_error(Forbidden("你没有可用的咨询队列权限，或咨询队列尚未绑定企微群聊"))
+        queue_options = "".join(
+            f'<option value="{queue.id}" '
+            f"{'selected' if len(queues) == 1 else ''}>{escape(queue.name)}</option>"
+            for queue in queues
+        )
+        if len(queues) > 1:
+            queue_options = (
+                '<option value="" disabled selected>选择你收到咨询消息的队列</option>'
+                + queue_options
+            )
+        if not dev_teams:
+            raise _http_error(Forbidden("当前没有已绑定群聊的初次受理组"))
+        body = f"""
+        <main class="create-main intake-page">
+          <header class="page-heading"><div class="eyebrow">问题工作台 · 新建问题</div>
+            <h1>上传咨询材料</h1>
+            <p class="muted">粘贴企微聊天内容并添加图片。Agent 会整理文字草稿，图片只作为附件保存。</p>
+          </header>
+          <form class="panel create-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
+            <label>咨询队列
+              <select name="consult_queue_id" required>{queue_options}</select>
+            </label>
+            <label>粘贴企微消息
+              <textarea name="pasted_text" required maxlength="50000" rows="12"
+                placeholder="粘贴引用机器人消息并 @机器人 回复的聊天文本。图片请保留为 [图片] 占位符。"></textarea>
+            </label>
+            {_image_upload_controls()}
+            <p class="muted">上传图片按文本中 [图片] 的顺序对应；多出的图片会追加到内容末尾，未匹配的占位符会保留为文字。</p>
+            <button class="primary" type="submit">交给 Agent 整理草稿</button>
+          </form>
+          <nav class="intake-secondary"><a href="{external_path("/issues")}">查看问题列表</a>
+            <a href="{external_path("/admin")}">组织与授权</a></nav>
+        </main>
+        """
+        return HTMLResponse(_page("上传问题材料", body, body_class="issue-intake-page"))
+
+    @app.post("/issues/draft", include_in_schema=False)
+    async def create_issue_draft(request: Request) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await request.form()
+        try:
+            pasted_text = _required_form_text(form, "pasted_text")
+            if len(pasted_text) > 50_000:
+                raise ValidationError("粘贴内容不能超过50000个字符")
+            consult_queue_id = UUID(_required_form_text(form, "consult_queue_id"))
+            queues = issue_management.list_consult_queues(actor)
+            if consult_queue_id not in {queue.id for queue in queues}:
+                raise Forbidden("你不属于所选咨询队列")
+            dev_teams = issue_management.list_dev_teams(actor)
+            if not dev_teams:
+                raise Forbidden("当前没有可用的初次受理组")
+            message = message_receiver.receive_workbench(uuid4(), pasted_text)
+            try:
+                generated = await agent.draft_issue(
+                    pasted_text,
+                    [team.name for team in dev_teams],
+                )
+            except AgentConfigurationError as error:
+                raise HTTPException(status_code=503, detail=str(error)) from error
+            except RuntimeError as error:
+                raise HTTPException(status_code=502, detail=str(error)) from error
+
+            suggested_group = generated.get("initial_acceptance_group", "").strip()
+            selected_team = next(
+                (team for team in dev_teams if team.name == suggested_group),
+                None,
+            )
+            uploads: list[UploadFile] = []
+            for item in form.getlist("images"):
+                if isinstance(item, UploadFile):
+                    if item.filename:
+                        uploads.append(item)
+                elif item:
+                    raise ValidationError("图片字段格式无效")
+            media_ids: list[UUID] = []
+            for upload in uploads:
+                image_data = await upload.read(MAX_IMAGE_BYTES + 1)
+                if len(image_data) > MAX_IMAGE_BYTES:
+                    raise ValidationError("单张图片不能超过 20 MiB")
+                media_ids.append(
+                    media_ingestor.ingest(
+                        InboundImagePart(data=image_data, mime_type=upload.content_type or "")
+                    )
+                )
+            parts = map_image_placeholders(pasted_text, media_ids)
+            fields = IssueFields(
+                issue_description=generated.get("issue_description", ""),
+                initial_acceptance_team_id=selected_team.id if selected_team else None,
+                suspected_type=generated.get("suspected_type", ""),
+                current_situation=generated.get("current_situation", ""),
+                issue_current_status="问题未回复",
+                bug_number="",
+                feedback_event_point="",
+                issue_source="工作台",
+                deadline=datetime.now(ZoneInfo("Asia/Shanghai"))
+                + timedelta(hours=settings.issue_default_expiry_hours),
+            )
+            draft = issue_management.create_intake_draft(
+                IssueIntake(
+                    consult_queue_id=consult_queue_id,
+                    raw_text=message.text,
+                    parts=parts,
+                    fields=fields,
+                ),
+                actor,
+            )
+        except MediaIngestError as error:
+            raise _http_error(ValidationError(str(error))) from error
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        finally:
+            await form.close()
+        return RedirectResponse(
+            external_path(f"/issues/drafts/{draft.id}"),
+            status_code=303,
+        )
+
+    @app.get("/issues/drafts/{draft_id}", response_class=HTMLResponse)
+    async def issue_draft_review(request: Request, draft_id: UUID) -> Response:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            draft = issue_management.get_intake_draft(draft_id, actor)
+            queues = issue_management.list_consult_queues(actor)
+            dev_teams = issue_management.list_dev_teams(actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        team_options = '<option value="">请选择初次受理组</option>' + "".join(
+            f'<option value="{team.id}" '
+            f"{'selected' if team.id == draft.fields.initial_acceptance_team_id else ''}>"
+            f"{escape(team.name)}</option>"
+            for team in dev_teams
+        )
+        queue_name = next(
+            (queue.name for queue in queues if queue.id == draft.consult_queue_id),
+            "已登记咨询队列",
+        )
+        parts_html = "".join(
+            (
+                f'<pre class="intake-part">{escape(part.text)}</pre>'
+                if isinstance(part, TextPart)
+                else (
+                    f'<img class="intake-image" src="{external_path(f"/issues/drafts/{draft.id}/media/{part.media_id}")}" '
+                    f'alt="问题图片附件">'
+                )
+            )
+            for part in draft.parts
+        )
+        initial_deadline = _datetime_local_value(draft.initial_expires_at)
+        fields = draft.fields
+        body = f"""
+        <main class="create-main intake-review-page">
+          <a class="back-link" href="{external_path("/issues/new")}">← 重新上传材料</a>
+          <header class="page-heading"><div class="eyebrow">Agent 草稿 · 请检查后确认</div>
+            <h1>确认问题信息</h1><p class="muted">Agent 只生成草稿；确认后由程序创建问题和首条投递任务。</p></header>
+          <section class="panel intake-source"><h2>收到的材料</h2><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</section>
+          <form class="panel create-form" method="post" action="{external_path(f"/issues/drafts/{draft.id}/confirm")}">
+            <label>问题描述 <textarea name="issue_description" required maxlength="20000" rows="6">{escape(fields.issue_description)}</textarea></label>
+            <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
+            <div class="form-row">
+              <label>怀疑类型 <input name="suspected_type" maxlength="128" value="{escape(fields.suspected_type)}"></label>
+              <label>问题状态 <input name="issue_current_status" required maxlength="128" value="{escape(fields.issue_current_status)}"></label>
+            </div>
+            <label>现状说明 <textarea name="current_situation" maxlength="20000" rows="4">{escape(fields.current_situation)}</textarea></label>
+            <label>问题初次过期时间
+              <input name="deadline" type="datetime-local" step="60" required value="{initial_deadline}">
+            </label>
+            <div class="form-row">
+              <label>问题编号 <input value="{escape(draft.issue_number)}" readonly></label>
+              <label>Bug 编号 <input name="bug_number" maxlength="64" value="{escape(fields.bug_number)}"></label>
+            </div>
+            <label>首次记录人 <input value="{escape(draft.first_recorder_name)}" readonly></label>
+            <label>反馈事件点 <textarea name="feedback_event_point" maxlength="20000" rows="3">{escape(fields.feedback_event_point)}</textarea></label>
+            <label>问题来源 <input name="issue_source" maxlength="256" value="{escape(fields.issue_source)}"></label>
+            <p class="muted">初次过期时间默认创建后 {settings.issue_default_expiry_hours} 小时；临期窗口为提前 {settings.issue_approaching_window_hours} 小时。</p>
+            <button class="primary" type="submit">确认并推送给初次受理组</button>
+          </form>
+        </main>
+        """
+        return HTMLResponse(_page("确认问题", body, body_class="issue-review-page"))
+
+    @app.get("/issues/drafts/{draft_id}/media/{media_id}", include_in_schema=False)
+    async def issue_draft_media(request: Request, draft_id: UUID, media_id: UUID) -> Response:
+        actor = actor_or_error(request)
+        try:
+            draft = issue_management.get_intake_draft(draft_id, actor)
+            if not any(
+                isinstance(part, ImagePart) and part.media_id == media_id for part in draft.parts
+            ):
+                raise NotFound("图片附件不存在")
+            with session_factory() as session:
+                media = session.get(StoredMedia, media_id)
+                if media is None:
+                    raise NotFound("图片附件不存在")
+                object_key, mime_type = media.object_key, media.mime_type
+            return Response(storage.get(object_key), media_type=mime_type)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+
+    @app.post("/issues/drafts/{draft_id}/confirm", include_in_schema=False)
+    async def confirm_issue_draft(request: Request, draft_id: UUID) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await request.form()
+        try:
+            fields = IssueFields(
+                issue_description=_required_form_text(form, "issue_description"),
+                initial_acceptance_team_id=UUID(
+                    _required_form_text(form, "initial_acceptance_team_id")
+                ),
+                suspected_type=_optional_form_text(form, "suspected_type") or "",
+                issue_current_status=_required_form_text(form, "issue_current_status"),
+                current_situation=_optional_form_text(form, "current_situation") or "",
+                bug_number=_optional_form_text(form, "bug_number") or "",
+                feedback_event_point=_optional_form_text(form, "feedback_event_point") or "",
+                issue_source=_optional_form_text(form, "issue_source") or "工作台",
+                deadline=_parse_local_deadline(_required_form_text(form, "deadline")),
+            )
+            result = issue_management.confirm_intake(draft_id, fields, actor)
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        finally:
+            await form.close()
+        return RedirectResponse(
+            external_path(f"/issues/{result.issue_number}"),
+            status_code=303,
+        )
+
+    @app.post("/api/agent/chat")
+    async def agent_chat_api(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        raw_messages = payload.get("messages")
+        if not isinstance(raw_messages, list) or not all(
+            isinstance(item, Mapping) for item in raw_messages
+        ):
+            raise HTTPException(status_code=422, detail="messages 必须是消息对象数组")
+        try:
+            reply = await agent.chat(raw_messages, actor)
+        except AgentConfigurationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        return JSONResponse({"message": reply})
 
     @app.get("/settings/routing", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/admin", response_class=HTMLResponse)
@@ -298,13 +637,9 @@ def create_app(
                 actor,
                 user_id,
                 display_name=(
-                    _payload_text(payload, "display_name")
-                    if "display_name" in payload
-                    else None
+                    _payload_text(payload, "display_name") if "display_name" in payload else None
                 ),
-                active=(
-                    _payload_bool(payload, "active") if "active" in payload else None
-                ),
+                active=(_payload_bool(payload, "active") if "active" in payload else None),
                 is_global_admin=(
                     _payload_bool(payload, "is_global_admin")
                     if "is_global_admin" in payload
@@ -525,24 +860,22 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path("/admin"), status_code=303)
 
-    @app.get("/events", response_class=HTMLResponse)
-    async def events_page(
-        request: Request, state: str = "open", priority: str = ""
-    ) -> Response:
+    @app.get("/issues", response_class=HTMLResponse)
+    async def events_page(request: Request, state: str = "open", priority: str = "") -> Response:
         if state not in {"mine", "dev", "open", "closed"}:
             state = "open"
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         try:
-            overview = desk.overview(actor)
-            cases = desk.list_cases(_case_filter_for_state(state, priority), actor)
-            consult_queues = desk.list_consult_queues(actor)
+            overview = issue_management.overview(actor)
+            cases = issue_management.list(_case_filter_for_state(state, priority), actor)
+            consult_queues = issue_management.list_consult_queues(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         cards = "".join(_case_card(summary, external_path) for summary in cases.items)
-        cards = cards or '<p class="empty">当前筛选下没有事件。</p>'
-        events_path = external_path("/events")
+        cards = cards or '<p class="empty">当前筛选下没有问题。</p>'
+        events_path = external_path("/issues")
         tabs = " ".join(
             f'<a class="{"active" if state == value else ""}" '
             f'href="{_event_filter_url(events_path, value, priority)}">{label}</a>'
@@ -570,7 +903,7 @@ def create_app(
             else ""
         )
         create_link = (
-            f'<a class="nav-create" href="{external_path("/events/new")}">＋ 新建事件</a>'
+            f'<a class="nav-create" href="{external_path("/issues/new")}">＋ 新建问题</a>'
             if consult_queues
             else ""
         )
@@ -585,12 +918,12 @@ def create_app(
         )
         return HTMLResponse(
             _page(
-                "事件中心",
+                "问题中心",
                 f'<header class="topbar"><div><div class="eyebrow">客户问题 · 全链路跟踪</div>'
-                f"<h1>事件工作台</h1><p class=\"muted\">按当前责任方和紧急程度跟进每一条问题</p></div>"
-                f'<nav>{tabs}{admin_link}{create_link}</nav></header>'
-                f'<section class="overview-grid" aria-label="事件数据一览">{overview_cards}</section>'
-                f'{_debug_input_controls()}'
+                f'<h1>问题工作台</h1><p class="muted">按当前责任方和紧急程度跟进每一条问题</p></div>'
+                f"<nav>{tabs}{admin_link}{create_link}</nav></header>"
+                f'<section class="overview-grid" aria-label="问题数据一览">{overview_cards}</section>'
+                f"{_debug_input_controls()}"
                 f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
                 f'<nav class="priority-filters">{priority_filters}</nav></section>'
                 f'<main class="event-list">{cards}</main>',
@@ -598,13 +931,11 @@ def create_app(
             )
         )
 
-    @app.get("/api/events")
-    async def events_api(
-        request: Request, state: str = "open", priority: str = ""
-    ) -> JSONResponse:
+    @app.get("/api/issues")
+    async def issues_api(request: Request, state: str = "open", priority: str = "") -> JSONResponse:
         actor = actor_or_error(request)
         try:
-            page = desk.list_cases(_case_filter_for_state(state, priority), actor)
+            page = issue_management.list(_case_filter_for_state(state, priority), actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         return JSONResponse(
@@ -615,20 +946,18 @@ def create_app(
             }
         )
 
-    @app.get("/events/new", response_class=HTMLResponse)
+    @app.get("/legacy/events/new", response_class=HTMLResponse, include_in_schema=False)
     async def new_case_form_page(request: Request) -> Response:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         try:
-            queues = desk.list_consult_queues(actor)
-            dev_teams = desk.list_dev_teams(actor)
+            queues = issue_management.list_consult_queues(actor)
+            dev_teams = issue_management.list_dev_teams(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         if not queues:
-            raise _http_error(
-                Forbidden("你没有可用的咨询队列权限，或所选咨询队列尚未绑定咨询群")
-            )
+            raise _http_error(Forbidden("你没有可用的咨询队列权限，或所选咨询队列尚未绑定咨询群"))
         queue_options = "".join(
             f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
         )
@@ -639,12 +968,12 @@ def create_app(
         )
         body = f"""
         <main class="create-main">
-          <a class="back-link" href="{external_path('/events')}">← 返回事件中心</a>
-          <header class="page-heading"><div class="eyebrow">H5 事件中心</div>
-            <h1>创建新事件</h1><p class="muted">填写问题和客户信息，补充图片后直接交给研发跟进。</p></header>
-          <form class="panel create-form" method="post" action="{external_path('/events/new')}" enctype="multipart/form-data">
-            <h2>事件信息</h2>
-            <label>事件标题 <input name="title" required maxlength="512" placeholder="例如：订单提交后页面报错"></label>
+          <a class="back-link" href="{external_path("/issues")}">← 返回问题中心</a>
+          <header class="page-heading"><div class="eyebrow">H5 问题中心</div>
+            <h1>创建新问题</h1><p class="muted">填写问题和客户信息，补充图片后直接交给研发跟进。</p></header>
+          <form class="panel create-form" method="post" action="{external_path("/issues/new")}" enctype="multipart/form-data">
+            <h2>问题信息</h2>
+            <label>问题标题 <input name="title" required maxlength="512" placeholder="例如：订单提交后页面报错"></label>
             <label>咨询经办显示名 <input name="consult_handler_name" required maxlength="256" placeholder="可填写姓名或团队内使用的称呼"></label>
             <label>问题描述 <textarea name="description" required maxlength="20000" rows="6" placeholder="描述客户现象、发生时间、影响范围和复现步骤"></textarea></label>
             {_image_upload_controls()}
@@ -670,15 +999,15 @@ def create_app(
             <label>截止时间（选填）
               <input name="deadline" type="datetime-local" step="60">
             </label>
-            <p class="muted">咨询经办显示名由本事件填写，独立于登录账号；研发经办显示名沿用团队设置。群聊记录不按发送成员 userid 归属。</p>
+            <p class="muted">咨询经办显示名由本问题填写，独立于登录账号；研发经办显示名沿用团队设置。群聊记录不按发送成员 userid 归属。</p>
             <p class="muted">描述文字必填，图片可选。截止时间按中国标准时间填写；留空时默认为创建后 3 小时。临近期限提醒默认提前 24 小时，创建后也可在详情中调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
         </main>
         """
-        return HTMLResponse(_page("创建事件", body, body_class="case-create-page"))
+        return HTMLResponse(_page("创建问题", body, body_class="case-create-page"))
 
-    @app.post("/events/new", include_in_schema=False)
+    @app.post("/legacy/events/new", include_in_schema=False)
     async def create_case_from_h5(request: Request) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
@@ -696,7 +1025,7 @@ def create_app(
             priority = CasePriority(_optional_form_text(form, "priority") or "normal")
             deadline = _parse_local_deadline(_optional_form_text(form, "deadline"))
             if len(title) > 512:
-                raise ValidationError("事件标题不能超过 512 个字符")
+                raise ValidationError("问题标题不能超过 512 个字符")
             if len(description) > 20_000:
                 raise ValidationError("问题描述不能超过 20000 个字符")
             if len(customer_name) > 256:
@@ -708,10 +1037,10 @@ def create_app(
             if customer_contact_method and len(customer_contact_method) > 256:
                 raise ValidationError("联系方式不能超过 256 个字符")
 
-            queues = desk.list_consult_queues(actor)
+            queues = issue_management.list_consult_queues(actor)
             if consult_queue_id not in {queue.id for queue in queues}:
                 raise Forbidden("你不属于所选咨询团队")
-            dev_teams = desk.list_dev_teams(actor)
+            dev_teams = issue_management.list_dev_teams(actor)
             if dev_team_id not in {team.id for team in dev_teams}:
                 raise Forbidden("所选研发处理团队不可用")
 
@@ -737,7 +1066,7 @@ def create_app(
                 )
                 parts.append(ImagePart(media_id))
 
-            result = desk.execute(
+            result = issue_management.execute(
                 CreateCase(
                     title=title,
                     consult_queue_id=consult_queue_id,
@@ -758,16 +1087,16 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         finally:
             await form.close()
-        assert result.case_ref is not None
-        return RedirectResponse(external_path(f"/events/{result.case_ref}"), status_code=303)
+        assert result.issue_number is not None
+        return RedirectResponse(external_path(f"/issues/{result.issue_number}"), status_code=303)
 
-    @app.get("/events/{case_ref}", response_class=HTMLResponse)
-    async def event_detail(request: Request, case_ref: str) -> Response:
+    @app.get("/issues/{issue_number}", response_class=HTMLResponse)
+    async def issue_detail(request: Request, issue_number: str) -> Response:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         try:
-            case = desk.get_case(case_ref, actor)
+            case = issue_management.get(issue_number, actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         can_use_side_selector = administration.is_global_admin(actor)
@@ -776,16 +1105,16 @@ def create_app(
             deliveries_by_entry.setdefault(delivery.entry_id, []).append(delivery)
         entries = "".join(
             _render_entry(
-                case.case_ref,
+                case.issue_number,
                 entry,
                 external_path,
                 deliveries_by_entry.get(entry.id, ()),
             )
             for entry in case.entries
         )
-        events_path = external_path("/events")
+        events_path = external_path("/issues")
         message_form = _message_form(
-            case.case_ref,
+            case.issue_number,
             case.version,
             case.lifecycle_status,
             external_path,
@@ -799,9 +1128,9 @@ def create_app(
         )
         body = f"""
         <main class="case-main">
-          <a class="back-link" href="{events_path}">← 返回事件工作台</a>
+          <a class="back-link" href="{events_path}">← 返回问题工作台</a>
           <header class="case-titlebar">
-            <div><div class="eyebrow">事件编号 〔KF·{escape(case.case_ref)}〕</div>
+            <div><div class="eyebrow">问题编号 〔KF·{escape(case.case_ref)}〕</div>
               <h1>{escape(case.title)}</h1></div>
             <div class="case-state-badges">
               {_case_status_badge(case.status)}
@@ -810,16 +1139,32 @@ def create_app(
               {_priority_badge(case.priority)}
             </div>
           </header>
+          <section class="issue-fields panel">
+            <h2>问题信息</h2>
+            <div class="issue-fields-grid">
+              <div class="issue-field issue-field-wide"><span>问题描述</span><p>{escape(case.issue_description or case.title)}</p></div>
+              <div class="issue-field"><span>初次受理组</span><strong>{escape(case.initial_acceptance_team_name or case.current_dev_team_name)}</strong></div>
+              <div class="issue-field"><span>怀疑类型</span><strong>{escape(case.suspected_type or "未填写")}</strong></div>
+              <div class="issue-field"><span>现状说明</span><p>{escape(case.current_situation or "未填写")}</p></div>
+              <div class="issue-field"><span>问题状态</span><strong>{escape(case.issue_current_status)}</strong></div>
+              <div class="issue-field"><span>问题初次过期时间</span><strong>{_format_datetime(case.initial_expires_at or case.deadline)}</strong></div>
+              <div class="issue-field"><span>问题编号</span><strong>{escape(case.issue_number)}</strong></div>
+              <div class="issue-field"><span>Bug 编号</span><strong>{escape(case.bug_number or "不适用")}</strong></div>
+              <div class="issue-field"><span>首次记录人</span><strong>{escape(case.first_recorder_name)}</strong></div>
+              <div class="issue-field"><span>反馈事件点</span><p>{escape(case.feedback_event_point or "未填写")}</p></div>
+              <div class="issue-field"><span>问题来源</span><strong>{escape(case.issue_source or "未填写")}</strong></div>
+            </div>
+          </section>
           <section class="case-overview panel">
             <div class="case-overview-heading"><h2>客户与责任信息</h2>
-              <div class="updated-at">最近更新 { _format_datetime(case.updated_at) }</div></div>
+              <div class="updated-at">最近更新 {_format_datetime(case.updated_at)}</div></div>
             <div class="case-meta-grid">
-              <div><span>客户 / 企业</span><strong>{escape(case.customer_name or '未录入')}</strong></div>
-              <div><span>联系人</span><strong>{escape(case.customer_contact_name or '未填写')}</strong></div>
-              <div><span>联系方式</span><strong>{escape(case.customer_contact_method or '未填写')}</strong></div>
+              <div><span>客户 / 企业</span><strong>{escape(case.customer_name or "未录入")}</strong></div>
+              <div><span>联系人</span><strong>{escape(case.customer_contact_name or "未填写")}</strong></div>
+              <div><span>联系方式</span><strong>{escape(case.customer_contact_method or "未填写")}</strong></div>
               <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
               <div><span>咨询经办显示名</span><strong>{escape(case.consult_handler_name)}</strong></div>
-              <div><span>当前咨询账号负责人</span><strong>{escape(case.current_consultant_name or '未指定')}</strong></div>
+              <div><span>当前咨询账号负责人</span><strong>{escape(case.current_consultant_name or "未指定")}</strong></div>
               <div><span>研发团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
               <div><span>研发经办人</span><strong>{escape(case.current_dev_team_lead_display_name or case.current_dev_team_name)}</strong></div>
               <div><span>创建时间</span><strong>{_format_datetime(case.created_at)}</strong></div>
@@ -832,7 +1177,7 @@ def create_app(
           {_metadata_form(case, external_path)}
           {_case_status_controls(case, external_path)}
           <section class="timeline-section">
-            <div class="section-heading"><h2>事件时间线</h2><span>{len(case.entries)} 条记录</span></div>
+            <div class="section-heading"><h2>问题时间线</h2><span>{len(case.entries)} 条记录</span></div>
             <div class="timeline">{entries}</div>
           </section>
           {action_panel}
@@ -840,17 +1185,17 @@ def create_app(
         """
         return HTMLResponse(_page(case.title, body, body_class="case-detail-page"))
 
-    @app.get("/api/events/{case_ref}")
-    async def event_api(request: Request, case_ref: str) -> JSONResponse:
+    @app.get("/api/issues/{issue_number}")
+    async def issue_api(request: Request, issue_number: str) -> JSONResponse:
         actor = actor_or_error(request)
         try:
-            case = desk.get_case(case_ref, actor)
+            case = issue_management.get(issue_number, actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         return JSONResponse(_case_json(case))
 
-    @app.post("/events/{case_ref}/messages", include_in_schema=False)
-    async def post_message(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/messages", include_in_schema=False)
+    async def post_message(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
@@ -858,9 +1203,9 @@ def create_app(
         try:
             intent = MessageIntent(form.get("intent", MessageIntent.HANDOFF.value))
             side = EntrySide(form["side"]) if form.get("side") else None
-            desk.execute(
+            issue_management.execute(
                 PostFormalMessage(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     parts=(TextPart(_required(form, "text")),),
                     intent=intent,
@@ -870,18 +1215,18 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/metadata", include_in_schema=False)
-    async def update_event_metadata(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/metadata", include_in_schema=False)
+    async def update_issue_metadata(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
-            desk.execute(
+            issue_management.execute(
                 UpdateCaseMetadata(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     customer_name=_required(form, "customer_name"),
                     customer_contact_name=form.get("customer_contact_name"),
@@ -892,11 +1237,11 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/deadline/adjust", include_in_schema=False)
-    @app.post("/events/{case_ref}/deadline/extend", include_in_schema=False)
-    async def adjust_event_deadline(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/deadline/adjust", include_in_schema=False)
+    @app.post("/issues/{issue_number}/deadline/extend", include_in_schema=False)
+    async def adjust_issue_deadline(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
@@ -913,9 +1258,9 @@ def create_app(
                 adjustment_minutes = -adjustment_minutes
             elif direction != "delay":
                 raise ValidationError("期限调整方向无效")
-            desk.execute(
+            issue_management.execute(
                 AdjustCaseDeadline(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     adjustment_minutes=adjustment_minutes,
                 ),
@@ -923,20 +1268,18 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/deadline/approaching-window", include_in_schema=False)
-    async def set_event_approaching_window(
-        request: Request, case_ref: str
-    ) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/deadline/approaching-window", include_in_schema=False)
+    async def set_issue_approaching_window(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
-            desk.execute(
+            issue_management.execute(
                 SetCaseApproachingWindow(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     approaching_window_minutes=_half_hour_hours_to_minutes(
                         _required(form, "approaching_hours"), "临近期限提醒时间"
@@ -946,18 +1289,18 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/status", include_in_schema=False)
-    async def set_event_status(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/status", include_in_schema=False)
+    async def set_issue_status(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
-            desk.execute(
+            issue_management.execute(
                 SetCaseStatus(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     status=CaseStatus(_required(form, "status")),
                 ),
@@ -965,30 +1308,30 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/close", include_in_schema=False)
-    async def close_event(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/close", include_in_schema=False)
+    async def close_issue(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
-            desk.execute(CloseCase(case_ref, int(_required(form, "version"))), actor)
+            issue_management.execute(CloseCase(issue_number, int(_required(form, "version"))), actor)
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/reopen", include_in_schema=False)
-    async def reopen_event(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/reopen", include_in_schema=False)
+    async def reopen_issue(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
-            desk.execute(
+            issue_management.execute(
                 ReopenCase(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     waiting_on=WaitingOn(_required(form, "waiting_on")),
                 ),
@@ -996,18 +1339,18 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/events/{case_ref}/transfer-consultant", include_in_schema=False)
-    async def transfer_consultant_page(request: Request, case_ref: str) -> RedirectResponse:
+    @app.post("/issues/{issue_number}/transfer-consultant", include_in_schema=False)
+    async def transfer_consultant_page(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await _urlencoded_form(request)
         try:
-            desk.execute(
+            issue_management.execute(
                 TransferConsultant(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     new_consultant_id=UUID(_required(form, "new_consultant_id")),
                 ),
@@ -1015,16 +1358,16 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return RedirectResponse(external_path(f"/events/{escape(case_ref)}"), status_code=303)
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
-    @app.post("/api/events/{case_ref}/transfer-consultant")
-    async def transfer_consultant(request: Request, case_ref: str) -> JSONResponse:
+    @app.post("/api/issues/{issue_number}/transfer-consultant")
+    async def transfer_consultant(request: Request, issue_number: str) -> JSONResponse:
         actor = actor_or_error(request)
         payload = await _json_object(request)
         try:
-            result = desk.execute(
+            result = issue_management.execute(
                 TransferConsultant(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(payload["version"]),
                     new_consultant_id=UUID(str(payload["new_consultant_id"])),
                 ),
@@ -1032,16 +1375,16 @@ def create_app(
             )
         except (CaseDeskError, ValueError, KeyError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return JSONResponse({"case_ref": result.case_ref, "version": result.case_version})
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
 
-    @app.post("/api/events/{case_ref}/transfer-dev-team")
-    async def transfer_dev_team(request: Request, case_ref: str) -> JSONResponse:
+    @app.post("/api/issues/{issue_number}/transfer-dev-team")
+    async def transfer_dev_team(request: Request, issue_number: str) -> JSONResponse:
         actor = actor_or_error(request)
         payload = await _json_object(request)
         try:
-            result = desk.execute(
+            result = issue_management.execute(
                 TransferDevTeam(
-                    case_ref=case_ref,
+                    case_ref=issue_number,
                     expected_version=int(payload["version"]),
                     new_dev_team_id=UUID(str(payload["new_dev_team_id"])),
                 ),
@@ -1049,13 +1392,13 @@ def create_app(
             )
         except (CaseDeskError, ValueError, KeyError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
-        return JSONResponse({"case_ref": result.case_ref, "version": result.case_version})
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
 
-    @app.get("/events/{case_ref}/media/{media_id}", include_in_schema=False)
-    async def event_media(request: Request, case_ref: str, media_id: UUID) -> Response:
+    @app.get("/issues/{issue_number}/media/{media_id}", include_in_schema=False)
+    async def issue_media(request: Request, issue_number: str, media_id: UUID) -> Response:
         actor = actor_or_error(request)
         try:
-            access = desk.get_media_access(case_ref, media_id, actor)
+            access = issue_management.get_media_access(issue_number, media_id, actor)
             content = storage.get(access.object_key)
         except (CaseDeskError, OSError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
@@ -1078,8 +1421,10 @@ def _authorize_initial_setup(
     # to match the identity being promoted keeps the convenient local flow
     # from becoming a production-safe privilege-escalation pattern.
     header_userid = request.headers.get("X-WeCom-UserId", "").strip()
-    if not header_userid or not wecom_userid.strip() or not compare_digest(
-        header_userid, wecom_userid.strip()
+    if (
+        not header_userid
+        or not wecom_userid.strip()
+        or not compare_digest(header_userid, wecom_userid.strip())
     ):
         raise AuthenticationError("开发模式初始化需要匹配的 X-WeCom-UserId 请求头")
 
@@ -1175,7 +1520,7 @@ def _admin_dashboard(
     path_for: Callable[[str], str],
 ) -> str:
     admin_path = path_for("/admin")
-    events_path = path_for("/events")
+    events_path = path_for("/issues")
     visible_users = tuple(user for user in member_options if user.active)
     initialized_label = (
         f"{overview.initialized_dev_team_count}/{overview.dev_team_count} 个研发群已绑定"
@@ -1184,20 +1529,22 @@ def _admin_dashboard(
     )
     search_value = escape(query)
 
-    user_rows = "".join(
-        _admin_user_row(user, path_for=path_for) for user in users
-    ) or '<p class="empty">没有匹配的成员。</p>'
-    team_cards = "".join(
-        _admin_team_card(team, users=visible_users, path_for=path_for) for team in teams
-    ) or '<p class="empty">还没有团队，请先创建咨询团队或研发团队。</p>'
+    user_rows = (
+        "".join(_admin_user_row(user, path_for=path_for) for user in users)
+        or '<p class="empty">没有匹配的成员。</p>'
+    )
+    team_cards = (
+        "".join(_admin_team_card(team, users=visible_users, path_for=path_for) for team in teams)
+        or '<p class="empty">还没有团队，请先创建咨询团队或研发团队。</p>'
+    )
     return f"""
     <header class="topbar admin-topbar">
       <div>
-        <div class="eyebrow">H5 事件管理中心</div>
+        <div class="eyebrow">H5 问题管理中心</div>
         <h1>组织与授权</h1>
         <p class="muted">总管理员：{escape(actor.user_id.hex[:8])} · 管理成员、团队与群聊路由</p>
       </div>
-      <nav><a href="{events_path}">返回事件中心</a><a class="active" href="{admin_path}">管理设置</a></nav>
+      <nav><a href="{events_path}">返回问题中心</a><a class="active" href="{admin_path}">管理设置</a></nav>
     </header>
     <main class="admin-main">
       <section class="hero-banner">
@@ -1217,15 +1564,15 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">企业微信 userid 用于 H5 登录和账号级权限。群聊绑定指令不校验发送人身份；群内正式回复按绑定侧别和事件标记记录。咨询经办显示名在创建事件时单独填写；研发显示名沿用团队负责人展示名。</p>
+          <p class="panel-intro">企业微信 userid 用于 H5 登录和账号级权限。群聊绑定指令不校验发送人身份；群内正式回复按绑定侧别和问题标记记录。咨询经办显示名在创建问题时单独填写；研发显示名沿用团队负责人展示名。</p>
           <form class="search-form" method="get" action="{admin_path}">
             <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>
-            {f'<a class="button-link" href="{admin_path}">清除</a>' if query else ''}
+            {f'<a class="button-link" href="{admin_path}">清除</a>' if query else ""}
           </form>
           <details class="add-box" open>
             <summary>＋ 新增企业成员</summary>
-            <form method="post" action="{path_for('/admin/users')}" class="form-grid">
+            <form method="post" action="{path_for("/admin/users")}" class="form-grid">
               <label>显示名称<input name="display_name" required maxlength="256" placeholder="例如 张三"></label>
               <label>企业微信 userid<input name="wecom_userid" required maxlength="128" placeholder="例如 zhangsan"></label>
               <label class="check-label"><input type="checkbox" name="is_global_admin"> 同时设为总管理员</label>
@@ -1237,10 +1584,10 @@ def _admin_dashboard(
 
         <div class="panel" id="teams">
           <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>团队与授权</h2></div><span class="count-pill">{overview.team_count}</span></div>
-          <p class="panel-intro">咨询团队负责事件归属和咨询侧可见范围，并可绑定咨询群接收通知；研发团队负责事件路由和研发群消息转发，负责人姓名仅作展示，不关联成员账号。</p>
+          <p class="panel-intro">咨询团队负责问题归属和咨询侧可见范围，并可绑定咨询群接收通知；研发团队负责问题路由和研发群消息转发，负责人姓名仅作展示，不关联成员账号。</p>
           <details class="add-box" open>
             <summary>＋ 新增团队</summary>
-            <form method="post" action="{path_for('/admin/teams')}" class="form-grid team-create-form">
+            <form method="post" action="{path_for("/admin/teams")}" class="form-grid team-create-form">
               <label>团队类型<select name="kind" data-team-kind-select="true"><option value="consult_queue">{_team_kind_label(TeamKind.CONSULT_QUEUE)}</option><option value="dev">{_team_kind_label(TeamKind.DEV)}</option></select></label>
               <label>团队名称<input name="name" required maxlength="256" placeholder="例如 平台研发组"></label>
               <label class="team-lead-display-name-field" hidden>研发负责人展示名<input name="lead_display_name" data-team-lead-input="true" maxlength="256" placeholder="仅显示，不关联企业微信成员" disabled></label>
@@ -1254,7 +1601,7 @@ def _admin_dashboard(
 
       <section class="permission-note">
         <strong>授权规则</strong>
-          <span>成员 = 可查看和处理团队事件；团队管理员 = 可在本团队内执行交接、转交和群聊绑定；总管理员 = 可管理全组织并查看全部事件。</span>
+          <span>成员 = 可查看和处理团队问题；团队管理员 = 可在本团队内执行交接、转交和群聊绑定；总管理员 = 可管理全组织并查看全部问题。</span>
       </section>
     </main>
     """
@@ -1285,14 +1632,21 @@ def _team_create_form_script() -> str:
 
 def _admin_user_row(user: ManagedUser, *, path_for: Callable[[str], str]) -> str:
     user_id = escape(str(user.id))
-    memberships = "".join(
-        f'<span class="tag {"tag-muted" if not membership.active else ""}">'
-        f"{escape(_team_kind_label(membership.team_kind))} · {escape(membership.team_name)} · "
-        f"{escape(_role_label(membership.role))}</span>"
-        for membership in user.memberships
-    ) or '<span class="muted">尚未加入团队</span>'
+    memberships = (
+        "".join(
+            f'<span class="tag {"tag-muted" if not membership.active else ""}">'
+            f"{escape(_team_kind_label(membership.team_kind))} · {escape(membership.team_name)} · "
+            f"{escape(_role_label(membership.role))}</span>"
+            for membership in user.memberships
+        )
+        or '<span class="muted">尚未加入团队</span>'
+    )
     global_badge = '<span class="badge badge-amber">总管理员</span>' if user.is_global_admin else ""
-    active_badge = '<span class="badge badge-green">在岗</span>' if user.active else '<span class="badge badge-gray">已停用</span>'
+    active_badge = (
+        '<span class="badge badge-green">在岗</span>'
+        if user.active
+        else '<span class="badge badge-gray">已停用</span>'
+    )
     checked_active = " checked" if user.active else ""
     checked_admin = " checked" if user.is_global_admin else ""
     return f"""
@@ -1300,7 +1654,7 @@ def _admin_user_row(user: ManagedUser, *, path_for: Callable[[str], str]) -> str
       <summary><span class="avatar">{escape(user.display_name[:1])}</span><span class="user-summary"><strong>{escape(user.display_name)}</strong><small>{escape(user.wecom_userid)}</small></span>{active_badge}{global_badge}<span class="chevron">⌄</span></summary>
       <div class="managed-detail">
         <div class="tag-list">{memberships}</div>
-        <form method="post" action="{path_for(f'/admin/users/{user_id}')}" class="edit-form">
+        <form method="post" action="{path_for(f"/admin/users/{user_id}")}" class="edit-form">
           <label>显示名称<input name="display_name" required maxlength="256" value="{escape(user.display_name)}"></label>
           <label class="check-label"><input type="checkbox" name="active"{checked_active}> 在岗，可登录</label>
           <label class="check-label"><input type="checkbox" name="is_global_admin"{checked_admin}> 总管理员</label>
@@ -1319,15 +1673,23 @@ def _admin_team_card(
 ) -> str:
     team_id = escape(str(team.id))
     team_badge = _team_kind_label(team.kind)
-    status = '<span class="badge badge-green">启用</span>' if team.active else '<span class="badge badge-gray">已停用</span>'
+    status = (
+        '<span class="badge badge-green">启用</span>'
+        if team.active
+        else '<span class="badge badge-gray">已停用</span>'
+    )
     checked = " checked" if team.active else ""
-    member_rows = "".join(
-        _admin_team_member_row(team, member, path_for=path_for) for member in team.members
-    ) or '<p class="empty">还没有授权成员。</p>'
-    options = "".join(
-        f'<option value="{escape(str(user.id))}">{escape(user.display_name)}（{escape(user.wecom_userid)}）</option>'
-        for user in users
-    ) or '<option value="">请先添加在岗成员</option>'
+    member_rows = (
+        "".join(_admin_team_member_row(team, member, path_for=path_for) for member in team.members)
+        or '<p class="empty">还没有授权成员。</p>'
+    )
+    options = (
+        "".join(
+            f'<option value="{escape(str(user.id))}">{escape(user.display_name)}（{escape(user.wecom_userid)}）</option>'
+            for user in users
+        )
+        or '<option value="">请先添加在岗成员</option>'
+    )
     lead_editor = (
         f'<label>负责人展示名<input name="lead_display_name" maxlength="256" '
         f'value="{escape(team.lead_display_name or "")}" placeholder="仅显示，不关联成员账号"></label>'
@@ -1345,7 +1707,7 @@ def _admin_team_card(
         )
         channel = f"""
         <div class="channel-box"><div><strong>{chat_label}通道</strong>{channel_status}</div>
-          <form method="post" action="{path_for(f'/admin/teams/{team_id}/channel')}" class="inline-form">
+          <form method="post" action="{path_for(f"/admin/teams/{team_id}/channel")}" class="inline-form">
             <input name="chatid" required maxlength="256" value="{channel_value}" placeholder="粘贴企业微信群 chatid">
             <button type="submit">绑定</button>
           </form>
@@ -1354,7 +1716,7 @@ def _admin_team_card(
     return f"""
     <article class="team-card">
       <div class="team-header"><div><span class="eyebrow">{escape(team_badge)}</span><h3>{escape(team.name)}</h3></div>{status}</div>
-      <form method="post" action="{path_for(f'/admin/teams/{team_id}')}" class="team-edit-form">
+      <form method="post" action="{path_for(f"/admin/teams/{team_id}")}" class="team-edit-form">
         <input name="name" required maxlength="256" value="{escape(team.name)}">
         {lead_editor}
         <label class="check-label"><input type="checkbox" name="active"{checked}> 启用</label>
@@ -1363,7 +1725,7 @@ def _admin_team_card(
       {channel}
       <div class="member-heading"><strong>授权成员</strong><span>{sum(1 for member in team.members if member.active)} 人在岗</span></div>
       <div class="member-list">{member_rows}</div>
-      <form method="post" action="{path_for(f'/admin/teams/{team_id}/members')}" class="add-member-form">
+      <form method="post" action="{path_for(f"/admin/teams/{team_id}/members")}" class="add-member-form">
         <select name="user_id" required>{options}</select>
         <select name="role"><option value="member">成员</option><option value="admin">团队管理员</option></select>
         <button type="submit">授权加入</button>
@@ -1380,17 +1742,21 @@ def _admin_team_member_row(
 ) -> str:
     team_id = escape(str(team.id))
     user_id = escape(str(member.user_id))
-    active = '<span class="status-dot small"></span>' if member.active else '<span class="status-dot small off"></span>'
+    active = (
+        '<span class="status-dot small"></span>'
+        if member.active
+        else '<span class="status-dot small off"></span>'
+    )
     role = _role_label(member.role)
     return f"""
     <div class="member-row"><div>{active}<span><strong>{escape(member.display_name)}</strong><small>{escape(member.wecom_userid)} · {escape(role)}</small></span></div>
       <div class="member-actions">
-        <form method="post" action="{path_for(f'/admin/teams/{team_id}/members')}" class="role-form">
+        <form method="post" action="{path_for(f"/admin/teams/{team_id}/members")}" class="role-form">
           <input type="hidden" name="user_id" value="{user_id}">
-          <select name="role"><option value="member"{' selected' if member.role is MembershipRole.MEMBER else ''}>成员</option><option value="admin"{' selected' if member.role is MembershipRole.ADMIN else ''}>管理员</option></select>
+          <select name="role"><option value="member"{" selected" if member.role is MembershipRole.MEMBER else ""}>成员</option><option value="admin"{" selected" if member.role is MembershipRole.ADMIN else ""}>管理员</option></select>
           <button class="subtle-button" type="submit">保存</button>
         </form>
-        <form method="post" action="{path_for(f'/admin/teams/{team_id}/members/{user_id}/remove')}"><button class="danger-button" type="submit">移除</button></form>
+        <form method="post" action="{path_for(f"/admin/teams/{team_id}/members/{user_id}/remove")}"><button class="danger-button" type="submit">移除</button></form>
       </div>
     </div>
     """
@@ -1674,6 +2040,12 @@ h2 { color: #23344f; }
 .image-upload-control { margin: 12px 0; }
 .image-upload-control > label { margin-bottom: 5px; }
 .image-upload-control input[type="file"] { margin-top: 0; }
+.image-drop-zone { margin-top: 8px; padding: 18px; border: 1px dashed #98a2b3; border-radius: 10px; background: #fbfcff; color: #667085; text-align: center; }
+.image-drop-zone.drag-active { border-color: #155eef; background: #eff4ff; color: #155eef; }
+.intake-source { margin-bottom: 14px; }
+.intake-part { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.intake-image { display: block; max-height: 420px; margin: 10px auto; object-fit: contain; }
+.intake-secondary { margin-top: 16px; }
 .image-upload-hint { margin: 5px 0 0; font-size: 12px; }
 .image-upload-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
 .image-upload-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; font-size: 12px; }
@@ -1773,6 +2145,13 @@ h3{{font-size:17px;margin:3px 0 0}}
 .eyebrow{{font-size:11px;line-height:1.2;letter-spacing:.12em;text-transform:uppercase;color:#667085;font-weight:700}}
 .case-card{{display:block;border:1px solid #dbe3ef;border-radius:10px;padding:14px;margin:10px 0;color:inherit;background:#fff;box-shadow:0 2px 7px #1720330a}}
 .case-card small,.muted{{display:block;color:#667085;margin-top:4px}}
+.issue-fields{{margin:14px 0}}
+.issue-fields h2{{margin-bottom:12px}}
+.issue-fields-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}
+.issue-field{{padding:10px;border-radius:8px;background:#f8fafc;overflow-wrap:anywhere}}
+.issue-field span{{display:block;margin-bottom:4px;color:#667085;font-size:12px}}
+.issue-field strong,.issue-field p{{margin:0;white-space:pre-wrap;line-height:1.55}}
+.issue-field-wide{{grid-column:1 / -1}}
 .entry{{border-left:3px solid #8fb5ff;padding:8px 12px;margin:14px 0;background:#f8fbff}}
 .entry.system{{border-color:#a7b0be;background:#fafafa}}
 .part{{white-space:pre-wrap;margin:6px 0}}
@@ -2065,11 +2444,14 @@ def _debug_input_controls() -> str:
 def _image_upload_controls() -> str:
     return """
     <div class="image-upload-control" data-image-uploader="true" data-max-image-bytes="20971520">
-      <label for="event-images">问题图片（可多选、连续选择或粘贴，单张不超过 20 MiB）</label>
-      <input id="event-images" name="images" type="file" accept="image/*" multiple
-        data-image-input="true" aria-describedby="event-images-hint">
-      <p id="event-images-hint" class="muted image-upload-hint">
-        可一次选择多张，也可反复选择图片或直接在表单中粘贴截图。
+      <label for="issue-images">问题图片（可拖拽、多选或粘贴，单张不超过 20 MiB）</label>
+      <input id="issue-images" name="images" type="file" accept="image/*" multiple
+        data-image-input="true" aria-describedby="issue-images-hint">
+      <div class="image-drop-zone" data-image-drop-zone="true">
+        将图片拖到此处，或用上方按钮选择文件
+      </div>
+      <p id="issue-images-hint" class="muted image-upload-hint">
+        图片会按 [图片] 占位符顺序匹配；未匹配的多余图片会追加到末尾。
       </p>
       <ul class="image-upload-list" data-image-list="true" aria-live="polite"></ul>
       <p class="image-upload-error" data-image-error="true" role="alert" hidden></p>
@@ -2079,6 +2461,7 @@ def _image_upload_controls() -> str:
       const uploader = document.querySelector('[data-image-uploader="true"]');
       if (!uploader) return;
       const input = uploader.querySelector('[data-image-input="true"]');
+      const dropZone = uploader.querySelector('[data-image-drop-zone="true"]');
       const list = uploader.querySelector('[data-image-list="true"]');
       const error = uploader.querySelector('[data-image-error="true"]');
       const form = input && input.form;
@@ -2166,6 +2549,24 @@ def _image_upload_controls() -> str:
         }
       });
 
+      if (dropZone) {
+        ["dragenter", "dragover"].forEach((name) => {
+          dropZone.addEventListener(name, (event) => {
+            event.preventDefault();
+            dropZone.classList.add("drag-active");
+          });
+        });
+        ["dragleave", "drop"].forEach((name) => {
+          dropZone.addEventListener(name, (event) => {
+            event.preventDefault();
+            dropZone.classList.remove("drag-active");
+          });
+        });
+        dropZone.addEventListener("drop", (event) => {
+          addFiles(Array.from(event.dataTransfer?.files || []));
+        });
+      }
+
       form.addEventListener("paste", (event) => {
         const items = Array.from(event.clipboardData?.items || []);
         const pastedFiles = items
@@ -2189,6 +2590,12 @@ def _format_datetime(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=ZoneInfo("UTC"))
     return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+
+
+def _datetime_local_value(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo("UTC"))
+    return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%dT%H:%M")
 
 
 def _parse_local_deadline(value: str | None) -> datetime | None:
@@ -2296,11 +2703,11 @@ def _entry_kind_label(kind: CaseEntryKind) -> str:
         CaseEntryKind.TRANSFER_CONSULTANT: "咨询处理人变更",
         CaseEntryKind.TRANSFER_DEVELOPER: "研发处理人变更",
         CaseEntryKind.TRANSFER_DEV_TEAM: "研发团队变更",
-        CaseEntryKind.CLOSED: "事件关闭",
-        CaseEntryKind.REOPENED: "事件重新打开",
+        CaseEntryKind.CLOSED: "问题关闭",
+        CaseEntryKind.REOPENED: "问题重新打开",
         CaseEntryKind.STATUS_CHANGED: "状态变更",
         CaseEntryKind.CORRECTION: "消息纠错",
-        CaseEntryKind.CASE_METADATA_UPDATED: "事件资料变更",
+        CaseEntryKind.CASE_METADATA_UPDATED: "问题资料变更",
     }[kind]
 
 
@@ -2332,10 +2739,8 @@ def _entry_description(entry: EntryView) -> str:
                 elif key == "approaching_window_minutes":
                     before = _duration_label(int(before))
                     after = _duration_label(int(after))
-                descriptions.append(
-                    f"{labels.get(str(key), str(key))}：{before} → {after}"
-                )
-        return "；".join(descriptions) or "事件资料已更新"
+                descriptions.append(f"{labels.get(str(key), str(key))}：{before} → {after}")
+        return "；".join(descriptions) or "问题资料已更新"
     if entry.kind is CaseEntryKind.TRANSFER_CONSULTANT:
         return (
             f"咨询处理人由 {metadata.get('from_consultant') or '未指定'} "
@@ -2360,17 +2765,17 @@ def _entry_description(entry: EntryView) -> str:
     if entry.kind is CaseEntryKind.REOPENED:
         waiting = metadata.get("waiting_on")
         next_step = "研发" if waiting == WaitingOn.DEV.value else "咨询"
-        return f"事件重新打开并进入“处理中”，下一步由{next_step}处理"
+        return f"问题重新打开并进入“处理中”，下一步由{next_step}处理"
     if entry.kind is CaseEntryKind.STATUS_CHANGED:
         try:
             previous = CaseStatus(str(metadata.get("from_status")))
             updated = CaseStatus(str(metadata.get("to_status")))
         except ValueError:
-            return "事件状态已更新"
-        return f"事件状态由“{_case_status_label(previous)}”变更为“{_case_status_label(updated)}”"
+            return "问题状态已更新"
+        return f"问题状态由“{_case_status_label(previous)}”变更为“{_case_status_label(updated)}”"
     if entry.kind is CaseEntryKind.CORRECTION:
         target = metadata.get("corrected_to_case_ref") or metadata.get("corrected_from_case_ref")
-        return f"消息关联已更正{f'，目标事件 {target}' if target else ''}"
+        return f"消息关联已更正{f'，目标问题 {target}' if target else ''}"
     return ""
 
 
@@ -2396,9 +2801,7 @@ def _render_delivery_badges(deliveries: tuple[Any, ...] | list[Any], entry_side:
             DeliveryStatus.SENT: ("已送达", "delivery-sent"),
             DeliveryStatus.FAILED: ("投递失败", "delivery-failed"),
         }[delivery.status]
-        chips.append(
-            f'<span class="delivery-badge {color}">{target} · {label}</span>'
-        )
+        chips.append(f'<span class="delivery-badge {color}">{target} · {label}</span>')
     return "".join(chips)
 
 
@@ -2412,16 +2815,14 @@ def _render_entry(
     side_label = {
         EntrySide.CONSULT: "咨询侧",
         EntrySide.DEV: "研发侧",
-        EntrySide.SYSTEM: "事件记录",
+        EntrySide.SYSTEM: "问题记录",
     }[entry.side]
     heading = (
         f'<div class="entry-author"><strong>{escape(entry.actor_name_snapshot)}</strong>'
-        f'<span>{side_label} · {_entry_kind_label(entry.kind)}</span></div>'
+        f"<span>{side_label} · {_entry_kind_label(entry.kind)}</span></div>"
     )
     description = _entry_description(entry)
-    detail = (
-        f'<p class="entry-description">{escape(description)}</p>' if description else ""
-    )
+    detail = f'<p class="entry-description">{escape(description)}</p>' if description else ""
     intent_badge = (
         '<span class="entry-intent">仅同步</span>'
         if entry.message_intent is MessageIntent.SYNC
@@ -2445,10 +2846,8 @@ def _render_parts(
             rendered.append(f'<p class="part">{escape(part.text or "")}</p>')
         elif part.media_id is not None and case_ref is not None:
             assert path_for is not None
-            media_path = path_for(f"/events/{escape(case_ref)}/media/{part.media_id}")
-            rendered.append(
-                f'<img alt="事件图片" src="{media_path}">'
-            )
+            media_path = path_for(f"/issues/{escape(case_ref)}/media/{part.media_id}")
+            rendered.append(f'<img alt="问题图片" src="{media_path}">')
         else:
             rendered.append('<p class="part">[图片]</p>')
     return "".join(rendered)
@@ -2457,7 +2856,7 @@ def _render_parts(
 def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_edit_metadata:
         return ""
-    action = path_for(f"/events/{escape(case.case_ref)}/metadata")
+    action = path_for(f"/issues/{escape(case.case_ref)}/metadata")
     priority_options = "".join(
         f'<option value="{level.value}"{" selected" if case.priority is level else ""}>'
         f"{label}</option>"
@@ -2474,15 +2873,15 @@ def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
         <input type="hidden" name="version" value="{case.version}">
         <div class="form-row">
           <label>客户 / 企业名称
-            <input name="customer_name" required maxlength="256" value="{escape(case.customer_name or '')}">
+            <input name="customer_name" required maxlength="256" value="{escape(case.customer_name or "")}">
           </label>
           <label>联系人（选填）
-            <input name="customer_contact_name" maxlength="256" value="{escape(case.customer_contact_name or '')}">
+            <input name="customer_contact_name" maxlength="256" value="{escape(case.customer_contact_name or "")}">
           </label>
         </div>
         <div class="form-row">
           <label>联系方式（选填）
-            <input name="customer_contact_method" maxlength="256" value="{escape(case.customer_contact_method or '')}">
+            <input name="customer_contact_method" maxlength="256" value="{escape(case.customer_contact_method or "")}">
           </label>
           <label>紧急程度 <select name="priority">{priority_options}</select></label>
         </div>
@@ -2495,7 +2894,7 @@ def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
 def _transfer_controls(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_transfer:
         return ""
-    consultant_action = path_for(f"/events/{escape(case.case_ref)}/transfer-consultant")
+    consultant_action = path_for(f"/issues/{escape(case.case_ref)}/transfer-consultant")
     consultant_control = _transfer_person_control(
         case=case,
         action=consultant_action,
@@ -2562,8 +2961,8 @@ def _transfer_person_control(
 def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_extend_deadline or case.lifecycle_status is LifecycleStatus.CLOSED:
         return ""
-    adjust_action = path_for(f"/events/{escape(case.case_ref)}/deadline/adjust")
-    approaching_action = path_for(f"/events/{escape(case.case_ref)}/deadline/approaching-window")
+    adjust_action = path_for(f"/issues/{escape(case.case_ref)}/deadline/adjust")
+    approaching_action = path_for(f"/issues/{escape(case.case_ref)}/deadline/approaching-window")
     approaching_hours = _hours_value(case.approaching_window_minutes)
     return f"""
     <section class="deadline-controls panel" aria-label="期限管理">
@@ -2572,7 +2971,7 @@ def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
       <div class="deadline-control-grid">
         <div class="deadline-control-card">
           <h3>调整当前截止时间</h3>
-          <p>提前或延后本事件的截止时间，不会修改临近期限提醒。</p>
+          <p>提前或延后本问题的截止时间，不会修改临近期限提醒。</p>
           <form method="post" action="{adjust_action}" aria-label="调整截止时间">
             <input type="hidden" name="version" value="{case.version}">
             <label>调整方向
@@ -2608,19 +3007,19 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
     current_status = _case_status_badge(case.status)
     if case.lifecycle_status is LifecycleStatus.CLOSED:
         reopen_note = (
-            "事件已关闭。如需继续处理，请使用下方“重新打开”。"
+            "问题已关闭。如需继续处理，请使用下方“重新打开”。"
             if case.can_change_consult_status
-            else "事件已关闭。如需继续处理，请联系当前咨询处理人或咨询队列管理员。"
+            else "问题已关闭。如需继续处理，请联系当前咨询处理人或咨询队列管理员。"
         )
         return f"""
-        <section class="status-controls panel" aria-label="事件状态操作">
-          <div class="status-controls-heading"><h2>事件状态</h2>{current_status}</div>
+        <section class="status-controls panel" aria-label="问题状态操作">
+          <div class="status-controls-heading"><h2>问题状态</h2>{current_status}</div>
           <p class="status-closed-note">{reopen_note}</p>
         </section>
         """
 
-    status_action = path_for(f"/events/{escape(case.case_ref)}/status")
-    close_action = path_for(f"/events/{escape(case.case_ref)}/close")
+    status_action = path_for(f"/issues/{escape(case.case_ref)}/status")
+    close_action = path_for(f"/issues/{escape(case.case_ref)}/close")
     buttons: list[str] = []
 
     def status_button(status: CaseStatus, label: str, extra_class: str = "") -> str:
@@ -2640,9 +3039,7 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
 
     if case.status is CaseStatus.PENDING_CONFIRMATION:
         if case.can_accept_pending:
-            buttons.append(
-                status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept")
-            )
+            buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
         if case.can_change_consult_status:
             buttons.append(close_button())
         help_text = "待确定是初始状态，仅研发人员可通过“受理”进入处理中。"
@@ -2656,29 +3053,23 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
                 )
             )
             buttons.append(close_button())
-        buttons.append(
-            status_button(CaseStatus.SUSPENDED, "挂起", "status-action-suspend")
-        )
+        buttons.append(status_button(CaseStatus.SUSPENDED, "挂起", "status-action-suspend"))
         help_text = "处理中可由咨询人员设为待客户反馈或关闭；暂时无法推进时可挂起。"
     elif case.status is CaseStatus.WAITING_CUSTOMER:
-        buttons.append(
-            status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept")
-        )
+        buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
         if case.can_change_consult_status:
             buttons.append(close_button())
         help_text = "收到客户反馈后点击“受理”继续处理；关闭仅咨询侧可操作。"
     else:
-        buttons.append(
-            status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept")
-        )
+        buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
         if case.can_change_consult_status:
             buttons.append(close_button())
         help_text = "暂时无法推进时挂起，恢复处理后点击“受理”；关闭仅咨询侧可操作。"
 
     return f"""
-    <section class="status-controls panel" aria-label="事件状态操作">
-      <div class="status-controls-heading"><h2>事件状态</h2>{current_status}</div>
-      <p class="status-controls-help">{help_text}<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在事件时间线。</p>
+    <section class="status-controls panel" aria-label="问题状态操作">
+      <div class="status-controls-heading"><h2>问题状态</h2>{current_status}</div>
+      <p class="status-controls-help">{help_text}<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在问题时间线。</p>
       <div class="status-control-actions">{"".join(buttons)}</div>
     </section>
     """
@@ -2694,11 +3085,11 @@ def _message_form(
 ) -> str:
     if lifecycle is LifecycleStatus.CLOSED:
         return ""
-    message_path = path_for(f"/events/{escape(case_ref)}/messages")
+    message_path = path_for(f"/issues/{escape(case_ref)}/messages")
     side_selector = (
         '<label>发送身份<select name="side">'
         '<option value="consult">咨询</option><option value="dev">研发</option>'
-        '</select></label>'
+        "</select></label>"
         if show_side
         else ""
     )
@@ -2715,12 +3106,9 @@ def _message_form(
 
 
 def _lifecycle_forms(case: Any, path_for: Callable[[str], str]) -> str:
-    if (
-        case.lifecycle_status is LifecycleStatus.OPEN
-        or not case.can_change_consult_status
-    ):
+    if case.lifecycle_status is LifecycleStatus.OPEN or not case.can_change_consult_status:
         return ""
-    reopen_path = path_for(f"/events/{escape(case.case_ref)}/reopen")
+    reopen_path = path_for(f"/issues/{escape(case.case_ref)}/reopen")
     return f"""
     <form method="post" action="{reopen_path}">
       <input type="hidden" name="version" value="{case.version}">
@@ -2735,7 +3123,7 @@ def _lifecycle_forms(case: Any, path_for: Callable[[str], str]) -> str:
 
 def _summary_json(summary: Any) -> dict[str, Any]:
     return {
-        "case_ref": summary.case_ref,
+        "issue_number": summary.issue_number,
         "title": summary.title,
         "customer_name": summary.customer_name,
         "priority": summary.priority.value,
@@ -2755,18 +3143,19 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
     title = escape(summary.title)
     customer_name = escape(summary.customer_name or "未录入")
     updated_at = _format_datetime(summary.updated_at)
-    case_path = path_for(f"/events/{case_ref}")
+    case_path = path_for(f"/issues/{case_ref}")
     accept_form = ""
     if (
         summary.can_accept
         and summary.lifecycle_status is LifecycleStatus.OPEN
-        and summary.status in {
+        and summary.status
+        in {
             CaseStatus.PENDING_CONFIRMATION,
             CaseStatus.WAITING_CUSTOMER,
             CaseStatus.SUSPENDED,
         }
     ):
-        accept_action = path_for(f"/events/{case_ref}/status")
+        accept_action = path_for(f"/issues/{case_ref}/status")
         accept_form = (
             f'<form class="case-card-action" method="post" action="{accept_action}">'
             f'<input type="hidden" name="version" value="{summary.version}">'
@@ -2792,8 +3181,24 @@ def _case_json(case: Any) -> dict[str, Any]:
     for delivery in case.deliveries:
         deliveries_by_entry.setdefault(delivery.entry_id, []).append(delivery)
     return {
-        "case_ref": case.case_ref,
+        "issue_number": case.issue_number,
         "title": case.title,
+        "issue_description": case.issue_description,
+        "initial_acceptance_team_id": (
+            str(case.initial_acceptance_team_id) if case.initial_acceptance_team_id else None
+        ),
+        "initial_acceptance_team_name": case.initial_acceptance_team_name,
+        "suspected_type": case.suspected_type,
+        "current_situation": case.current_situation,
+        "issue_current_status": case.issue_current_status,
+        "bug_number": case.bug_number,
+        "first_recorder_id": str(case.first_recorder_id),
+        "first_recorder_name": case.first_recorder_name,
+        "feedback_event_point": case.feedback_event_point,
+        "issue_source": case.issue_source,
+        "initial_expires_at": (
+            case.initial_expires_at.isoformat() if case.initial_expires_at else None
+        ),
         "customer_name": case.customer_name,
         "customer_contact_name": case.customer_contact_name,
         "customer_contact_method": case.customer_contact_method,

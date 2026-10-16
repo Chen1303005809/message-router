@@ -38,8 +38,15 @@ class Settings:
     # set before the web process starts; the H5 setup page provides a one-time
     # token flow when the identity is not known at deploy time.
     initial_admin_wecom_userid: str | None = None
-    initial_admin_display_name: str = "事件中心总管理员"
+    initial_admin_display_name: str = "问题工作台总管理员"
     admin_bootstrap_token: str | None = None
+    agent_base_url: str | None = None
+    agent_api_key: str | None = None
+    agent_model: str | None = None
+    issue_default_expiry_hours: int = 3
+    issue_approaching_window_hours: int = 24
+    issue_inspection_interval_hours: int = 12
+    issue_inspection_scan_seconds: int = 60
 
     @property
     def web_mount_path(self) -> str:
@@ -47,7 +54,7 @@ class Settings:
 
         The application routes remain rooted internally, while a reverse proxy
         can expose them below this prefix. For example,
-        ``https://events.example.com/kefu`` yields ``/kefu``.
+        ``https://issues.example.com/kefu`` yields ``/kefu``.
         """
         path = urlsplit(self.web_base_url).path.rstrip("/")
         return path if path.startswith("/") else ""
@@ -75,9 +82,7 @@ class Settings:
             wecom_bot_secret=os.getenv("WECOM_BOT_SECRET") or None,
             wecom_long_connection_url=os.getenv("WECOM_LONG_CONNECTION_URL") or None,
             wecom_bot_mention_name=os.getenv("WECOM_BOT_MENTION_NAME") or None,
-            wecom_connect_timeout_seconds=float(
-                os.getenv("WECOM_CONNECT_TIMEOUT_SECONDS", "20")
-            ),
+            wecom_connect_timeout_seconds=float(os.getenv("WECOM_CONNECT_TIMEOUT_SECONDS", "20")),
             wecom_deferred_passive_reply_enabled=os.getenv(
                 "WECOM_DEFERRED_PASSIVE_REPLY_ENABLED", "false"
             ).lower()
@@ -87,7 +92,29 @@ class Settings:
             ),
             initial_admin_wecom_userid=os.getenv("INITIAL_ADMIN_WECOM_USERID") or None,
             initial_admin_display_name=os.getenv(
-                "INITIAL_ADMIN_DISPLAY_NAME", "事件中心总管理员"
+                "INITIAL_ADMIN_DISPLAY_NAME", "问题工作台总管理员"
             ),
             admin_bootstrap_token=os.getenv("ADMIN_BOOTSTRAP_TOKEN") or None,
+            agent_base_url=os.getenv("AGENT_BASE_URL") or None,
+            agent_api_key=os.getenv("AGENT_API_KEY") or None,
+            agent_model=os.getenv("AGENT_MODEL") or None,
+            issue_default_expiry_hours=_positive_int_env("ISSUE_DEFAULT_EXPIRY_HOURS", 3),
+            issue_approaching_window_hours=_positive_int_env("ISSUE_APPROACHING_WINDOW_HOURS", 24),
+            issue_inspection_interval_hours=_positive_int_env(
+                "ISSUE_INSPECTION_INTERVAL_HOURS", 12
+            ),
+            issue_inspection_scan_seconds=_positive_int_env("ISSUE_INSPECTION_SCAN_SECONDS", 60),
         )
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} 必须是正整数") from error
+    if value < 1:
+        raise ValueError(f"{name} 必须是正整数")
+    return value

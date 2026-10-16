@@ -129,7 +129,7 @@ class DatabaseRoutingDirectory:
         """Require the dedicated global-admin flag for organization changes."""
         user = self.get_user(session, user_id)
         if not user.is_global_admin:
-            raise Forbidden("只有事件中心总管理员可以管理组织和授权")
+            raise Forbidden("只有问题中心总管理员可以管理组织和授权")
         return user
 
     def active_dev_teams(self, session: Session) -> list[Team]:
@@ -299,7 +299,7 @@ class DatabaseRoutingDirectory:
             return
         if self.is_member(session, user_id=viewer_id, team_id=case.current_dev_team_id):
             return
-        raise Forbidden("你没有查看此事件的权限")
+        raise Forbidden("你没有查看此问题的权限")
 
     def side_for_actor(
         self, session: Session, viewer_id: UUID, case: Case, requested_side: object | None
@@ -323,12 +323,12 @@ class DatabaseRoutingDirectory:
         }
         if requested_side is not None:
             if requested_side not in allowed:
-                raise Forbidden("你不能以该身份向此事件发送正式消息")
+                raise Forbidden("你不能以该身份向此问题发送正式消息")
             return requested_side
         if len(allowed) == 1:
             return next(iter(allowed))
         if not allowed:
-            raise Forbidden("你没有向此事件发送正式消息的权限")
+            raise Forbidden("你没有向此问题发送正式消息的权限")
         raise Forbidden("你同时属于双方团队，请明确选择发送身份")
 
     def assert_consult_manager(self, session: Session, actor_id: UUID, case: Case) -> None:

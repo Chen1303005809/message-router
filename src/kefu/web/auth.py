@@ -85,7 +85,7 @@ class WeComOAuthClient:
         )
         user_id = user_response.get("userid")
         if not isinstance(user_id, str) or not user_id:
-            raise AuthenticationError("当前企业微信身份不是可访问事件中心的企业成员")
+            raise AuthenticationError("当前企业微信身份不是可访问问题中心的企业成员")
         return user_id
 
     def _get_json(self, endpoint: str, parameters: Mapping[str, str]) -> Mapping[str, object]:
@@ -172,7 +172,7 @@ class WebAuthenticator:
     def complete_login(self, request: Request, *, code: str, state: str) -> RedirectResponse:
         raw_state = request.cookies.get(OAUTH_STATE_COOKIE)
         if raw_state is None:
-            raise AuthenticationError("企业微信登录状态已过期，请重新打开事件中心")
+            raise AuthenticationError("企业微信登录状态已过期，请重新打开问题中心")
         expected_state, separator, encoded_next_path = raw_state.partition("|")
         if not separator or not hmac.compare_digest(expected_state, state):
             raise AuthenticationError("企业微信登录状态校验失败")

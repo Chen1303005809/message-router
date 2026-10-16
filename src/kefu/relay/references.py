@@ -9,7 +9,7 @@ from kefu.case_desk.markers import parse_case_refs
 def parse_quoted_case_ref(quote_content: str) -> str:
     refs = parse_case_refs(quote_content)
     if not refs:
-        raise ValidationError("引用内容中没有有效事件标记，请引用机器人发送的文字片段")
+        raise ValidationError("引用内容中没有有效问题标记，请引用机器人发送的文字片段")
     if len(refs) != 1:
-        raise ValidationError("引用内容包含多个事件标记，无法唯一归类")
+        raise ValidationError("引用内容包含多个问题标记，无法唯一归类")
     return next(iter(refs))

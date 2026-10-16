@@ -73,6 +73,7 @@ from kefu.persistence.models import (
     DeliveryItemStatus,
     DeliveryStatus,
     EntrySide,
+    IssueIntakeDraft,
     LifecycleStatus,
     MessageIntent,
     PartKind,
@@ -168,9 +169,7 @@ class CaseDesk:
         if not self._web_base_url:
             raise ValueError("web_base_url 不能为空")
 
-    def execute(
-        self, command: Command, actor: Actor | GroupActor | SystemActor
-    ) -> CommandResult:
+    def execute(self, command: Command, actor: Actor | GroupActor | SystemActor) -> CommandResult:
         """Apply a closed command set atomically and return its stable result."""
         with self._session_factory() as session, session.begin():
             if isinstance(command, (DeliveryItemSucceeded, DeliveryItemFailed)):
@@ -206,7 +205,7 @@ class CaseDesk:
                 return self._reopen_case(session, command, actor)
             if isinstance(command, CorrectEntry):
                 return self._correct_entry(session, command, actor)
-            raise ValidationError(f"不支持的事件命令：{type(command).__name__}")
+            raise ValidationError(f"不支持的问题命令：{type(command).__name__}")
 
     def get_case(self, case_ref: str, viewer: Actor) -> CaseView:
         """Return a fully authorized, ordered event timeline."""
@@ -261,9 +260,7 @@ class CaseDesk:
         offset = max(0, case_filter.offset)
         now = utc_now()
         with self._session_factory() as session:
-            visibility_filter, team_ids = self._case_visibility_filter(
-                session, viewer, now
-            )
+            visibility_filter, team_ids = self._case_visibility_filter(session, viewer, now)
             statement = select(Case)
             if visibility_filter is not None:
                 statement = statement.where(visibility_filter)
@@ -302,10 +299,7 @@ class CaseDesk:
                 now=now,
             )
             return Page(
-                items=tuple(
-                    self._case_summary(case, developer_team_ids)
-                    for case in visible_cases
-                ),
+                items=tuple(self._case_summary(case, developer_team_ids) for case in visible_cases),
                 offset=offset,
                 next_offset=offset + page_size if has_more else None,
             )
@@ -415,7 +409,7 @@ class CaseDesk:
                 .where(CaseEntry.case_id == case.id, StoredMedia.id == media_id)
             )
             if media is None:
-                raise NotFound("该图片不属于此事件")
+                raise NotFound("该图片不属于此问题")
             return MediaAccess(id=media.id, object_key=media.object_key, mime_type=media.mime_type)
 
     def claim_pending_deliveries(
@@ -522,9 +516,7 @@ class CaseDesk:
         restored = 0
         with self._session_factory() as session, session.begin():
             rows = session.scalars(
-                select(Delivery)
-                .where(Delivery.id.in_(normalized_ids))
-                .with_for_update()
+                select(Delivery).where(Delivery.id.in_(normalized_ids)).with_for_update()
             ).all()
             for delivery in rows:
                 items = session.scalars(
@@ -557,9 +549,7 @@ class CaseDesk:
         restored = 0
         with self._session_factory() as session, session.begin():
             deliveries = session.scalars(
-                select(Delivery)
-                .where(Delivery.status == DeliveryStatus.SENT)
-                .with_for_update()
+                select(Delivery).where(Delivery.status == DeliveryStatus.SENT).with_for_update()
             ).all()
             for delivery in deliveries:
                 items = session.scalars(
@@ -594,14 +584,15 @@ class CaseDesk:
                 self._directory.assert_case_visible(session, actor.user_id, existing_case)
                 return self._result(existing_case, existing.id, idempotent=True)
         self._assert_media_exists(session, parts)
-        dev_team = self._directory.get_team(
-            session, command.dev_team_id, kind=TeamKind.DEV
-        )
+        initial_acceptance_team_id = command.initial_acceptance_team_id or command.dev_team_id
+        dev_team = self._directory.get_team(session, initial_acceptance_team_id, kind=TeamKind.DEV)
         channel = self._directory.active_channel(session, dev_team.id)
         self._directory.active_consult_channel(session, command.consult_queue_id)
         title = self._validated_title(command.title, parts)
         customer_name = self._validated_customer_name(command.customer_name)
-        consult_handler_name = self._validated_handler_name(command.consult_handler_name)
+        consult_handler_name = self._validated_handler_name(
+            command.consult_handler_name or actor_user.display_name
+        )
         related_case_id = self._validated_related_case(session, command.related_case_id)
         created_at = utc_now()
         deadline = created_at + timedelta(hours=DEFAULT_CASE_DEADLINE_HOURS)
@@ -611,16 +602,57 @@ class CaseDesk:
             deadline = command.deadline.astimezone(UTC)
             if deadline <= created_at:
                 raise ValidationError("截止时间必须晚于当前时间")
+        issue_number = (
+            normalize_case_ref(command.issue_number)
+            if command.issue_number
+            else self._new_unique_case_ref(session)
+        )
+        if session.scalar(select(Case.id).where(Case.case_ref == issue_number)) is not None:
+            raise Conflict("问题编号已经被使用，请重新生成草稿")
+        reservation = session.scalar(
+            select(IssueIntakeDraft).where(IssueIntakeDraft.issue_number == issue_number)
+        )
+        if reservation is not None and source_msgid != f"issue-intake:{reservation.id}":
+            raise Conflict("问题编号已预留给另一个上传草稿")
+        issue_status = (command.issue_current_status or "问题未回复").strip()
+        if not issue_status or len(issue_status) > 128:
+            raise ValidationError("问题状态不能为空且不能超过128个字符")
+        issue_description = _clean_optional_text(command.issue_description)
+        if issue_description and len(issue_description) > 20_000:
+            raise ValidationError("问题描述不能超过20000个字符")
+        current_situation = _clean_optional_text(command.issue_current_situation)
+        if current_situation and len(current_situation) > 20_000:
+            raise ValidationError("现状说明不能超过20000个字符")
+        suspected_type = _clean_optional_text(command.suspected_type)
+        if suspected_type and len(suspected_type) > 128:
+            raise ValidationError("怀疑类型不能超过128个字符")
+        issue_source = _clean_optional_text(command.issue_source)
+        if issue_source and len(issue_source) > 256:
+            raise ValidationError("问题来源不能超过256个字符")
+        bug_number = _clean_optional_text(command.bug_number)
+        if (suspected_type or "").casefold() == "bug":
+            bug_number = bug_number or f"BUG-{issue_number}"
+        else:
+            bug_number = None
+        if bug_number and len(bug_number) > 64:
+            raise ValidationError("Bug编号不能超过64个字符")
+        approaching_window_minutes = (
+            command.approaching_window_minutes
+            if command.approaching_window_minutes is not None
+            else DEFAULT_APPROACHING_WINDOW_MINUTES
+        )
+        if approaching_window_minutes < MIN_DEADLINE_INCREMENT_MINUTES:
+            raise ValidationError("临期窗口不能小于30分钟")
         case = Case(
             id=uuid4(),
-            case_ref=self._new_unique_case_ref(session),
+            case_ref=issue_number,
             title=title,
             customer_name=customer_name,
             customer_contact_name=_clean_optional_text(command.customer_contact_name),
             customer_contact_method=_clean_optional_text(command.customer_contact_method),
             priority=command.priority,
             deadline=deadline,
-            approaching_window_minutes=DEFAULT_APPROACHING_WINDOW_MINUTES,
+            approaching_window_minutes=approaching_window_minutes,
             lifecycle_status=LifecycleStatus.OPEN,
             status=CaseStatus.PENDING_CONFIRMATION,
             # A handoff cannot move the wait state before its delivery bundle
@@ -630,7 +662,17 @@ class CaseDesk:
             current_consultant_id=actor.user_id,
             consult_handler_name=consult_handler_name,
             current_dev_team_id=channel.team_id,
+            initial_acceptance_team_id=dev_team.id,
             creator_id=actor.user_id,
+            issue_description=issue_description,
+            suspected_type=suspected_type,
+            issue_current_situation=current_situation,
+            issue_current_status=issue_status,
+            bug_number=bug_number,
+            feedback_event_point=_clean_optional_text(command.feedback_event_point),
+            issue_source=issue_source,
+            issue_metadata_json=dict(command.issue_metadata),
+            initial_expires_at=deadline,
             related_case_id=related_case_id,
             version=1,
             last_entry_sequence=0,
@@ -715,17 +757,13 @@ class CaseDesk:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
         if case.lifecycle_status is not LifecycleStatus.OPEN:
-            raise ValidationError("已关闭事件不能调整期限")
+            raise ValidationError("已关闭问题不能调整期限")
         self._assert_consult_deadline_access(session, actor.user_id, case)
         if isinstance(command, AdjustCaseDeadline):
-            adjustment_minutes = _validated_deadline_adjustment_minutes(
-                command.adjustment_minutes
-            )
+            adjustment_minutes = _validated_deadline_adjustment_minutes(command.adjustment_minutes)
             action = "adjust_deadline"
         else:
-            adjustment_minutes = _validated_deadline_minutes(
-                command.extension_minutes, "延长期限"
-            )
+            adjustment_minutes = _validated_deadline_minutes(command.extension_minutes, "延长期限")
             action = "extend_deadline"
         actor_user = self._directory.get_user(session, actor.user_id)
 
@@ -760,7 +798,7 @@ class CaseDesk:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
         if case.lifecycle_status is not LifecycleStatus.OPEN:
-            raise ValidationError("已关闭事件不能调整期限")
+            raise ValidationError("已关闭问题不能调整期限")
         self._assert_consult_deadline_access(session, actor.user_id, case)
         approaching_minutes = _validated_deadline_minutes(
             command.approaching_window_minutes, "临近期限提醒时间"
@@ -801,9 +839,7 @@ class CaseDesk:
         if isinstance(actor, GroupActor):
             if command.side is not actor.side or not command.origin_chatid:
                 raise Forbidden("群聊身份与消息侧别不匹配")
-            origin_kind = self._directory.team_kind_for_chatid(
-                session, command.origin_chatid
-            )
+            origin_kind = self._directory.team_kind_for_chatid(session, command.origin_chatid)
             if actor.side is EntrySide.CONSULT:
                 expected_kind = TeamKind.CONSULT_QUEUE
             elif actor.side is EntrySide.DEV:
@@ -811,7 +847,7 @@ class CaseDesk:
             else:
                 expected_kind = None
             if expected_kind is None or origin_kind is not expected_kind:
-                raise Forbidden("当前群聊未绑定到对应的事件沟通侧")
+                raise Forbidden("当前群聊未绑定到对应的问题沟通侧")
             actor_user = None
             side = actor.side
             if side is EntrySide.CONSULT:
@@ -830,7 +866,7 @@ class CaseDesk:
         existing = self._existing_source_entry(session, command.source_msgid)
         if existing is not None:
             if existing.case_id != case.id:
-                raise Conflict("该企业微信消息已归入另一个事件")
+                raise Conflict("该企业微信消息已归入另一个问题")
             return self._result(case, existing.id, idempotent=True)
         self._assert_expected_version(case, command.expected_version)
         self._assert_open(case)
@@ -848,6 +884,8 @@ class CaseDesk:
             metadata={"action": "post_formal_message"},
         )
         self._add_parts(session, entry, parts)
+        if side is EntrySide.DEV and case.issue_current_status == "问题未回复":
+            case.issue_current_status = "问题已回复"
         destination_type, destination_address = self._destination_for_side(session, case, side)
         wait_after = (
             self._opposite_waiting_side(side) if command.intent is MessageIntent.HANDOFF else None
@@ -903,9 +941,7 @@ class CaseDesk:
                 "to_consultant": new_consultant.display_name,
             },
         )
-        consult_channel = self._directory.active_consult_channel(
-            session, case.consult_queue_id
-        )
+        consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
         delivery_id = self._create_notice_delivery(
             session,
             entry=entry,
@@ -955,7 +991,7 @@ class CaseDesk:
             case=case,
             destination_type=DeliveryDestination.CHAT,
             destination_address=old_channel.chatid,
-            content="本事件已转出至另一研发责任团队，后续更新不再发送到本群。",
+            content="本问题已转出至另一研发责任团队，后续更新不再发送到本群。",
         )
         new_delivery = self._create_notice_delivery(
             session,
@@ -963,7 +999,7 @@ class CaseDesk:
             case=case,
             destination_type=DeliveryDestination.CHAT,
             destination_address=new_channel.chatid,
-            content="本事件已转入本团队，请在事件中心查看完整时间线。",
+            content="本问题已转入本团队，请在问题中心查看完整时间线。",
         )
         return self._result(case, entry.id, delivery_ids=(old_delivery, new_delivery))
 
@@ -992,7 +1028,7 @@ class CaseDesk:
             case=case,
             destination_type=DeliveryDestination.CHAT,
             destination_address=channel.chatid,
-            content="咨询侧已确认完成闭环，本事件现已关闭。",
+            content="咨询侧已确认完成闭环，本问题现已关闭。",
         )
         return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
@@ -1004,7 +1040,7 @@ class CaseDesk:
         self._directory.assert_case_visible(session, actor.user_id, case)
         self._assert_open(case)
         if command.status is CaseStatus.CLOSED:
-            raise ValidationError("请通过‘确认客户侧闭环并关闭’操作关闭事件")
+            raise ValidationError("请通过‘确认客户侧闭环并关闭’操作关闭问题")
         if command.status is CaseStatus.PENDING_CONFIRMATION:
             raise ValidationError("待确定是初始状态，不能通过操作切回")
         if command.status is CaseStatus.WAITING_CUSTOMER:
@@ -1019,19 +1055,16 @@ class CaseDesk:
                 CaseStatus.SUSPENDED,
             ):
                 raise ValidationError("只有待确定、待客户反馈或挂起状态可以受理")
-            if (
-                case.status is CaseStatus.PENDING_CONFIRMATION
-                and not self._directory.is_member(
-                    session, user_id=actor.user_id, team_id=case.current_dev_team_id
-                )
+            if case.status is CaseStatus.PENDING_CONFIRMATION and not self._directory.is_member(
+                session, user_id=actor.user_id, team_id=case.current_dev_team_id
             ):
                 raise Forbidden("待确定状态只能由研发团队成员受理")
         elif command.status is CaseStatus.WAITING_CUSTOMER:
             if case.status is not CaseStatus.IN_PROGRESS:
-                raise ValidationError("只有处理中事件可以设为待客户反馈")
+                raise ValidationError("只有处理中问题可以设为待客户反馈")
         elif command.status is CaseStatus.SUSPENDED:
             if case.status is not CaseStatus.IN_PROGRESS:
-                raise ValidationError("只有处理中事件可以挂起")
+                raise ValidationError("只有处理中问题可以挂起")
 
         actor_user = self._directory.get_user(session, actor.user_id)
         previous_status = case.status
@@ -1055,9 +1088,9 @@ class CaseDesk:
         self._assert_expected_version(case, command.expected_version)
         self._directory.assert_consult_manager(session, actor.user_id, case)
         if case.lifecycle_status is not LifecycleStatus.CLOSED:
-            raise ValidationError("只有已关闭事件可以重新打开")
+            raise ValidationError("只有已关闭问题可以重新打开")
         if command.waiting_on is WaitingOn.NONE:
-            raise ValidationError("重新打开事件时必须明确下一步责任方")
+            raise ValidationError("重新打开问题时必须明确下一步责任方")
         actor_user = self._directory.get_user(session, actor.user_id)
         channel: TeamChannel | None = None
         if command.waiting_on is WaitingOn.DEV:
@@ -1082,7 +1115,7 @@ class CaseDesk:
                 case=case,
                 destination_type=DeliveryDestination.CHAT,
                 destination_address=channel.chatid,
-                content="咨询侧已重新打开本事件，请研发继续处理。",
+                content="咨询侧已重新打开本问题，请研发继续处理。",
             )
             delivery_ids = (delivery_id,)
         return self._result(case, entry.id, delivery_ids=delivery_ids)
@@ -1091,7 +1124,7 @@ class CaseDesk:
         self, session: Session, command: CorrectEntry, actor: Actor
     ) -> CommandResult:
         if normalize_case_ref(command.case_ref) == normalize_case_ref(command.target_case_ref):
-            raise ValidationError("纠错目标必须是另一个事件")
+            raise ValidationError("纠错目标必须是另一个问题")
         cases = self._load_cases_for_update(session, command.case_ref, command.target_case_ref)
         source = cases[normalize_case_ref(command.case_ref)]
         target = cases[normalize_case_ref(command.target_case_ref)]
@@ -1149,7 +1182,7 @@ class CaseDesk:
             case=source,
             destination_type=source_destination_type,
             destination_address=source_destination_address,
-            content="上一条正式消息已被标记为误发；请以事件中心中的纠错记录为准。",
+            content="上一条正式消息已被标记为误发；请以问题中心中的纠错记录为准。",
         )
         target_destination_type, target_destination_address = self._destination_for_side(
             session, target, original.side
@@ -1264,9 +1297,9 @@ class CaseDesk:
             first_text = next((part.text for part in parts if isinstance(part, TextPart)), "")
             normalized = first_text[:120]
         if not normalized:
-            raise ValidationError("事件标题不能为空")
+            raise ValidationError("问题标题不能为空")
         if len(normalized) > 512:
-            raise ValidationError("事件标题不能超过 512 个字符")
+            raise ValidationError("问题标题不能超过 512 个字符")
         return normalized
 
     def _validated_customer_name(self, name: str | None) -> str:
@@ -1288,7 +1321,7 @@ class CaseDesk:
         if related_case_id is None:
             return None
         if session.get(Case, related_case_id) is None:
-            raise NotFound("关联事件不存在")
+            raise NotFound("关联问题不存在")
         return related_case_id
 
     def _append_entry(
@@ -1306,7 +1339,7 @@ class CaseDesk:
         metadata: Mapping[str, object] | None = None,
     ) -> CaseEntry:
         if actor_user is None and not actor_name:
-            raise ValidationError("事件记录缺少操作人名称")
+            raise ValidationError("问题记录缺少操作人名称")
         case.last_entry_sequence += 1
         entry = CaseEntry(
             id=uuid4(),
@@ -1369,11 +1402,7 @@ class CaseDesk:
                 case_ref=case.case_ref,
                 case_title=case.title,
                 speaker_name=_original_speaker_name(entry),
-                assignee_name=(
-                    case.consult_handler_name
-                    if entry.side is EntrySide.DEV
-                    else None
-                ),
+                assignee_name=(case.consult_handler_name if entry.side is EntrySide.DEV else None),
                 dev_team_name=dev_team_name,
                 parts=entry_parts,
                 side=entry.side,
@@ -1486,7 +1515,7 @@ class CaseDesk:
             statement = statement.with_for_update()
         case = session.scalar(statement)
         if case is None:
-            raise NotFound("事件不存在")
+            raise NotFound("问题不存在")
         return case
 
     def _load_cases_for_update(self, session: Session, *case_refs: str) -> dict[str, Case]:
@@ -1499,13 +1528,13 @@ class CaseDesk:
         ).all()
         by_ref = {case.case_ref: case for case in cases}
         if set(by_ref) != set(normalized_refs):
-            raise NotFound("一个或多个事件不存在")
+            raise NotFound("一个或多个问题不存在")
         return by_ref
 
     def _case_by_id(self, session: Session, case_id: UUID) -> Case:
         case = session.get(Case, case_id)
         if case is None:
-            raise NotFound("事件不存在")
+            raise NotFound("问题不存在")
         return case
 
     def _existing_source_entry(
@@ -1519,17 +1548,25 @@ class CaseDesk:
     def _new_unique_case_ref(self, session: Session) -> str:
         for _ in range(16):
             candidate = new_case_ref()
-            if session.scalar(select(Case.id).where(Case.case_ref == candidate)) is None:
+            if (
+                session.scalar(select(Case.id).where(Case.case_ref == candidate)) is None
+                and session.scalar(
+                    select(IssueIntakeDraft.id).where(
+                        IssueIntakeDraft.issue_number == candidate
+                    )
+                )
+                is None
+            ):
                 return candidate
-        raise Conflict("无法生成未冲突的事件引用标记")
+        raise Conflict("无法生成未冲突的问题引用标记")
 
     def _assert_expected_version(self, case: Case, expected_version: int | None) -> None:
         if expected_version is None:
             return
         if expected_version < 1:
-            raise ValidationError("事件版本号无效")
+            raise ValidationError("问题版本号无效")
         if case.version != expected_version:
-            raise Conflict("事件已被其他人更新，请刷新后重新确认")
+            raise Conflict("问题已被其他人更新，请刷新后重新确认")
 
     def _has_consult_deadline_access(self, session: Session, actor_id: UUID, case: Case) -> bool:
         return self._directory.is_global_admin(session, actor_id) or self._directory.is_member(
@@ -1538,11 +1575,11 @@ class CaseDesk:
 
     def _assert_consult_deadline_access(self, session: Session, actor_id: UUID, case: Case) -> None:
         if not self._has_consult_deadline_access(session, actor_id, case):
-            raise Forbidden("只有咨询队列成员可以调整事件期限")
+            raise Forbidden("只有咨询队列成员可以调整问题期限")
 
     def _assert_open(self, case: Case) -> None:
         if case.lifecycle_status is not LifecycleStatus.OPEN:
-            raise ValidationError("已关闭事件不能继续发送正式消息")
+            raise ValidationError("已关闭问题不能继续发送正式消息")
 
     def _clean_source_msgid(self, source_msgid: str | None) -> str | None:
         if source_msgid is None:
@@ -1652,9 +1689,7 @@ class CaseDesk:
             for item in items
         )
 
-    def _restore_deferred_delivery(
-        self, delivery: Delivery, items: Sequence[DeliveryItem]
-    ) -> None:
+    def _restore_deferred_delivery(self, delivery: Delivery, items: Sequence[DeliveryItem]) -> None:
         delivery.status = DeliveryStatus.PENDING
         delivery.next_attempt_at = utc_now()
         delivery.last_error = None
@@ -1712,6 +1747,11 @@ class CaseDesk:
             .order_by(Delivery.created_at.asc())
         ).all()
         dev_team = session.get(Team, case.current_dev_team_id)
+        initial_team = (
+            session.get(Team, case.initial_acceptance_team_id)
+            if case.initial_acceptance_team_id is not None
+            else None
+        )
         now = utc_now()
         return CaseView(
             id=case.id,
@@ -1737,6 +1777,21 @@ class CaseDesk:
             current_dev_team_id=case.current_dev_team_id,
             current_dev_team_name=dev_team.name if dev_team else "未知团队",
             current_dev_team_lead_display_name=dev_team.lead_display_name if dev_team else None,
+            initial_acceptance_team_id=case.initial_acceptance_team_id,
+            initial_acceptance_team_name=initial_team.name if initial_team else None,
+            issue_description=case.issue_description,
+            suspected_type=case.suspected_type,
+            current_situation=case.issue_current_situation,
+            issue_current_status=case.issue_current_status,
+            bug_number=case.bug_number,
+            first_recorder_id=case.creator_id,
+            first_recorder_name=self._user_name(session, case.creator_id)
+            or case.consult_handler_name,
+            feedback_event_point=case.feedback_event_point,
+            issue_source=case.issue_source,
+            initial_expires_at=(
+                _as_utc(case.initial_expires_at) if case.initial_expires_at else None
+            ),
             created_at=_as_utc(case.created_at),
             updated_at=_as_utc(case.updated_at),
             version=case.version,

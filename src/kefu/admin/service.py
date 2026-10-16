@@ -497,7 +497,7 @@ def initialize_global_admin(
     session_factory: Callable[[], Session],
     *,
     wecom_userid: str,
-    display_name: str = "事件中心总管理员",
+    display_name: str = "问题中心总管理员",
 ) -> ManagedUser:
     """Create or promote the one-time first global administrator identity.
 

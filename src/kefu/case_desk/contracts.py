@@ -70,7 +70,7 @@ class CreateCase:
     title: str
     consult_queue_id: UUID
     dev_team_id: UUID
-    consult_handler_name: str
+    consult_handler_name: str | None = None
     customer_name: str | None = None
     customer_contact_name: str | None = None
     customer_contact_method: str | None = None
@@ -79,6 +79,17 @@ class CreateCase:
     source_msgid: str | None = None
     related_case_id: UUID | None = None
     deadline: datetime | None = None
+    initial_acceptance_team_id: UUID | None = None
+    issue_description: str | None = None
+    suspected_type: str | None = None
+    issue_current_situation: str | None = None
+    issue_current_status: str = "问题未回复"
+    bug_number: str | None = None
+    feedback_event_point: str | None = None
+    issue_source: str | None = None
+    issue_metadata: Mapping[str, Any] = field(default_factory=dict)
+    approaching_window_minutes: int | None = None
+    issue_number: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +280,18 @@ class CaseView:
     current_dev_team_id: UUID
     current_dev_team_name: str
     current_dev_team_lead_display_name: str | None
+    initial_acceptance_team_id: UUID | None
+    initial_acceptance_team_name: str | None
+    issue_description: str | None
+    suspected_type: str | None
+    current_situation: str | None
+    issue_current_status: str
+    bug_number: str | None
+    first_recorder_id: UUID
+    first_recorder_name: str
+    feedback_event_point: str | None
+    issue_source: str | None
+    initial_expires_at: datetime | None
     created_at: datetime
     updated_at: datetime
     version: int
@@ -280,6 +303,10 @@ class CaseView:
     transferable_consultants: tuple[UserOption, ...]
     entries: tuple[EntryView, ...]
     deliveries: tuple[DeliveryView, ...]
+
+    @property
+    def issue_number(self) -> str:
+        return self.case_ref
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +325,10 @@ class CaseSummary:
     updated_at: datetime
     version: int
     can_accept: bool = False
+
+    @property
+    def issue_number(self) -> str:
+        return self.case_ref
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +355,12 @@ class Page:
     items: tuple[CaseSummary, ...]
     offset: int
     next_offset: int | None
+
+
+IssueView = CaseView
+IssueSummary = CaseSummary
+IssueOverview = CaseOverview
+IssueCommandResult = CommandResult
 
 
 @dataclass(frozen=True, slots=True)

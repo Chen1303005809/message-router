@@ -13,11 +13,15 @@ from kefu.case_desk.errors import CaseDeskError
 from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
+from kefu.inspection.service import IssueInspectionService
 from kefu.media.storage import (
     MediaIngestor,
     ObjectStorage,
     object_storage_from_settings,
 )
+from kefu.messages.push import MessagePush, MessagePushWorker
+from kefu.messages.receiver import MessageReceiver
+from kefu.messages.recipients import RecipientResolver
 from kefu.observability import database_target_fingerprint, opaque_id_fingerprint
 from kefu.persistence.database import create_engine_from_url, create_session_factory
 from kefu.persistence.models import EntrySide
@@ -80,10 +84,40 @@ async def _delivery_loop(worker: DeliveryWorker) -> None:
         await asyncio.sleep(1)
 
 
+async def _message_delivery_loop(worker: MessagePushWorker) -> None:
+    while True:
+        sent = await worker.deliver_pending()
+        if sent:
+            logger.info("processed standalone messages sent=%s", sent)
+        await asyncio.sleep(1)
+
+
+async def _inspection_loop(inspection: IssueInspectionService, settings: Settings) -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(inspection.inspect)
+            if (
+                result.periodic_reminders
+                or result.approaching_reminders
+                or result.unresolved_targets
+            ):
+                logger.info(
+                    "issue_inspection scanned=%s periodic=%s approaching=%s unresolved=%s",
+                    result.scanned_issues,
+                    result.periodic_reminders,
+                    result.approaching_reminders,
+                    result.unresolved_targets,
+                )
+        except Exception:
+            logger.exception("issue_inspection_failed")
+        await asyncio.sleep(settings.issue_inspection_scan_seconds)
+
+
 async def _inbound_loop(
     *,
     relay: Relay,
     transport: WeComTransport,
+    receiver: MessageReceiver | None = None,
     deferred_replies: DeferredPassiveReplyStore | None = None,
 ) -> None:
     async for event in transport.events():
@@ -140,7 +174,7 @@ async def _inbound_loop(
             # Database and object-store adapters are synchronous; do not stall
             # heartbeats while they write a formal entry.
             decision = await asyncio.to_thread(
-                relay.handle,
+                receiver.receive_wecom if receiver is not None else relay.handle,
                 event,
                 suppress_delivery=suppress_delivery,
                 origin_side=origin_side,
@@ -318,9 +352,7 @@ async def _release_deferred_callback(
         or origin_side is None
     ):
         return
-    pending_origin_side = (
-        EntrySide.DEV if origin_side is EntrySide.CONSULT else EntrySide.CONSULT
-    )
+    pending_origin_side = EntrySide.DEV if origin_side is EntrySide.CONSULT else EntrySide.CONSULT
     pending = await asyncio.to_thread(
         deferred_replies.take,
         decision.case_ref,
@@ -358,9 +390,7 @@ async def _release_deferred_callback(
     else:
         if deferred_delivery_ids:
             try:
-                await asyncio.to_thread(
-                    relay.complete_deferred_deliveries, deferred_delivery_ids
-                )
+                await asyncio.to_thread(relay.complete_deferred_deliveries, deferred_delivery_ids)
             except Exception:
                 # The passive reply has already reached WeCom. Keep the
                 # placeholder marked as sent rather than generating a second
@@ -385,9 +415,7 @@ def _deferred_delivery_ids(
     return delivery_ids if suppress_delivery else ()
 
 
-async def _restore_deferred_deliveries(
-    relay: Relay, delivery_ids: tuple[UUID, ...]
-) -> None:
+async def _restore_deferred_deliveries(relay: Relay, delivery_ids: tuple[UUID, ...]) -> None:
     try:
         await asyncio.to_thread(relay.restore_deferred_deliveries, delivery_ids)
     except Exception:
@@ -432,18 +460,24 @@ async def run() -> None:
         desk,
         media_ingestor=MediaIngestor(session_factory, storage),
     )
+    message_push = MessagePush(session_factory)
+    message_receiver = MessageReceiver(relay, message_push)
+    recipients = RecipientResolver(session_factory)
+    inspection = IssueInspectionService(
+        session_factory,
+        message_receiver,
+        recipients,
+        settings,
+    )
     transport = _transport_from_settings(settings, session_factory, storage)
     worker = DeliveryWorker(desk, transport)
+    message_worker = MessagePushWorker(session_factory, transport)
     deferred_store = DeferredPassiveReplyStore(
         session_factory,
         settings.wecom_deferred_passive_reply_ttl_seconds,
     )
     deferred_store.purge_expired()
-    deferred_replies = (
-        deferred_store
-        if settings.wecom_deferred_passive_reply_enabled
-        else None
-    )
+    deferred_replies = deferred_store if settings.wecom_deferred_passive_reply_enabled else None
     logger.info(
         "[GROUP-TRACE] bot_worker_starting transport=%s database_target_fp=%s",
         settings.wecom_transport,
@@ -462,10 +496,13 @@ async def run() -> None:
         try:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(_delivery_loop(worker))
+                tasks.create_task(_message_delivery_loop(message_worker))
+                tasks.create_task(_inspection_loop(inspection, settings))
                 tasks.create_task(
                     _inbound_loop(
                         relay=relay,
                         transport=transport,
+                        receiver=message_receiver,
                         deferred_replies=deferred_replies,
                     )
                 )

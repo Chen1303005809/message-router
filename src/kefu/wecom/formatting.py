@@ -61,7 +61,7 @@ def build_formal_bundle(
         f"## {case_title}\n\n"
         f"{routing_details}"
         f"**{message_text}**\n\n\n"
-        f"> {speaker_label}：{speaker_name}  事件编号：{marker}"
+        f"> {speaker_label}：{speaker_name}  问题编号：{marker}"
     )
     rendered: list[RenderedDeliveryItem] = [
         RenderedDeliveryItem(
@@ -102,7 +102,7 @@ def build_notice_bundle(
             kind=PartKind.TEXT,
             payload={
                 "content": (
-                    f"事件标题：{case_title}\n操作人：{operator_name}\n\n"
+                    f"问题标题：{case_title}\n操作人：{operator_name}\n\n"
                     f"{content}\n\n{marker}"
                 )
             },
@@ -119,7 +119,7 @@ def _history_card(
     history_url: str,
 ) -> RenderedDeliveryItem:
     marker = format_case_marker(case_ref)
-    action = {"type": 1, "title": "查看事件历史", "url": history_url}
+    action = {"type": 1, "title": "查看问题历史", "url": history_url}
     return RenderedDeliveryItem(
         kind=PartKind.TEXT,
         payload={
@@ -129,7 +129,7 @@ def _history_card(
                     "title": case_title[:26],
                     "desc": f"{actor_label}：{actor_name}"[:30],
                 },
-                "sub_title_text": f"{marker} · 点击查看完整事件时间线",
+                "sub_title_text": f"{marker} · 点击查看完整问题时间线",
                 "jump_list": [action],
                 "card_action": {"type": 1, "url": history_url},
                 "task_id": f"kefu_history_{uuid4().hex}",

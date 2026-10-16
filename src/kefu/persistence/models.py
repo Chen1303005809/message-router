@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SqlEnum,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, synonym
 
 DEFAULT_CASE_DEADLINE_HOURS = 3
 DEFAULT_APPROACHING_WINDOW_MINUTES = 24 * 60
@@ -118,7 +118,7 @@ class PartKind(StrEnum):
 
 class DeliveryDestination(StrEnum):
     # Kept to deserialize historical completed deliveries; new writes are
-    # group-only and the transport rejects this destination.
+    # limited to addresses resolved from registered WeCom channel or user IDs.
     USER = "user"
     CHAT = "chat"
 
@@ -214,9 +214,10 @@ class WeComChannel(Base):
 
 
 class Case(Base):
-    __tablename__ = "cases"
+    __tablename__ = "issues"
     __table_args__ = (
         UniqueConstraint("case_ref", name="uq_cases_case_ref"),
+        UniqueConstraint("bug_number", name="uq_issues_bug_number"),
         CheckConstraint("version >= 1", name="ck_cases_version_positive"),
         CheckConstraint("last_entry_sequence >= 0", name="ck_cases_sequence_nonnegative"),
         CheckConstraint(
@@ -228,6 +229,7 @@ class Case(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     case_ref: Mapped[str] = mapped_column(String(32))
+    issue_number = synonym("case_ref")
     title: Mapped[str] = mapped_column(String(512))
     customer_name: Mapped[str] = mapped_column(
         String(256), default="未录入", server_default="未录入"
@@ -266,6 +268,9 @@ class Case(Base):
     current_dev_team_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("teams.id"), index=True
     )
+    initial_acceptance_team_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("teams.id"), nullable=True, index=True
+    )
     # Legacy nullable storage retained so existing databases can upgrade
     # without discarding old assignment data. The application no longer reads
     # or writes this field; new events belong to a development team only.
@@ -273,9 +278,21 @@ class Case(Base):
         Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
     creator_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
+    first_recorder_id = synonym("creator_id")
     related_case_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("cases.id"), nullable=True
+        Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
     )
+    issue_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suspected_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    issue_current_situation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issue_current_status: Mapped[str] = mapped_column(
+        String(128), default="问题未回复", server_default="问题未回复"
+    )
+    bug_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    feedback_event_point: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issue_source: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    issue_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    initial_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, default=1)
     last_entry_sequence: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -285,7 +302,7 @@ class Case(Base):
 
 
 class CaseEntry(Base):
-    __tablename__ = "case_entries"
+    __tablename__ = "issue_entries"
     __table_args__ = (
         UniqueConstraint("case_id", "sequence", name="uq_case_entries_case_sequence"),
         UniqueConstraint("source_msgid", name="uq_case_entries_source_msgid"),
@@ -294,7 +311,7 @@ class CaseEntry(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     case_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("cases.id", ondelete="CASCADE")
+        Uuid(as_uuid=True), ForeignKey("issues.id", ondelete="CASCADE")
     )
     sequence: Mapped[int] = mapped_column(Integer)
     kind: Mapped[CaseEntryKind] = mapped_column(enum_column(CaseEntryKind))
@@ -308,7 +325,7 @@ class CaseEntry(Base):
     )
     source_msgid: Mapped[str | None] = mapped_column(String(256), nullable=True)
     corrects_entry_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("case_entries.id"), nullable=True
+        Uuid(as_uuid=True), ForeignKey("issue_entries.id"), nullable=True
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -327,7 +344,7 @@ class StoredMedia(Base):
 
 
 class CaseEntryPart(Base):
-    __tablename__ = "case_entry_parts"
+    __tablename__ = "issue_entry_parts"
     __table_args__ = (
         UniqueConstraint("entry_id", "position", name="uq_case_entry_parts_entry_position"),
         CheckConstraint("position >= 0", name="ck_case_entry_parts_nonnegative_position"),
@@ -340,7 +357,7 @@ class CaseEntryPart(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     entry_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("case_entries.id", ondelete="CASCADE")
+        Uuid(as_uuid=True), ForeignKey("issue_entries.id", ondelete="CASCADE")
     )
     position: Mapped[int] = mapped_column(Integer)
     kind: Mapped[PartKind] = mapped_column(enum_column(PartKind))
@@ -359,7 +376,7 @@ class Delivery(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     entry_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("case_entries.id", ondelete="CASCADE")
+        Uuid(as_uuid=True), ForeignKey("issue_entries.id", ondelete="CASCADE")
     )
     destination_type: Mapped[DeliveryDestination] = mapped_column(enum_column(DeliveryDestination))
     destination_address: Mapped[str] = mapped_column(String(256))
@@ -448,6 +465,63 @@ class DeferredPassiveReply(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class IssueIntakeDraft(Base):
+    """Short-lived, actor-owned form state between AI drafting and confirmation."""
+
+    __tablename__ = "issue_intake_drafts"
+    __table_args__ = (Index("ix_issue_intake_drafts_expiry", "expires_at"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    issue_number: Mapped[str] = mapped_column(String(32), unique=True)
+    actor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), index=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    fields_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    parts_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    confirmed_issue_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class IssueInspectionState(Base):
+    """Durable reminder state that makes inspection notifications idempotent."""
+
+    __tablename__ = "issue_inspection_states"
+
+    issue_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("issues.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_periodic_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approaching_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MessageOutbox(Base):
+    """Durable text messages that are not attached to a timeline entry."""
+
+    __tablename__ = "message_outbox"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_message_outbox_idempotency_key"),
+        Index("ix_message_outbox_pending", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(256))
+    destination_type: Mapped[DeliveryDestination] = mapped_column(enum_column(DeliveryDestination))
+    destination_address: Mapped[str] = mapped_column(String(256))
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[DeliveryStatus] = mapped_column(
+        enum_column(DeliveryStatus), default=DeliveryStatus.PENDING
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lock_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class WebSession(Base):
     """Opaque, short-lived H5 session keyed by a hashed cookie value."""
 
@@ -460,3 +534,10 @@ class WebSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+# Public domain names. The legacy names remain as internal adapters while the
+# existing communication workflow is migrated to the issue module.
+Issue = Case
+IssueEntry = CaseEntry
+IssueEntryPart = CaseEntryPart

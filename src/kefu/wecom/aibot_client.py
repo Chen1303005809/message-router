@@ -100,7 +100,7 @@ class OfficialAiBotClient:
     def on(self, event: str, listener: Callable[..., object]) -> object:
         callback_registrar = getattr(self._client, "on", None)
         if not callable(callback_registrar):
-            raise AiBotClientError("企业微信 SDK 缺少事件监听能力")
+            raise AiBotClientError("企业微信 SDK 缺少问题监听能力")
         return callback_registrar(event, listener)
 
     async def connect(self) -> object:

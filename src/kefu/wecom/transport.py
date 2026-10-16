@@ -91,7 +91,7 @@ class WeComTransport(Protocol):
         """Yield normalized inbound callbacks from a long-lived connection."""
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
-        """Push one already-persisted item to a group conversation."""
+        """Push one already-persisted item to a registered group or person."""
 
     async def reply(self, event: InboundEvent, reply: InboundReply) -> DeliveryReceipt:
         """Reply to the original callback without creating a durable delivery."""
@@ -137,8 +137,6 @@ class FakeWeComAdapter:
             yield self._inbound.pop(0)
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
-        if message.destination_type is DeliveryDestination.USER:
-            raise TransportError("机器人仅支持向已绑定群聊投递")
         if self._remaining_failures[message.req_id] > 0:
             self._remaining_failures[message.req_id] -= 1
             raise TransportError(f"planned failure for {message.req_id}")
@@ -293,8 +291,6 @@ class LongConnectionWeComAdapter:
             yield event_task.result()
 
     async def send(self, message: OutboundMessage) -> DeliveryReceipt:
-        if message.destination_type is DeliveryDestination.USER:
-            raise TransportError("机器人仅支持向已绑定群聊投递")
         if self._displaced.is_set():
             raise TransportDisplacedError(
                 "企业微信长连接已被另一实例顶替，请确认同一 Bot ID 只有一个 worker"
@@ -625,8 +621,10 @@ def _callback_frame_for_log(frame: Mapping[str, object]) -> str:
 
 def _shape_for_log(value: object, depth: int = 0) -> object:
     """Describe callback structure without copying message text or credentials."""
-    if depth >= 4 and isinstance(value, (Mapping, Sequence)) and not isinstance(
-        value, (str, bytes, bytearray)
+    if (
+        depth >= 4
+        and isinstance(value, (Mapping, Sequence))
+        and not isinstance(value, (str, bytes, bytearray))
     ):
         return {"type": "object" if isinstance(value, Mapping) else "array", "truncated": True}
     if isinstance(value, Mapping):
