@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -41,6 +39,7 @@ from kefu.messages.recipients import (
     RecipientResolver,
 )
 from kefu.persistence.models import CasePriority, CaseStatus, LifecycleStatus, WaitingOn
+from kefu.tools import LoggedHttpClient
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +114,7 @@ class Agent:
         self._tools = tools or AgentToolRegistry()
         self._client = client or httpx.AsyncClient(timeout=_AGENT_TIMEOUT_SECONDS)
         self._owns_client = client is None
+        self._http = LoggedHttpClient(timeout=_AGENT_TIMEOUT_SECONDS, client=self._client)
 
     async def close(self) -> None:
         if self._owns_client:
@@ -242,7 +242,8 @@ class Agent:
             content = message.get("content") if isinstance(message, Mapping) else None
         except (IndexError, KeyError, TypeError) as error:
             logger.warning(
-                "agent_response_parse_failed request_id=%s operation=%s failure=missing_message error_type=%s",
+                "agent_response_parse_failed request_id=%s operation=%s "
+                "failure=missing_message error_type=%s",
                 _log_request_id(request_id),
                 operation,
                 type(error).__name__,
@@ -259,7 +260,8 @@ class Agent:
             parsed = json.loads(content)
         except (TypeError, json.JSONDecodeError) as error:
             logger.warning(
-                "agent_response_parse_failed request_id=%s operation=%s failure=invalid_json_content content_chars=%s error_type=%s",
+                "agent_response_parse_failed request_id=%s operation=%s "
+                "failure=invalid_json_content content_chars=%s error_type=%s",
                 _log_request_id(request_id),
                 operation,
                 len(content),
@@ -291,118 +293,72 @@ class Agent:
         if not self._base_url or not self._api_key:
             raise AgentConfigurationError("请配置 AGENT_BASE_URL 和 AGENT_API_KEY")
         url = _chat_completions_url(self._base_url)
-        request_started = time.monotonic()
-        endpoint_host, endpoint_path_depth, endpoint_has_query = _safe_endpoint_summary(url)
         payload_bytes = len(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
         model = payload.get("model")
+        messages = payload.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
+        message_text_chars = sum(
+            len(message["content"])
+            for message in (messages if isinstance(messages, list) else ())
+            if isinstance(message, Mapping) and isinstance(message.get("content"), str)
+        )
+        response_format = payload.get("response_format")
+        response_format_type = (
+            response_format.get("type")
+            if isinstance(response_format, Mapping)
+            else "none"
+        )
         logger.info(
-            "agent_upstream_request_started request_id=%s operation=%s endpoint_host=%s endpoint_path_depth=%s endpoint_has_query=%s model=%s payload_bytes=%s timeout_seconds=%s",
+            "agent_request_prepared request_id=%s operation=%s model=%s "
+            "message_count=%s message_text_chars=%s response_format_type=%s payload_bytes=%s",
             _log_request_id(request_id),
             operation,
-            endpoint_host,
-            endpoint_path_depth,
-            endpoint_has_query,
             model if isinstance(model, str) else "unknown",
+            message_count,
+            message_text_chars,
+            response_format_type if isinstance(response_format_type, str) else "unknown",
             payload_bytes,
-            _AGENT_TIMEOUT_SECONDS,
         )
         try:
-            response = await self._client.post(
+            response = await self._http.arequest(
+                "POST",
                 url,
+                operation=operation,
+                request_id=request_id,
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=dict(payload),
             )
-        except httpx.TimeoutException as error:
-            logger.warning(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=timeout error_type=%s elapsed_ms=%s",
-                _log_request_id(request_id),
-                operation,
-                type(error).__name__,
-                _elapsed_ms(request_started),
-            )
-            raise RuntimeError("Agent 服务请求失败") from error
-        except httpx.InvalidURL as error:
-            logger.error(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=invalid_url error_type=%s elapsed_ms=%s",
-                _log_request_id(request_id),
-                operation,
-                type(error).__name__,
-                _elapsed_ms(request_started),
-            )
-            raise RuntimeError("Agent 服务请求失败") from error
-        except httpx.HTTPError as error:
-            logger.warning(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=transport_error error_type=%s elapsed_ms=%s",
-                _log_request_id(request_id),
-                operation,
-                type(error).__name__,
-                _elapsed_ms(request_started),
-            )
-            raise RuntimeError("Agent 服务请求失败") from error
-
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as error:
-            (
-                provider_error_type,
-                provider_error_code,
-                provider_error_param,
-                provider_error_category,
-            ) = _upstream_error_diagnostics(response)
-            logger.warning(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=http_status status_code=%s provider_error_type=%s provider_error_code=%s provider_error_param=%s provider_error_category=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
-                _log_request_id(request_id),
-                operation,
-                response.status_code,
-                provider_error_type,
-                provider_error_code,
-                provider_error_param,
-                provider_error_category,
-                response.headers.get("content-type", "unknown"),
-                len(response.content),
-                _upstream_request_id(response),
-                _elapsed_ms(request_started),
-            )
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
             raise RuntimeError("Agent 服务请求失败") from error
         try:
             data = response.json()
         except (ValueError, httpx.DecodingError) as error:
             logger.warning(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=invalid_json status_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s error_type=%s",
+                "agent_upstream_response_invalid request_id=%s operation=%s "
+                "failure=invalid_json status_code=%s content_type=%s "
+                "response_bytes=%s error_type=%s",
                 _log_request_id(request_id),
                 operation,
                 response.status_code,
                 response.headers.get("content-type", "unknown"),
                 len(response.content),
-                _upstream_request_id(response),
-                _elapsed_ms(request_started),
                 type(error).__name__,
             )
             raise RuntimeError("Agent 服务返回了无效的 Chat Completions 响应") from error
         if not isinstance(data, dict) or not isinstance(data.get("choices"), list):
             logger.warning(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=invalid_response_shape status_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
+                "agent_upstream_response_invalid request_id=%s operation=%s "
+                "failure=invalid_response_shape status_code=%s content_type=%s "
+                "response_bytes=%s",
                 _log_request_id(request_id),
                 operation,
                 response.status_code,
                 response.headers.get("content-type", "unknown"),
                 len(response.content),
-                _upstream_request_id(response),
-                _elapsed_ms(request_started),
             )
             raise RuntimeError("Agent 服务返回了无效的 Chat Completions 响应")
-        logger.info(
-            "agent_upstream_request_succeeded request_id=%s operation=%s status_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
-            _log_request_id(request_id),
-            operation,
-            response.status_code,
-            response.headers.get("content-type", "unknown"),
-            len(response.content),
-            _upstream_request_id(response),
-            _elapsed_ms(request_started),
-        )
         return data
 
     def _required_model(self) -> str:
@@ -667,83 +623,6 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{normalized}/chat/completions"
 
 
-def _safe_endpoint_summary(url: str) -> tuple[str, int, bool]:
-    """Return endpoint diagnostics without logging URL credentials or query values."""
-    try:
-        parsed = urlsplit(url)
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        return "invalid", 0, False
-    if not hostname:
-        return "invalid", 0, bool(parsed.query)
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
-    endpoint_host = f"{parsed.scheme}://{hostname}"
-    if port is not None:
-        endpoint_host = f"{endpoint_host}:{port}"
-    path_depth = sum(bool(part) for part in parsed.path.split("/"))
-    return endpoint_host, path_depth, bool(parsed.query)
-
-
-def _upstream_request_id(response: httpx.Response) -> str:
-    for header_name in ("x-request-id", "openai-request-id", "request-id"):
-        value = response.headers.get(header_name, "").strip()
-        if value and len(value) <= 128 and all(
-            char.isascii() and (char.isalnum() or char in "._:-") for char in value
-        ):
-            return value
-    return "unavailable"
-
-
-def _upstream_error_diagnostics(response: httpx.Response) -> tuple[str, str, str, str]:
-    try:
-        payload = response.json()
-    except (ValueError, httpx.DecodingError):
-        return "unavailable", "unavailable", "unavailable", "unclassified"
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if not isinstance(error, dict):
-        return "unavailable", "unavailable", "unavailable", "unclassified"
-    error_type = _safe_log_label(error.get("type"))
-    error_code = _safe_log_label(error.get("code"))
-    error_param = _safe_log_label(error.get("param"), parameter=True)
-    category = _provider_error_category(error.get("message"), error_param)
-    return error_type, error_code, error_param, category
-
-
-def _safe_log_label(value: Any, *, parameter: bool = False) -> str:
-    if not isinstance(value, str) or not value or len(value) > 80:
-        return "unavailable"
-    allowed_punctuation = ".[]" if parameter else "._:-"
-    if all(char.isascii() and (char.isalnum() or char in allowed_punctuation) for char in value):
-        return value
-    return "unavailable"
-
-
-def _provider_error_category(message: Any, error_param: str) -> str:
-    if not isinstance(message, str):
-        return "unclassified"
-    normalized = message.casefold()
-    if "response_format" in normalized or "json_object" in normalized:
-        return "response_format"
-    if any(
-        phrase in normalized
-        for phrase in ("context length", "maximum context", "too many tokens", "token limit")
-    ):
-        return "context_limit"
-    if "model" in normalized and any(
-        phrase in normalized for phrase in ("not found", "unsupported", "invalid", "does not exist")
-    ):
-        return "model"
-    if error_param != "unavailable":
-        return "invalid_parameter"
-    if "endpoint" in normalized or "route" in normalized or "path" in normalized:
-        return "endpoint"
-    if "unsupported" in normalized or "not supported" in normalized:
-        return "unsupported_feature"
-    return "unclassified"
-
-
 def _log_request_id(request_id: str | None) -> str:
     normalized = (request_id or "").strip()
     if normalized and len(normalized) <= 64 and all(
@@ -751,10 +630,6 @@ def _log_request_id(request_id: str | None) -> str:
     ):
         return normalized
     return "untracked"
-
-
-def _elapsed_ms(started_at: float) -> int:
-    return max(0, round((time.monotonic() - started_at) * 1000))
 
 
 def _object_schema(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:

@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import logging
 import secrets
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
-from urllib.parse import quote, unquote, urlencode, urlsplit
-from urllib.request import urlopen
+from urllib.parse import quote, unquote, urlencode
 from uuid import uuid4
 
+import httpx
 from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -24,6 +23,7 @@ from kefu.case_desk.errors import CaseDeskError
 from kefu.config import Settings
 from kefu.persistence.models import WebSession
 from kefu.routing.directory import DatabaseRoutingDirectory
+from kefu.tools import LoggedHttpClient
 
 SESSION_COOKIE = "kefu_session"
 OAUTH_STATE_COOKIE = "kefu_oauth_state"
@@ -53,6 +53,7 @@ class WeComOAuthClient:
         self._corp_id = settings.wecom_corp_id
         self._corp_secret = settings.wecom_corp_secret
         self._agent_id = settings.wecom_agent_id
+        self._http = LoggedHttpClient(timeout=5)
 
     def authorize_url(self, callback_url: str, state: str) -> str:
         parameters = {
@@ -75,6 +76,7 @@ class WeComOAuthClient:
         token_response = self._get_json(
             "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
             {"corpid": self._corp_id, "corpsecret": self._corp_secret},
+            operation="wecom_oauth_gettoken",
         )
         token = token_response.get("access_token")
         if not isinstance(token, str) or not token:
@@ -82,29 +84,47 @@ class WeComOAuthClient:
         user_response = self._get_json(
             "https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo",
             {"access_token": token, "code": code},
+            operation="wecom_oauth_userinfo",
         )
         user_id = user_response.get("userid")
         if not isinstance(user_id, str) or not user_id:
             raise AuthenticationError("当前企业微信身份不是可访问问题中心的企业成员")
         return user_id
 
-    def _get_json(self, endpoint: str, parameters: Mapping[str, str]) -> Mapping[str, object]:
-        query = urlencode(parameters)
+    def _get_json(
+        self,
+        endpoint: str,
+        parameters: Mapping[str, str],
+        *,
+        operation: str,
+    ) -> Mapping[str, object]:
         try:
-            with urlopen(f"{endpoint}?{query}", timeout=5) as response:  # noqa: S310
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception as error:
+            response = self._http.request(
+                "GET",
+                endpoint,
+                operation=operation,
+                params=parameters,
+            )
+        except (httpx.HTTPError, httpx.InvalidURL) as error:
+            raise AuthenticationError("企业微信身份验证暂时不可用") from error
+        try:
+            payload = response.json()
+        except (ValueError, httpx.DecodingError) as error:
             _LOGGER.warning(
-                "WeCom OAuth request failed endpoint=%s error_type=%s",
-                urlsplit(endpoint).path,
+                "WeCom OAuth response invalid operation=%s status_code=%s content_type=%s "
+                "response_bytes=%s error_type=%s",
+                operation,
+                response.status_code,
+                response.headers.get("content-type", "unknown"),
+                len(response.content),
                 type(error).__name__,
             )
             raise AuthenticationError("企业微信身份验证暂时不可用") from error
         if not isinstance(payload, dict) or payload.get("errcode", 0) != 0:
             errcode = payload.get("errcode") if isinstance(payload, dict) else None
             _LOGGER.warning(
-                "WeCom OAuth response rejected endpoint=%s errcode=%r",
-                urlsplit(endpoint).path,
+                "WeCom OAuth response rejected operation=%s errcode=%r",
+                operation,
                 errcode,
             )
             raise AuthenticationError("企业微信身份验证失败")
