@@ -345,14 +345,21 @@ class Agent:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
-            provider_error_type, provider_error_code = _upstream_error_labels(response)
+            (
+                provider_error_type,
+                provider_error_code,
+                provider_error_param,
+                provider_error_category,
+            ) = _upstream_error_diagnostics(response)
             logger.warning(
-                "agent_upstream_request_failed request_id=%s operation=%s failure=http_status status_code=%s provider_error_type=%s provider_error_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
+                "agent_upstream_request_failed request_id=%s operation=%s failure=http_status status_code=%s provider_error_type=%s provider_error_code=%s provider_error_param=%s provider_error_category=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
                 _log_request_id(request_id),
                 operation,
                 response.status_code,
                 provider_error_type,
                 provider_error_code,
+                provider_error_param,
+                provider_error_category,
                 response.headers.get("content-type", "unknown"),
                 len(response.content),
                 _upstream_request_id(response),
@@ -689,25 +696,52 @@ def _upstream_request_id(response: httpx.Response) -> str:
     return "unavailable"
 
 
-def _upstream_error_labels(response: httpx.Response) -> tuple[str, str]:
+def _upstream_error_diagnostics(response: httpx.Response) -> tuple[str, str, str, str]:
     try:
         payload = response.json()
     except (ValueError, httpx.DecodingError):
-        return "unavailable", "unavailable"
+        return "unavailable", "unavailable", "unavailable", "unclassified"
     error = payload.get("error") if isinstance(payload, dict) else None
     if not isinstance(error, dict):
-        return "unavailable", "unavailable"
-    return _safe_log_label(error.get("type")), _safe_log_label(error.get("code"))
+        return "unavailable", "unavailable", "unavailable", "unclassified"
+    error_type = _safe_log_label(error.get("type"))
+    error_code = _safe_log_label(error.get("code"))
+    error_param = _safe_log_label(error.get("param"), parameter=True)
+    category = _provider_error_category(error.get("message"), error_param)
+    return error_type, error_code, error_param, category
 
 
-def _safe_log_label(value: Any) -> str:
+def _safe_log_label(value: Any, *, parameter: bool = False) -> str:
     if not isinstance(value, str) or not value or len(value) > 80:
         return "unavailable"
-    normalized = "".join(
-        char if char.isascii() and (char.isalnum() or char in "._:-") else "_"
-        for char in value
-    )
-    return normalized or "unavailable"
+    allowed_punctuation = ".[]" if parameter else "._:-"
+    if all(char.isascii() and (char.isalnum() or char in allowed_punctuation) for char in value):
+        return value
+    return "unavailable"
+
+
+def _provider_error_category(message: Any, error_param: str) -> str:
+    if not isinstance(message, str):
+        return "unclassified"
+    normalized = message.casefold()
+    if "response_format" in normalized or "json_object" in normalized:
+        return "response_format"
+    if any(
+        phrase in normalized
+        for phrase in ("context length", "maximum context", "too many tokens", "token limit")
+    ):
+        return "context_limit"
+    if "model" in normalized and any(
+        phrase in normalized for phrase in ("not found", "unsupported", "invalid", "does not exist")
+    ):
+        return "model"
+    if error_param != "unavailable":
+        return "invalid_parameter"
+    if "endpoint" in normalized or "route" in normalized or "path" in normalized:
+        return "endpoint"
+    if "unsupported" in normalized or "not supported" in normalized:
+        return "unsupported_feature"
+    return "unclassified"
 
 
 def _log_request_id(request_id: str | None) -> str:
