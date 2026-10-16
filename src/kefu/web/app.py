@@ -923,7 +923,6 @@ def create_app(
                 f'<h1>问题工作台</h1><p class="muted">按当前责任方和紧急程度跟进每一条问题</p></div>'
                 f"<nav>{tabs}{admin_link}{create_link}</nav></header>"
                 f'<section class="overview-grid" aria-label="问题数据一览">{overview_cards}</section>'
-                f"{_debug_input_controls()}"
                 f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
                 f'<nav class="priority-filters">{priority_filters}</nav></section>'
                 f'<main class="event-list">{cards}</main>',
