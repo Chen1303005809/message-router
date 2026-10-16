@@ -1916,20 +1916,6 @@ h2 { color: #23344f; }
 .overview-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: 0 5px 18px #162a4608; }
 .overview-card span { color: var(--muted); font-size: 13px; font-weight: 650; }
 .overview-card strong { color: var(--ink); font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums; }
-.debug-input-panel { padding: 18px; margin-bottom: 16px; }
-.debug-input-panel h2 { margin: 0 0 4px; font-size: 17px; }
-.debug-input-note { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
-.debug-input-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
-.debug-input-group { min-width: 0; }
-.debug-input-label { display: block; margin: 0 0 6px; color: #34445d; font-size: 13px; font-weight: 700; }
-.debug-toolbar { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
-.debug-toolbar button { min-height: 34px; margin: 0; padding: 5px 9px; font-size: 12px; }
-.debug-editor { min-height: 130px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: var(--ink); overflow-wrap: anywhere; }
-.debug-editor:focus { outline: 3px solid #dce8ff; border-color: #789af2; }
-.debug-editor:empty::before { content: attr(data-placeholder); color: #98a2b3; pointer-events: none; }
-.debug-file-input { margin: 0; }
-.debug-file-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
-.debug-file-list li { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; color: #41516a; font-size: 12px; overflow-wrap: anywhere; }
 .filter-panel, .panel, .case-card, .case-overview, .metadata-editor {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -2100,7 +2086,6 @@ button.primary { background: var(--blue); }
   .topbar nav { justify-content: flex-start; margin: 0; }
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
   .overview-card { padding: 12px; }
-  .debug-input-grid { grid-template-columns: 1fr; gap: 14px; }
   .case-titlebar { flex-direction: column; }
   .case-state-badges { justify-content: flex-start; }
   .case-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2256,86 +2241,6 @@ button.primary:hover{{background:#004eeb}}
 body.setup-page{{background:#eef4ff}}
 {_WORKBENCH_CSS}
 </style></head><body class="{escape(body_class)}">{body}</body></html>"""
-
-
-def _debug_input_controls() -> str:
-    """Render browser-only inputs for manually checking rich text and file selection."""
-    return """
-    <section class="debug-input-panel panel" aria-labelledby="debug-input-title">
-      <h2 id="debug-input-title">调试输入区</h2>
-      <p class="debug-input-note">仅用于页面调试，内容只在当前浏览器中显示，不会保存或发送。</p>
-      <div class="debug-input-grid">
-        <div class="debug-input-group">
-          <span class="debug-input-label" id="debug-richtext-label">富文本输入框</span>
-          <div class="debug-toolbar" role="toolbar" aria-label="富文本格式">
-            <button type="button" data-debug-format="bold" title="加粗"><strong>B</strong></button>
-            <button type="button" data-debug-format="italic" title="斜体"><em>I</em></button>
-            <button type="button" data-debug-format="underline" title="下划线"><u>U</u></button>
-            <button type="button" data-debug-format="insertUnorderedList" title="项目符号列表">• 列表</button>
-            <button type="button" data-debug-format="insertOrderedList" title="编号列表">1. 列表</button>
-            <button type="button" data-debug-clear="true">清空</button>
-          </div>
-          <div class="debug-editor" contenteditable="true" role="textbox" aria-multiline="true"
-            aria-labelledby="debug-richtext-label" data-debug-editor="true"
-            data-placeholder="输入或粘贴一些文字，试试上方格式按钮"></div>
-        </div>
-        <div class="debug-input-group">
-          <label class="debug-input-label" for="debug-files">文件选择框</label>
-          <input class="debug-file-input" id="debug-files" type="file" multiple data-debug-files="true">
-          <p class="debug-input-note">只在本页列出文件名和大小，不会读取或上传文件内容。</p>
-          <ul class="debug-file-list" data-debug-file-list="true" aria-live="polite">
-            <li>尚未选择文件</li>
-          </ul>
-        </div>
-      </div>
-    </section>
-    <script>
-    (() => {
-      const editor = document.querySelector('[data-debug-editor="true"]');
-      const toolbar = document.querySelector('.debug-toolbar');
-      const filesInput = document.querySelector('[data-debug-files="true"]');
-      const fileList = document.querySelector('[data-debug-file-list="true"]');
-      if (editor && toolbar) {
-        toolbar.addEventListener("mousedown", (event) => {
-          if (event.target.closest("button")) event.preventDefault();
-        });
-        toolbar.addEventListener("click", (event) => {
-          const button = event.target.closest("button");
-          if (!button) return;
-          editor.focus();
-          if (button.hasAttribute("data-debug-clear")) {
-            editor.replaceChildren();
-            return;
-          }
-          const command = button.dataset.debugFormat;
-          if (command && typeof document.execCommand === "function") {
-            document.execCommand(command, false, null);
-          }
-        });
-      }
-      if (filesInput && fileList) {
-        filesInput.addEventListener("change", () => {
-          const files = Array.from(filesInput.files || []);
-          fileList.replaceChildren();
-          if (!files.length) {
-            const empty = document.createElement("li");
-            empty.textContent = "尚未选择文件";
-            fileList.append(empty);
-            return;
-          }
-          files.forEach((file) => {
-            const item = document.createElement("li");
-            const size = file.size < 1024
-              ? `${file.size} B`
-              : `${(file.size / 1024).toFixed(1)} KiB`;
-            item.textContent = `${file.name} · ${size}${file.type ? ` · ${file.type}` : ""}`;
-            fileList.append(item);
-          });
-        });
-      }
-    })();
-    </script>
-    """
 
 
 def _image_upload_controls() -> str:
