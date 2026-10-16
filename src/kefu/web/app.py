@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
@@ -74,7 +75,7 @@ from kefu.media.storage import (
 from kefu.messages.push import MessagePush
 from kefu.messages.receiver import MessageReceiver
 from kefu.messages.recipients import RecipientResolver
-from kefu.observability import database_target_fingerprint
+from kefu.observability import database_target_fingerprint, opaque_id_fingerprint
 from kefu.persistence.database import create_engine_from_url, create_session_factory
 from kefu.persistence.models import (
     MAX_DEADLINE_INCREMENT_MINUTES,
@@ -197,6 +198,39 @@ def create_app(
             if request.url.query:
                 destination = f"{destination}?{request.url.query}"
             return RedirectResponse(destination, status_code=307)
+        if internal_path in {"/issues/draft", "/api/agent/chat"}:
+            request_id = uuid4().hex
+            request.state.request_id = request_id
+            request_started = time.monotonic()
+            logger.info(
+                "agent_http_request_started request_id=%s method=%s route=%s",
+                request_id,
+                request.method,
+                internal_path,
+            )
+            try:
+                response = await call_next(request)
+            except Exception as error:
+                logger.error(
+                    "agent_http_request_unhandled request_id=%s method=%s route=%s error_type=%s elapsed_ms=%s",
+                    request_id,
+                    request.method,
+                    internal_path,
+                    type(error).__name__,
+                    _elapsed_ms(request_started),
+                )
+                raise
+            response.headers["X-Request-ID"] = request_id
+            log_method = logger.warning if response.status_code >= 500 else logger.info
+            log_method(
+                "agent_http_request_finished request_id=%s method=%s route=%s status_code=%s elapsed_ms=%s",
+                request_id,
+                request.method,
+                internal_path,
+                response.status_code,
+                _elapsed_ms(request_started),
+            )
+            return response
         return await call_next(request)
 
     def actor_or_error(request: Request) -> Actor:
@@ -361,6 +395,7 @@ def create_app(
 
     @app.post("/issues/draft", include_in_schema=False)
     async def create_issue_draft(request: Request) -> RedirectResponse:
+        request_id = getattr(request.state, "request_id", "untracked")
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
@@ -376,21 +411,52 @@ def create_app(
             dev_teams = issue_management.list_dev_teams(actor)
             if not dev_teams:
                 raise Forbidden("当前没有可用的初次受理组")
-            message = message_receiver.receive_workbench(uuid4(), pasted_text)
+            logger.info(
+                "issue_draft_inputs_validated request_id=%s actor_fp=%s queue_fp=%s text_chars=%s team_count=%s",
+                request_id,
+                opaque_id_fingerprint(str(actor.user_id)),
+                opaque_id_fingerprint(str(consult_queue_id)),
+                len(pasted_text),
+                len(dev_teams),
+            )
+            message_id = uuid4()
+            message = message_receiver.receive_workbench(message_id, pasted_text)
+            logger.info(
+                "issue_draft_source_message_saved request_id=%s message_id_fp=%s",
+                request_id,
+                opaque_id_fingerprint(str(message_id)),
+            )
             try:
                 generated = await agent.draft_issue(
                     pasted_text,
                     [team.name for team in dev_teams],
+                    request_id=request_id,
                 )
             except AgentConfigurationError as error:
+                logger.error(
+                    "issue_draft_agent_unavailable request_id=%s reason=%s",
+                    request_id,
+                    str(error),
+                )
                 raise HTTPException(status_code=503, detail=str(error)) from error
             except RuntimeError as error:
+                logger.warning(
+                    "issue_draft_agent_failed request_id=%s reason=%s",
+                    request_id,
+                    str(error),
+                )
                 raise HTTPException(status_code=502, detail=str(error)) from error
 
             suggested_group = generated.get("initial_acceptance_group", "").strip()
             selected_team = next(
                 (team for team in dev_teams if team.name == suggested_group),
                 None,
+            )
+            logger.info(
+                "issue_draft_agent_result_ready request_id=%s field_count=%s team_match=%s",
+                request_id,
+                sum(bool(value.strip()) for value in generated.values()),
+                selected_team is not None,
             )
             uploads: list[UploadFile] = []
             for item in form.getlist("images"):
@@ -409,6 +475,11 @@ def create_app(
                         InboundImagePart(data=image_data, mime_type=upload.content_type or "")
                     )
                 )
+            logger.info(
+                "issue_draft_media_ingested request_id=%s image_count=%s",
+                request_id,
+                len(media_ids),
+            )
             parts = map_image_placeholders(pasted_text, media_ids)
             fields = IssueFields(
                 issue_description=generated.get("issue_description", ""),
@@ -430,6 +501,13 @@ def create_app(
                     fields=fields,
                 ),
                 actor,
+            )
+            logger.info(
+                "issue_draft_persisted request_id=%s draft_id_fp=%s image_count=%s team_selected=%s",
+                request_id,
+                opaque_id_fingerprint(str(draft.id)),
+                len(media_ids),
+                selected_team is not None,
             )
         except MediaIngestError as error:
             raise _http_error(ValidationError(str(error))) from error
@@ -565,10 +643,24 @@ def create_app(
         ):
             raise HTTPException(status_code=422, detail="messages 必须是消息对象数组")
         try:
-            reply = await agent.chat(raw_messages, actor)
+            reply = await agent.chat(
+                raw_messages,
+                actor,
+                request_id=getattr(request.state, "request_id", "untracked"),
+            )
         except AgentConfigurationError as error:
+            logger.error(
+                "agent_chat_unavailable request_id=%s reason=%s",
+                getattr(request.state, "request_id", "untracked"),
+                str(error),
+            )
             raise HTTPException(status_code=503, detail=str(error)) from error
         except RuntimeError as error:
+            logger.warning(
+                "agent_chat_failed request_id=%s reason=%s",
+                getattr(request.state, "request_id", "untracked"),
+                str(error),
+            )
             raise HTTPException(status_code=502, detail=str(error)) from error
         return JSONResponse({"message": reply})
 
@@ -1767,6 +1859,10 @@ def _team_kind_label(kind: TeamKind) -> str:
 
 def _role_label(role: MembershipRole) -> str:
     return "团队管理员" if role is MembershipRole.ADMIN else "成员"
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((time.monotonic() - started_at) * 1000))
 
 
 def _storage_from_settings(settings: Settings) -> ObjectStorage:

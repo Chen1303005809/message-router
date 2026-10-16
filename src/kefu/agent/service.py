@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -38,6 +41,10 @@ from kefu.messages.recipients import (
     RecipientResolver,
 )
 from kefu.persistence.models import CasePriority, CaseStatus, LifecycleStatus, WaitingOn
+
+logger = logging.getLogger(__name__)
+
+_AGENT_TIMEOUT_SECONDS = 60.0
 
 
 class AgentConfigurationError(RuntimeError):
@@ -106,7 +113,7 @@ class Agent:
         self._api_key = settings.agent_api_key
         self._model = settings.agent_model
         self._tools = tools or AgentToolRegistry()
-        self._client = client or httpx.AsyncClient(timeout=60)
+        self._client = client or httpx.AsyncClient(timeout=_AGENT_TIMEOUT_SECONDS)
         self._owns_client = client is None
 
     async def close(self) -> None:
@@ -114,7 +121,11 @@ class Agent:
             await self._client.aclose()
 
     async def draft_issue(
-        self, pasted_text: str, acceptance_groups: Sequence[str]
+        self,
+        pasted_text: str,
+        acceptance_groups: Sequence[str],
+        *,
+        request_id: str | None = None,
     ) -> dict[str, str]:
         if not pasted_text.strip():
             raise ValidationError("请先粘贴需要整理的问题内容")
@@ -132,7 +143,9 @@ class Agent:
             [
                 {"role": "system", "content": "你负责整理问题资料，不得虚构事实。"},
                 {"role": "user", "content": prompt},
-            ]
+            ],
+            request_id=request_id,
+            operation="draft_issue",
         )
         allowed = {
             "issue_description",
@@ -152,6 +165,7 @@ class Agent:
         actor: Actor,
         *,
         max_tool_rounds: int = 5,
+        request_id: str | None = None,
     ) -> str:
         history: list[dict[str, Any]] = [
             {
@@ -177,7 +191,9 @@ class Agent:
                     "messages": history,
                     "tools": self._tools.schemas,
                     "tool_choice": "auto",
-                }
+                },
+                request_id=request_id,
+                operation="chat",
             )
             message = response["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
@@ -204,39 +220,182 @@ class Agent:
                 )
         raise RuntimeError("Agent 工具调用超过最大轮数")
 
-    async def _request_json(self, messages: Sequence[Mapping[str, str]]) -> dict[str, str]:
+    async def _request_json(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        request_id: str | None = None,
+        operation: str = "draft_issue",
+    ) -> dict[str, str]:
         response = await self._post(
             {
                 "model": self._required_model(),
                 "messages": list(messages),
                 "response_format": {"type": "json_object"},
-            }
+            },
+            request_id=request_id,
+            operation=operation,
         )
-        content = response["choices"][0]["message"].get("content")
+        try:
+            choices = response["choices"]
+            message = choices[0]["message"]
+            content = message.get("content") if isinstance(message, Mapping) else None
+        except (IndexError, KeyError, TypeError) as error:
+            logger.warning(
+                "agent_response_parse_failed request_id=%s operation=%s failure=missing_message error_type=%s",
+                _log_request_id(request_id),
+                operation,
+                type(error).__name__,
+            )
+            raise RuntimeError("Agent 服务返回了无效的 Chat Completions 响应") from error
+        if not isinstance(content, str):
+            logger.warning(
+                "agent_response_parse_failed request_id=%s operation=%s failure=non_text_content",
+                _log_request_id(request_id),
+                operation,
+            )
+            raise RuntimeError("Agent 没有返回有效的 JSON 字段草稿")
         try:
             parsed = json.loads(content)
         except (TypeError, json.JSONDecodeError) as error:
+            logger.warning(
+                "agent_response_parse_failed request_id=%s operation=%s failure=invalid_json_content content_chars=%s error_type=%s",
+                _log_request_id(request_id),
+                operation,
+                len(content),
+                type(error).__name__,
+            )
             raise RuntimeError("Agent 没有返回有效的 JSON 字段草稿") from error
         if not isinstance(parsed, dict):
+            logger.warning(
+                "agent_response_parse_failed request_id=%s operation=%s failure=json_not_object",
+                _log_request_id(request_id),
+                operation,
+            )
             raise RuntimeError("Agent 字段草稿必须是 JSON 对象")
+        logger.info(
+            "agent_response_parsed request_id=%s operation=%s field_count=%s",
+            _log_request_id(request_id),
+            operation,
+            len(parsed),
+        )
         return parsed
 
-    async def _post(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    async def _post(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        request_id: str | None = None,
+        operation: str = "agent",
+    ) -> dict[str, Any]:
         if not self._base_url or not self._api_key:
             raise AgentConfigurationError("请配置 AGENT_BASE_URL 和 AGENT_API_KEY")
         url = _chat_completions_url(self._base_url)
+        request_started = time.monotonic()
+        endpoint_host, endpoint_path_depth, endpoint_has_query = _safe_endpoint_summary(url)
+        payload_bytes = len(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        model = payload.get("model")
+        logger.info(
+            "agent_upstream_request_started request_id=%s operation=%s endpoint_host=%s endpoint_path_depth=%s endpoint_has_query=%s model=%s payload_bytes=%s timeout_seconds=%s",
+            _log_request_id(request_id),
+            operation,
+            endpoint_host,
+            endpoint_path_depth,
+            endpoint_has_query,
+            model if isinstance(model, str) else "unknown",
+            payload_bytes,
+            _AGENT_TIMEOUT_SECONDS,
+        )
         try:
             response = await self._client.post(
                 url,
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=dict(payload),
             )
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPError as error:
+        except httpx.TimeoutException as error:
+            logger.warning(
+                "agent_upstream_request_failed request_id=%s operation=%s failure=timeout error_type=%s elapsed_ms=%s",
+                _log_request_id(request_id),
+                operation,
+                type(error).__name__,
+                _elapsed_ms(request_started),
+            )
             raise RuntimeError("Agent 服务请求失败") from error
+        except httpx.InvalidURL as error:
+            logger.error(
+                "agent_upstream_request_failed request_id=%s operation=%s failure=invalid_url error_type=%s elapsed_ms=%s",
+                _log_request_id(request_id),
+                operation,
+                type(error).__name__,
+                _elapsed_ms(request_started),
+            )
+            raise RuntimeError("Agent 服务请求失败") from error
+        except httpx.HTTPError as error:
+            logger.warning(
+                "agent_upstream_request_failed request_id=%s operation=%s failure=transport_error error_type=%s elapsed_ms=%s",
+                _log_request_id(request_id),
+                operation,
+                type(error).__name__,
+                _elapsed_ms(request_started),
+            )
+            raise RuntimeError("Agent 服务请求失败") from error
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            provider_error_type, provider_error_code = _upstream_error_labels(response)
+            logger.warning(
+                "agent_upstream_request_failed request_id=%s operation=%s failure=http_status status_code=%s provider_error_type=%s provider_error_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
+                _log_request_id(request_id),
+                operation,
+                response.status_code,
+                provider_error_type,
+                provider_error_code,
+                response.headers.get("content-type", "unknown"),
+                len(response.content),
+                _upstream_request_id(response),
+                _elapsed_ms(request_started),
+            )
+            raise RuntimeError("Agent 服务请求失败") from error
+        try:
+            data = response.json()
+        except (ValueError, httpx.DecodingError) as error:
+            logger.warning(
+                "agent_upstream_request_failed request_id=%s operation=%s failure=invalid_json status_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s error_type=%s",
+                _log_request_id(request_id),
+                operation,
+                response.status_code,
+                response.headers.get("content-type", "unknown"),
+                len(response.content),
+                _upstream_request_id(response),
+                _elapsed_ms(request_started),
+                type(error).__name__,
+            )
+            raise RuntimeError("Agent 服务返回了无效的 Chat Completions 响应") from error
         if not isinstance(data, dict) or not isinstance(data.get("choices"), list):
+            logger.warning(
+                "agent_upstream_request_failed request_id=%s operation=%s failure=invalid_response_shape status_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
+                _log_request_id(request_id),
+                operation,
+                response.status_code,
+                response.headers.get("content-type", "unknown"),
+                len(response.content),
+                _upstream_request_id(response),
+                _elapsed_ms(request_started),
+            )
             raise RuntimeError("Agent 服务返回了无效的 Chat Completions 响应")
+        logger.info(
+            "agent_upstream_request_succeeded request_id=%s operation=%s status_code=%s content_type=%s response_bytes=%s upstream_request_id=%s elapsed_ms=%s",
+            _log_request_id(request_id),
+            operation,
+            response.status_code,
+            response.headers.get("content-type", "unknown"),
+            len(response.content),
+            _upstream_request_id(response),
+            _elapsed_ms(request_started),
+        )
         return data
 
     def _required_model(self) -> str:
@@ -499,6 +658,69 @@ def _chat_completions_url(base_url: str) -> str:
     if normalized.endswith("/chat/completions"):
         return normalized
     return f"{normalized}/chat/completions"
+
+
+def _safe_endpoint_summary(url: str) -> tuple[str, int, bool]:
+    """Return endpoint diagnostics without logging URL credentials or query values."""
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return "invalid", 0, False
+    if not hostname:
+        return "invalid", 0, bool(parsed.query)
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    endpoint_host = f"{parsed.scheme}://{hostname}"
+    if port is not None:
+        endpoint_host = f"{endpoint_host}:{port}"
+    path_depth = sum(bool(part) for part in parsed.path.split("/"))
+    return endpoint_host, path_depth, bool(parsed.query)
+
+
+def _upstream_request_id(response: httpx.Response) -> str:
+    for header_name in ("x-request-id", "openai-request-id", "request-id"):
+        value = response.headers.get(header_name, "").strip()
+        if value and len(value) <= 128 and all(
+            char.isascii() and (char.isalnum() or char in "._:-") for char in value
+        ):
+            return value
+    return "unavailable"
+
+
+def _upstream_error_labels(response: httpx.Response) -> tuple[str, str]:
+    try:
+        payload = response.json()
+    except (ValueError, httpx.DecodingError):
+        return "unavailable", "unavailable"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return "unavailable", "unavailable"
+    return _safe_log_label(error.get("type")), _safe_log_label(error.get("code"))
+
+
+def _safe_log_label(value: Any) -> str:
+    if not isinstance(value, str) or not value or len(value) > 80:
+        return "unavailable"
+    normalized = "".join(
+        char if char.isascii() and (char.isalnum() or char in "._:-") else "_"
+        for char in value
+    )
+    return normalized or "unavailable"
+
+
+def _log_request_id(request_id: str | None) -> str:
+    normalized = (request_id or "").strip()
+    if normalized and len(normalized) <= 64 and all(
+        char.isascii() and (char.isalnum() or char in "_-") for char in normalized
+    ):
+        return normalized
+    return "untracked"
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((time.monotonic() - started_at) * 1000))
 
 
 def _object_schema(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
