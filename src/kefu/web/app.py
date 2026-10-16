@@ -1561,6 +1561,7 @@ h2 { color: #23344f; }
 .debug-editor { min-height: 130px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: var(--ink); overflow-wrap: anywhere; }
 .debug-editor:focus { outline: 3px solid #dce8ff; border-color: #789af2; }
 .debug-editor:empty::before { content: attr(data-placeholder); color: #98a2b3; pointer-events: none; }
+.debug-editor img { display: block; max-width: 100%; max-height: 320px; margin: 8px 0; object-fit: contain; }
 .debug-file-input { margin: 0; }
 .debug-file-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
 .debug-file-list li { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; color: #41516a; font-size: 12px; overflow-wrap: anywhere; }
@@ -1894,11 +1895,15 @@ def _debug_input_controls() -> str:
             <button type="button" data-debug-format="underline" title="下划线"><u>U</u></button>
             <button type="button" data-debug-format="insertUnorderedList" title="项目符号列表">• 列表</button>
             <button type="button" data-debug-format="insertOrderedList" title="编号列表">1. 列表</button>
+            <button type="button" data-debug-insert-image="true">插入图片</button>
             <button type="button" data-debug-clear="true">清空</button>
           </div>
+          <input id="debug-richtext-images" type="file" accept="image/*" multiple hidden
+            data-debug-image-input="true" aria-label="选择要插入富文本框的图片">
           <div class="debug-editor" contenteditable="true" role="textbox" aria-multiline="true"
             aria-labelledby="debug-richtext-label" data-debug-editor="true"
             data-placeholder="输入或粘贴一些文字，试试上方格式按钮"></div>
+          <p class="debug-input-note">图片可粘贴、拖放或选择插入，仅供本地预览，不会上传。</p>
         </div>
         <div class="debug-input-group">
           <label class="debug-input-label" for="debug-files">文件选择框</label>
@@ -1914,15 +1919,113 @@ def _debug_input_controls() -> str:
     (() => {
       const editor = document.querySelector('[data-debug-editor="true"]');
       const toolbar = document.querySelector('.debug-toolbar');
+      const imageInput = document.querySelector('[data-debug-image-input="true"]');
       const filesInput = document.querySelector('[data-debug-files="true"]');
       const fileList = document.querySelector('[data-debug-file-list="true"]');
       if (editor && toolbar) {
+        let savedRange = null;
+        const rangeIsInEditor = (range) =>
+          editor.contains(range.startContainer) && editor.contains(range.endContainer);
+        const rememberSelection = () => {
+          const selection = window.getSelection();
+          if (!selection || !selection.rangeCount) return;
+          const range = selection.getRangeAt(0);
+          if (rangeIsInEditor(range)) savedRange = range.cloneRange();
+        };
+        const editorRange = () => {
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount) {
+            const range = selection.getRangeAt(0);
+            if (rangeIsInEditor(range)) return range.cloneRange();
+          }
+          return savedRange && rangeIsInEditor(savedRange) ? savedRange.cloneRange() : null;
+        };
+        const rangeAtPoint = (x, y) => {
+          if (document.caretPositionFromPoint) {
+            const position = document.caretPositionFromPoint(x, y);
+            if (position && editor.contains(position.offsetNode)) {
+              const range = document.createRange();
+              range.setStart(position.offsetNode, position.offset);
+              range.collapse(true);
+              return range;
+            }
+          }
+          const range = document.caretRangeFromPoint?.(x, y);
+          return range && rangeIsInEditor(range) ? range : null;
+        };
+        const insertImages = (files, preferredRange = null) => {
+          const images = files.filter((file) => file && file.type.startsWith("image/"));
+          if (!images.length) return;
+          let range = preferredRange || editorRange();
+          editor.focus();
+          if (!range) {
+            range = document.createRange();
+            range.selectNodeContents(editor);
+            range.collapse(false);
+          }
+          const selection = window.getSelection();
+          if (selection) {
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+          images.forEach((file) => {
+            const image = document.createElement("img");
+            image.src = URL.createObjectURL(file);
+            image.alt = file.name || "本地图片";
+            range.deleteContents();
+            range.insertNode(image);
+            range.setStartAfter(image);
+            range.collapse(true);
+          });
+          if (selection) {
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+          savedRange = range.cloneRange();
+        };
+
+        editor.addEventListener("keyup", rememberSelection);
+        editor.addEventListener("mouseup", rememberSelection);
+        editor.addEventListener("input", rememberSelection);
+        document.addEventListener("selectionchange", rememberSelection);
+        editor.addEventListener("paste", (event) => {
+          const items = Array.from(event.clipboardData?.items || []);
+          const images = items
+            .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+            .map((item) => item.getAsFile())
+            .filter(Boolean);
+          if (!images.length) return;
+          event.preventDefault();
+          insertImages(images);
+        });
+        editor.addEventListener("dragover", (event) => {
+          if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        });
+        editor.addEventListener("drop", (event) => {
+          const files = Array.from(event.dataTransfer?.files || []);
+          if (!files.length) return;
+          event.preventDefault();
+          insertImages(files, rangeAtPoint(event.clientX, event.clientY));
+        });
+        if (imageInput) {
+          imageInput.addEventListener("change", () => {
+            insertImages(Array.from(imageInput.files || []));
+            imageInput.value = "";
+          });
+        }
         toolbar.addEventListener("mousedown", (event) => {
           if (event.target.closest("button")) event.preventDefault();
         });
         toolbar.addEventListener("click", (event) => {
           const button = event.target.closest("button");
           if (!button) return;
+          if (button.hasAttribute("data-debug-insert-image")) {
+            rememberSelection();
+            if (imageInput) imageInput.click();
+            return;
+          }
           editor.focus();
           if (button.hasAttribute("data-debug-clear")) {
             editor.replaceChildren();
