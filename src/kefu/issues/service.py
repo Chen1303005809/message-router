@@ -246,7 +246,10 @@ class IssueManagement:
             raw_text = record.raw_text
         result = self._desk.execute(
             CreateCase(
-                title=_issue_title(fields.issue_description, raw_text),
+                title=(
+                    fields.issue_title.strip()
+                    or _issue_title(fields.issue_description, raw_text)
+                ),
                 consult_queue_id=consult_queue_id,
                 dev_team_id=fields.initial_acceptance_team_id,
                 initial_acceptance_team_id=fields.initial_acceptance_team_id,
@@ -352,6 +355,8 @@ class IssueManagement:
     ) -> None:
         if not fields.issue_description.strip():
             raise ValidationError("问题描述不能为空")
+        if len(fields.issue_title) > 512:
+            raise ValidationError("问题标题不能超过512个字符")
         if len(fields.issue_description) > 20_000:
             raise ValidationError("问题描述不能超过20000个字符")
         if fields.issue_current_status not in {status.value for status in IssueCurrentStatus}:
@@ -401,6 +406,7 @@ def _fields_to_json(
     initial_expires_at: datetime,
 ) -> dict[str, str]:
     return {
+        "issue_title": fields.issue_title,
         "issue_description": fields.issue_description,
         "initial_acceptance_team_id": (
             str(fields.initial_acceptance_team_id)
@@ -421,6 +427,11 @@ def _fields_to_json(
 def _fields_from_json(data: dict[str, str]) -> IssueFields:
     deadline = data.get("deadline")
     return IssueFields(
+        issue_title=(
+            data["issue_title"]
+            if "issue_title" in data
+            else _issue_title(data.get("issue_description", ""), "")
+        ),
         issue_description=data.get("issue_description", ""),
         initial_acceptance_team_id=(
             UUID(data["initial_acceptance_team_id"])

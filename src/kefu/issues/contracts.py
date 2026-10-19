@@ -37,6 +37,7 @@ class IssueFields:
     issue_current_status: str = "问题未回复"
     issue_source: str = "工作台"
     deadline: datetime | None = None
+    issue_title: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -186,7 +186,11 @@ def create_app(
             else path
         )
         if internal_path == "/events" or internal_path.startswith("/events/"):
-            new_path = "/issues" + internal_path[len("/events") :]
+            new_path = (
+                "/issues/new"
+                if internal_path == "/events" and request.method == "GET"
+                else "/issues" + internal_path[len("/events") :]
+            )
             if internal_path == "/events/new" and request.method == "POST":
                 status_code = 303
             else:
@@ -485,6 +489,7 @@ def create_app(
             )
             parts = map_image_placeholders(pasted_text, media_ids)
             fields = IssueFields(
+                issue_title=generated.get("issue_title", ""),
                 issue_description=generated.get("issue_description", ""),
                 initial_acceptance_team_id=selected_team.id if selected_team else None,
                 suspected_type=generated.get("suspected_type", ""),
@@ -564,6 +569,7 @@ def create_app(
             <h1>确认问题信息</h1><p class="muted">Agent 只生成草稿；确认后由程序创建问题和首条投递任务。</p></header>
           <section class="panel intake-source"><h2>收到的材料</h2><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</section>
           <form class="panel create-form" method="post" action="{external_path(f"/issues/drafts/{draft.id}/confirm")}">
+            <label>问题标题 <input name="issue_title" required maxlength="512" value="{escape(fields.issue_title)}" placeholder="Agent 生成的简短问题概括"></label>
             <label>问题描述 <textarea name="issue_description" required maxlength="20000" rows="6">{escape(fields.issue_description)}</textarea></label>
             <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
             <div class="form-row">
@@ -615,6 +621,7 @@ def create_app(
         form = await request.form()
         try:
             fields = IssueFields(
+                issue_title=_required_form_text(form, "issue_title"),
                 issue_description=_required_form_text(form, "issue_description"),
                 initial_acceptance_team_id=UUID(
                     _required_form_text(form, "initial_acceptance_team_id")

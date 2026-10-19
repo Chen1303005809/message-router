@@ -141,7 +141,11 @@ class Agent:
         module_list = "、".join(module.value for module in IssueModule)
         prompt = (
             "根据咨询人员粘贴的企微聊天文本，生成问题草稿。只返回 JSON 对象，键为 "
-            "issue_description、initial_acceptance_group、suspected_type、current_situation。"
+            "issue_title、issue_description、initial_acceptance_group、suspected_type、"
+            "current_situation。"
+            "issue_title 和 issue_description 是独立字段：issue_title 用简短内容概括核心问题，"
+            "建议不超过30个中文字符；issue_description 保留具体现象、时间、影响范围和复现步骤等"
+            "详细信息，不要把整段描述复制为标题。"
             "initial_acceptance_group 必须从给定团队名中原样选择；无法判断时返回空字符串。"
             f"suspected_type 必须从给定问题模块中选择；无法判断时返回空字符串：{module_list}。"
             "图片占位符 [图片] 仅作为文本线索，"
@@ -157,6 +161,7 @@ class Agent:
             operation="draft_issue",
         )
         allowed = {
+            "issue_title",
             "issue_description",
             "initial_acceptance_group",
             "suspected_type",
@@ -447,6 +452,7 @@ def build_tool_registry(
                 "consult_queue_id": {"type": "string", "format": "uuid"},
                 "initial_acceptance_team_id": {"type": "string", "format": "uuid"},
                 "raw_text": {"type": "string", "minLength": 1},
+                "issue_title": {"type": "string", "maxLength": 512},
                 "issue_description": {"type": "string"},
                 "suspected_type": {"type": "string"},
                 "current_situation": {"type": "string"},
@@ -455,6 +461,7 @@ def build_tool_registry(
                 "consult_queue_id",
                 "initial_acceptance_team_id",
                 "raw_text",
+                "issue_title",
                 "issue_description",
                 "suspected_type",
                 "current_situation",
@@ -661,6 +668,7 @@ def _create_issue_draft(args: Mapping[str, Any], actor: Actor, issues: IssueMana
             raw_text=raw_text,
             parts=map_image_placeholders(raw_text, ()),
             fields=IssueFields(
+                issue_title=_string(args, "issue_title"),
                 issue_description=_string(args, "issue_description"),
                 initial_acceptance_team_id=initial_team_id,
                 suspected_type=_string(args, "suspected_type")
