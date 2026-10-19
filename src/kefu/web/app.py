@@ -47,6 +47,7 @@ from kefu.case_desk.contracts import (
     ReopenCase,
     SetCaseApproachingWindow,
     SetCaseStatus,
+    SetIssueCurrentStatus,
     TextPart,
     TransferConsultant,
     TransferDevTeam,
@@ -87,6 +88,8 @@ from kefu.persistence.models import (
     DeliveryDestination,
     DeliveryStatus,
     EntrySide,
+    IssueCurrentStatus,
+    IssueModule,
     LifecycleStatus,
     MembershipRole,
     MessageIntent,
@@ -487,8 +490,6 @@ def create_app(
                 suspected_type=generated.get("suspected_type", ""),
                 current_situation=generated.get("current_situation", ""),
                 issue_current_status="问题未回复",
-                bug_number="",
-                feedback_event_point="",
                 issue_source="工作台",
                 deadline=datetime.now(ZoneInfo("Asia/Shanghai"))
                 + timedelta(hours=settings.issue_default_expiry_hours),
@@ -554,6 +555,8 @@ def create_app(
         )
         initial_deadline = _datetime_local_value(draft.initial_expires_at)
         fields = draft.fields
+        module_options = _issue_module_options(fields.suspected_type)
+        issue_status_options = _issue_status_options(fields.issue_current_status)
         body = f"""
         <main class="create-main intake-review-page">
           <a class="back-link" href="{external_path("/issues/new")}">← 重新上传材料</a>
@@ -564,8 +567,10 @@ def create_app(
             <label>问题描述 <textarea name="issue_description" required maxlength="20000" rows="6">{escape(fields.issue_description)}</textarea></label>
             <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
             <div class="form-row">
-              <label>怀疑类型 <input name="suspected_type" maxlength="128" value="{escape(fields.suspected_type)}"></label>
-              <label>问题状态 <input name="issue_current_status" required maxlength="128" value="{escape(fields.issue_current_status)}"></label>
+              <label>怀疑类型（问题所属模块）
+                <select name="suspected_type" required>{module_options}</select>
+              </label>
+              <label>问题状态 <select name="issue_current_status" required>{issue_status_options}</select></label>
             </div>
             <label>现状说明 <textarea name="current_situation" maxlength="20000" rows="4">{escape(fields.current_situation)}</textarea></label>
             <label>问题初次过期时间
@@ -573,10 +578,9 @@ def create_app(
             </label>
             <div class="form-row">
               <label>问题编号 <input value="{escape(draft.issue_number)}" readonly></label>
-              <label>Bug 编号 <input name="bug_number" maxlength="64" value="{escape(fields.bug_number)}"></label>
+              <label>BUG 编号 <input value="确认建单后自动生成" readonly></label>
             </div>
             <label>首次记录人 <input value="{escape(draft.first_recorder_name)}" readonly></label>
-            <label>反馈事件点 <textarea name="feedback_event_point" maxlength="20000" rows="3">{escape(fields.feedback_event_point)}</textarea></label>
             <label>问题来源 <input name="issue_source" maxlength="256" value="{escape(fields.issue_source)}"></label>
             <p class="muted">初次过期时间默认创建后 {settings.issue_default_expiry_hours} 小时；临期窗口为提前 {settings.issue_approaching_window_hours} 小时。</p>
             <button class="primary" type="submit">确认并推送给初次受理组</button>
@@ -618,8 +622,6 @@ def create_app(
                 suspected_type=_optional_form_text(form, "suspected_type") or "",
                 issue_current_status=_required_form_text(form, "issue_current_status"),
                 current_situation=_optional_form_text(form, "current_situation") or "",
-                bug_number=_optional_form_text(form, "bug_number") or "",
-                feedback_event_point=_optional_form_text(form, "feedback_event_point") or "",
                 issue_source=_optional_form_text(form, "issue_source") or "工作台",
                 deadline=_parse_local_deadline(_required_form_text(form, "deadline")),
             )
@@ -1057,16 +1059,22 @@ def create_app(
             f"（经办人：{escape(team.lead_display_name or team.name)}）</option>"
             for team in dev_teams
         )
+        issue_module_options = _issue_module_options("")
+        issue_status_options = _issue_status_options("问题未回复")
         body = f"""
         <main class="create-main">
           <a class="back-link" href="{external_path("/issues")}">← 返回问题中心</a>
           <header class="page-heading"><div class="eyebrow">H5 问题中心</div>
             <h1>创建新问题</h1><p class="muted">填写问题和客户信息，补充图片后直接交给研发跟进。</p></header>
-          <form class="panel create-form" method="post" action="{external_path("/issues/new")}" enctype="multipart/form-data">
+          <form class="panel create-form" method="post" action="{external_path("/legacy/events/new")}" enctype="multipart/form-data">
             <h2>问题信息</h2>
             <label>问题标题 <input name="title" required maxlength="512" placeholder="例如：订单提交后页面报错"></label>
             <label>咨询经办显示名 <input name="consult_handler_name" required maxlength="256" placeholder="可填写姓名或团队内使用的称呼"></label>
             <label>问题描述 <textarea name="description" required maxlength="20000" rows="6" placeholder="描述客户现象、发生时间、影响范围和复现步骤"></textarea></label>
+            <div class="form-row">
+              <label>怀疑类型（问题所属模块） <select name="suspected_type" required>{issue_module_options}</select></label>
+              <label>问题状态 <select name="issue_current_status" required>{issue_status_options}</select></label>
+            </div>
             {_image_upload_controls()}
             <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
             <div class="form-row">
@@ -1113,6 +1121,8 @@ def create_app(
             customer_contact_method = _optional_form_text(form, "customer_contact_method")
             consult_queue_id = UUID(_required_form_text(form, "consult_queue_id"))
             dev_team_id = UUID(_required_form_text(form, "dev_team_id"))
+            suspected_type = _required_form_text(form, "suspected_type")
+            issue_current_status = _required_form_text(form, "issue_current_status")
             priority = CasePriority(_optional_form_text(form, "priority") or "normal")
             deadline = _parse_local_deadline(_optional_form_text(form, "deadline"))
             if len(title) > 512:
@@ -1168,6 +1178,9 @@ def create_app(
                     customer_contact_method=customer_contact_method,
                     priority=priority,
                     deadline=deadline,
+                    issue_description=description,
+                    suspected_type=suspected_type,
+                    issue_current_status=issue_current_status,
                     parts=tuple(parts),
                 ),
                 actor,
@@ -1235,14 +1248,13 @@ def create_app(
             <div class="issue-fields-grid">
               <div class="issue-field issue-field-wide"><span>问题描述</span><p>{escape(case.issue_description or case.title)}</p></div>
               <div class="issue-field"><span>初次受理组</span><strong>{escape(case.initial_acceptance_team_name or case.current_dev_team_name)}</strong></div>
-              <div class="issue-field"><span>怀疑类型</span><strong>{escape(case.suspected_type or "未填写")}</strong></div>
+              <div class="issue-field"><span>怀疑类型（问题所属模块）</span><strong>{escape(case.suspected_type or "未填写")}</strong></div>
               <div class="issue-field"><span>现状说明</span><p>{escape(case.current_situation or "未填写")}</p></div>
-              <div class="issue-field"><span>问题状态</span><strong>{escape(case.issue_current_status)}</strong></div>
+              <div class="issue-field"><span>问题状态</span>{_issue_current_status_control(case, external_path)}</div>
               <div class="issue-field"><span>问题初次过期时间</span><strong>{_format_datetime(case.initial_expires_at or case.deadline)}</strong></div>
               <div class="issue-field"><span>问题编号</span><strong>{escape(case.issue_number)}</strong></div>
-              <div class="issue-field"><span>Bug 编号</span><strong>{escape(case.bug_number or "不适用")}</strong></div>
+              <div class="issue-field"><span>BUG 编号</span><strong>{escape(case.bug_number or "不适用")}</strong></div>
               <div class="issue-field"><span>首次记录人</span><strong>{escape(case.first_recorder_name)}</strong></div>
-              <div class="issue-field"><span>反馈事件点</span><p>{escape(case.feedback_event_point or "未填写")}</p></div>
               <div class="issue-field"><span>问题来源</span><strong>{escape(case.issue_source or "未填写")}</strong></div>
             </div>
           </section>
@@ -1323,6 +1335,27 @@ def create_app(
                     customer_contact_name=form.get("customer_contact_name"),
                     customer_contact_method=form.get("customer_contact_method"),
                     priority=CasePriority(_required(form, "priority")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
+
+    @app.post("/issues/{issue_number}/issue-current-status", include_in_schema=False)
+    async def update_issue_current_status(
+        request: Request, issue_number: str
+    ) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await _urlencoded_form(request)
+        try:
+            issue_management.execute(
+                SetIssueCurrentStatus(
+                    case_ref=issue_number,
+                    expected_version=int(_required(form, "version")),
+                    issue_current_status=_required(form, "issue_current_status"),
                 ),
                 actor,
             )
@@ -2750,6 +2783,43 @@ def _render_parts(
     return "".join(rendered)
 
 
+def _issue_module_options(selected: str) -> str:
+    values = tuple(module.value for module in IssueModule)
+    options = []
+    if selected not in values:
+        options.append('<option value="" selected disabled>请选择问题所属模块</option>')
+    for module in IssueModule:
+        is_selected = ' selected' if selected == module.value else ''
+        options.append(f'<option value="{escape(module.value)}"{is_selected}>{escape(module.value)}</option>')
+    return "".join(options)
+
+
+def _issue_status_options(selected: str) -> str:
+    values = tuple(status.value for status in IssueCurrentStatus)
+    options = []
+    if selected not in values:
+        label = f"历史状态：{selected}（请选择新状态）" if selected else "请选择问题状态"
+        options.append(f'<option value="" selected disabled>{escape(label)}</option>')
+    for status in IssueCurrentStatus:
+        is_selected = ' selected' if selected == status.value else ''
+        options.append(f'<option value="{escape(status.value)}"{is_selected}>{escape(status.value)}</option>')
+    return "".join(options)
+
+
+def _issue_current_status_control(case: Any, path_for: Callable[[str], str]) -> str:
+    if not case.can_edit_metadata:
+        return f"<strong>{escape(case.issue_current_status)}</strong>"
+    action = path_for(f"/issues/{escape(case.case_ref)}/issue-current-status")
+    options = _issue_status_options(case.issue_current_status)
+    return f"""
+    <form method="post" action="{action}" class="issue-status-editor">
+      <input type="hidden" name="version" value="{case.version}">
+      <select name="issue_current_status" required aria-label="选择问题状态">{options}</select>
+      <button type="submit">保存状态</button>
+    </form>
+    """
+
+
 def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
     if not case.can_edit_metadata:
         return ""
@@ -3091,7 +3161,6 @@ def _case_json(case: Any) -> dict[str, Any]:
         "bug_number": case.bug_number,
         "first_recorder_id": str(case.first_recorder_id),
         "first_recorder_name": case.first_recorder_name,
-        "feedback_event_point": case.feedback_event_point,
         "issue_source": case.issue_source,
         "initial_expires_at": (
             case.initial_expires_at.isoformat() if case.initial_expires_at else None

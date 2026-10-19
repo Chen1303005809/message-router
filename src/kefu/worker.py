@@ -9,6 +9,8 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from kefu.agent.service import Agent
+from kefu.agent.status_worker import IssueStatusUpdateWorker
 from kefu.case_desk.errors import CaseDeskError
 from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
@@ -89,6 +91,17 @@ async def _message_delivery_loop(worker: MessagePushWorker) -> None:
         sent = await worker.deliver_pending()
         if sent:
             logger.info("processed standalone messages sent=%s", sent)
+        await asyncio.sleep(1)
+
+
+async def _issue_status_update_loop(worker: IssueStatusUpdateWorker) -> None:
+    while True:
+        try:
+            completed = await worker.process_pending()
+            if completed:
+                logger.info("processed issue status evaluations completed=%s", completed)
+        except Exception:
+            logger.exception("issue_status_update_worker_failed")
         await asyncio.sleep(1)
 
 
@@ -478,25 +491,27 @@ async def run() -> None:
     )
     deferred_store.purge_expired()
     deferred_replies = deferred_store if settings.wecom_deferred_passive_reply_enabled else None
+    status_agent = Agent(settings)
+    status_update_worker = IssueStatusUpdateWorker(desk, status_agent)
     logger.info(
         "[GROUP-TRACE] bot_worker_starting transport=%s database_target_fp=%s",
         settings.wecom_transport,
         database_target_fingerprint(engine.url),
     )
     try:
-        await transport.start()
-    except TransportDisplacedError:
-        logger.critical(
-            "[GROUP-TRACE] bot_worker_stopped reason=connection_displaced "
-            "action=remove_duplicate_worker_then_restart"
-        )
-        await transport.close()
-        return
-    try:
+        try:
+            await transport.start()
+        except TransportDisplacedError:
+            logger.critical(
+                "[GROUP-TRACE] bot_worker_stopped reason=connection_displaced "
+                "action=remove_duplicate_worker_then_restart"
+            )
+            return
         try:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(_delivery_loop(worker))
                 tasks.create_task(_message_delivery_loop(message_worker))
+                tasks.create_task(_issue_status_update_loop(status_update_worker))
                 tasks.create_task(_inspection_loop(inspection, settings))
                 tasks.create_task(
                     _inbound_loop(
@@ -512,7 +527,10 @@ async def run() -> None:
                 "action=remove_duplicate_worker_then_restart"
             )
     finally:
-        await transport.close()
+        try:
+            await transport.close()
+        finally:
+            await status_agent.close()
 
 
 def main() -> None:

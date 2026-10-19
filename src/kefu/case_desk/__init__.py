@@ -13,6 +13,7 @@ from kefu.case_desk.contracts import (
     PostFormalMessage,
     SetCaseApproachingWindow,
     SetCaseStatus,
+    SetIssueCurrentStatus,
     TextPart,
 )
 from kefu.case_desk.service import CaseDesk
@@ -31,5 +32,6 @@ __all__ = [
     "PostFormalMessage",
     "SetCaseApproachingWindow",
     "SetCaseStatus",
+    "SetIssueCurrentStatus",
     "TextPart",
 ]

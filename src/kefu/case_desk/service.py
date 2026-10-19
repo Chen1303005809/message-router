@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy import case as sql_case
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from kefu.case_desk.contracts import (
     SYSTEM_ACTOR,
@@ -39,6 +39,7 @@ from kefu.case_desk.contracts import (
     ExtendCaseDeadline,
     GroupActor,
     ImagePart,
+    IssueStatusUpdateWork,
     MediaAccess,
     Page,
     PartView,
@@ -46,6 +47,7 @@ from kefu.case_desk.contracts import (
     ReopenCase,
     SetCaseApproachingWindow,
     SetCaseStatus,
+    SetIssueCurrentStatus,
     SystemActor,
     TeamOption,
     TextPart,
@@ -56,6 +58,7 @@ from kefu.case_desk.contracts import (
 )
 from kefu.case_desk.errors import Conflict, Forbidden, NotFound, RoutingUnavailable, ValidationError
 from kefu.case_desk.markers import new_case_ref, normalize_case_ref
+from kefu.case_desk.numbering import next_bug_number
 from kefu.persistence.models import (
     DEFAULT_APPROACHING_WINDOW_MINUTES,
     DEFAULT_CASE_DEADLINE_HOURS,
@@ -73,7 +76,11 @@ from kefu.persistence.models import (
     DeliveryItemStatus,
     DeliveryStatus,
     EntrySide,
+    IssueCurrentStatus,
     IssueIntakeDraft,
+    IssueModule,
+    IssueStatusUpdateJob,
+    IssueStatusUpdateState,
     LifecycleStatus,
     MessageIntent,
     PartKind,
@@ -91,6 +98,13 @@ DEFAULT_DELIVERY_LEASE = timedelta(seconds=60)
 DEFAULT_WEB_BASE_URL = "http://localhost:8000"
 DEFERRED_PASSIVE_PENDING_MODE = "deferred_passive_reply_pending"
 DEFERRED_PASSIVE_COMPLETED_MODE = "deferred_passive_reply"
+STATUS_UPDATE_RETRY_DELAYS = (
+    timedelta(seconds=5),
+    timedelta(seconds=30),
+    timedelta(minutes=2),
+    timedelta(minutes=5),
+)
+DEFAULT_STATUS_UPDATE_LEASE = timedelta(seconds=90)
 
 
 def utc_now() -> datetime:
@@ -193,6 +207,8 @@ class CaseDesk:
                 return self._post_formal_message(session, command, actor)
             if isinstance(command, UpdateCaseMetadata):
                 return self._update_case_metadata(session, command, actor)
+            if isinstance(command, SetIssueCurrentStatus):
+                return self._set_issue_current_status(session, command, actor)
             if isinstance(command, TransferConsultant):
                 return self._transfer_consultant(session, command, actor)
             if isinstance(command, TransferDevTeam):
@@ -473,6 +489,185 @@ class CaseDesk:
                 )
             return tuple(work)
 
+    def claim_pending_issue_status_updates(
+        self,
+        limit: int = 10,
+        *,
+        lease: timedelta = DEFAULT_STATUS_UPDATE_LEASE,
+    ) -> tuple[IssueStatusUpdateWork, ...]:
+        """Lease status evaluations in timeline order, one active job per issue."""
+        if limit < 1:
+            raise ValidationError("状态判定批次大小必须大于零")
+        now = utc_now()
+        earlier_job = aliased(IssueStatusUpdateJob)
+        has_earlier_job = (
+            select(earlier_job.id)
+            .where(
+                earlier_job.case_id == IssueStatusUpdateJob.case_id,
+                earlier_job.entry_sequence < IssueStatusUpdateJob.entry_sequence,
+                earlier_job.state.in_(
+                    (IssueStatusUpdateState.PENDING, IssueStatusUpdateState.PROCESSING)
+                ),
+            )
+            .exists()
+        )
+        with self._session_factory() as session, session.begin():
+            rows = session.execute(
+                select(IssueStatusUpdateJob, Case)
+                .join(Case, Case.id == IssueStatusUpdateJob.case_id)
+                .where(
+                    or_(
+                        and_(
+                            IssueStatusUpdateJob.state == IssueStatusUpdateState.PENDING,
+                            IssueStatusUpdateJob.next_attempt_at <= now,
+                            or_(
+                                IssueStatusUpdateJob.locked_until.is_(None),
+                                IssueStatusUpdateJob.locked_until < now,
+                            ),
+                        ),
+                        and_(
+                            IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
+                            or_(
+                                IssueStatusUpdateJob.locked_until.is_(None),
+                                IssueStatusUpdateJob.locked_until < now,
+                            ),
+                        ),
+                    ),
+                    ~has_earlier_job,
+                )
+                .order_by(
+                    IssueStatusUpdateJob.next_attempt_at.asc(),
+                    IssueStatusUpdateJob.created_at.asc(),
+                )
+                .limit(limit)
+                .with_for_update(of=IssueStatusUpdateJob, skip_locked=True)
+            ).all()
+            work: list[IssueStatusUpdateWork] = []
+            for job, case in rows:
+                token = uuid4()
+                job.state = IssueStatusUpdateState.PROCESSING
+                job.lock_token = token
+                job.locked_until = now + lease
+                entries = session.scalars(
+                    select(CaseEntry)
+                    .where(
+                        CaseEntry.case_id == case.id,
+                        CaseEntry.sequence <= job.entry_sequence,
+                    )
+                    .order_by(CaseEntry.sequence.asc())
+                ).all()
+                work.append(
+                    IssueStatusUpdateWork(
+                        id=job.id,
+                        lock_token=token,
+                        case_ref=case.case_ref,
+                        entry_sequence=job.entry_sequence,
+                        title=case.title,
+                        issue_description=case.issue_description,
+                        suspected_type=case.suspected_type,
+                        current_situation=case.issue_current_situation,
+                        current_status=case.issue_current_status,
+                        timeline=self._status_update_timeline(session, entries),
+                    )
+                )
+            return tuple(work)
+
+    def complete_issue_status_update(
+        self, job_id: UUID, lock_token: UUID, issue_current_status: str
+    ) -> bool:
+        if issue_current_status not in {status.value for status in IssueCurrentStatus}:
+            raise ValidationError("Agent 返回了无效的问题状态")
+        with self._session_factory() as session, session.begin():
+            case_id = session.scalar(
+                select(IssueStatusUpdateJob.case_id).where(
+                    IssueStatusUpdateJob.id == job_id,
+                    IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
+                    IssueStatusUpdateJob.lock_token == lock_token,
+                )
+            )
+            if case_id is None:
+                return False
+            case = session.scalar(select(Case).where(Case.id == case_id).with_for_update())
+            if case is None:
+                return False
+            job = session.scalar(
+                select(IssueStatusUpdateJob)
+                .where(
+                    IssueStatusUpdateJob.id == job_id,
+                    IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
+                    IssueStatusUpdateJob.lock_token == lock_token,
+                )
+                .with_for_update()
+            )
+            if job is None:
+                return False
+
+            newer_active_job = session.scalar(
+                select(IssueStatusUpdateJob.id)
+                .where(
+                    IssueStatusUpdateJob.case_id == case.id,
+                    IssueStatusUpdateJob.entry_sequence > job.entry_sequence,
+                    IssueStatusUpdateJob.state.in_(
+                        (IssueStatusUpdateState.PENDING, IssueStatusUpdateState.PROCESSING)
+                    ),
+                )
+                .limit(1)
+            )
+            job.state = IssueStatusUpdateState.COMPLETED
+            job.completed_at = utc_now()
+            job.lock_token = None
+            job.locked_until = None
+            job.last_error = None
+            if newer_active_job is not None or case.issue_current_status == issue_current_status:
+                return True
+
+            previous_status = case.issue_current_status
+            case.issue_current_status = issue_current_status
+            case.version += 1
+            self._append_entry(
+                session,
+                case=case,
+                kind=CaseEntryKind.CASE_METADATA_UPDATED,
+                side=EntrySide.SYSTEM,
+                actor_user=None,
+                actor_name="状态 Agent",
+                metadata={
+                    "action": "agent_issue_status_update",
+                    "changes": {
+                        "issue_current_status": {
+                            "from": previous_status,
+                            "to": issue_current_status,
+                        }
+                    },
+                },
+            )
+            return True
+
+    def fail_issue_status_update(self, job_id: UUID, lock_token: UUID, error: str) -> bool:
+        now = utc_now()
+        with self._session_factory() as session, session.begin():
+            job = session.scalar(
+                select(IssueStatusUpdateJob)
+                .where(
+                    IssueStatusUpdateJob.id == job_id,
+                    IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
+                    IssueStatusUpdateJob.lock_token == lock_token,
+                )
+                .with_for_update()
+            )
+            if job is None:
+                return False
+            job.attempts += 1
+            retry_after = STATUS_UPDATE_RETRY_DELAYS[
+                min(job.attempts - 1, len(STATUS_UPDATE_RETRY_DELAYS) - 1)
+            ]
+            job.state = IssueStatusUpdateState.PENDING
+            job.next_attempt_at = now + retry_after
+            job.lock_token = None
+            job.locked_until = None
+            job.last_error = error[:2000]
+            return True
+
     def complete_deferred_deliveries(self, delivery_ids: Sequence[UUID]) -> int:
         """Finalize group deliveries that were sent through a passive callback."""
         normalized_ids = tuple(dict.fromkeys(delivery_ids))
@@ -615,8 +810,8 @@ class CaseDesk:
         if reservation is not None and source_msgid != f"issue-intake:{reservation.id}":
             raise Conflict("问题编号已预留给另一个上传草稿")
         issue_status = (command.issue_current_status or "问题未回复").strip()
-        if not issue_status or len(issue_status) > 128:
-            raise ValidationError("问题状态不能为空且不能超过128个字符")
+        if issue_status not in {status.value for status in IssueCurrentStatus}:
+            raise ValidationError("问题状态无效，请从规定选项中选择")
         issue_description = _clean_optional_text(command.issue_description)
         if issue_description and len(issue_description) > 20_000:
             raise ValidationError("问题描述不能超过20000个字符")
@@ -624,18 +819,12 @@ class CaseDesk:
         if current_situation and len(current_situation) > 20_000:
             raise ValidationError("现状说明不能超过20000个字符")
         suspected_type = _clean_optional_text(command.suspected_type)
-        if suspected_type and len(suspected_type) > 128:
-            raise ValidationError("怀疑类型不能超过128个字符")
+        if suspected_type not in {module.value for module in IssueModule}:
+            raise ValidationError("请选择有效的问题模块")
         issue_source = _clean_optional_text(command.issue_source)
         if issue_source and len(issue_source) > 256:
             raise ValidationError("问题来源不能超过256个字符")
-        bug_number = _clean_optional_text(command.bug_number)
-        if (suspected_type or "").casefold() == "bug":
-            bug_number = bug_number or f"BUG-{issue_number}"
-        else:
-            bug_number = None
-        if bug_number and len(bug_number) > 64:
-            raise ValidationError("Bug编号不能超过64个字符")
+        bug_number = next_bug_number(session, created_at)
         approaching_window_minutes = (
             command.approaching_window_minutes
             if command.approaching_window_minutes is not None
@@ -669,7 +858,6 @@ class CaseDesk:
             issue_current_situation=current_situation,
             issue_current_status=issue_status,
             bug_number=bug_number,
-            feedback_event_point=_clean_optional_text(command.feedback_event_point),
             issue_source=issue_source,
             issue_metadata_json=dict(command.issue_metadata),
             initial_expires_at=deadline,
@@ -745,6 +933,54 @@ class CaseDesk:
             side=EntrySide.SYSTEM,
             actor_user=actor_user,
             metadata={"changes": changes},
+        )
+        return self._result(case, entry.id)
+
+    def _set_issue_current_status(
+        self, session: Session, command: SetIssueCurrentStatus, actor: Actor
+    ) -> CommandResult:
+        case = self._load_case(session, command.case_ref, lock=True)
+        self._assert_expected_version(case, command.expected_version)
+        self._directory.assert_consult_manager(session, actor.user_id, case)
+        if command.issue_current_status not in {status.value for status in IssueCurrentStatus}:
+            raise ValidationError("问题状态无效，请从规定选项中选择")
+        if case.issue_current_status == command.issue_current_status:
+            return self._result(case, None, idempotent=True)
+
+        actor_user = self._directory.get_user(session, actor.user_id)
+        previous_status = case.issue_current_status
+        case.issue_current_status = command.issue_current_status
+        case.version += 1
+        pending_jobs = session.scalars(
+            select(IssueStatusUpdateJob)
+            .where(
+                IssueStatusUpdateJob.case_id == case.id,
+                IssueStatusUpdateJob.state.in_(
+                    (IssueStatusUpdateState.PENDING, IssueStatusUpdateState.PROCESSING)
+                ),
+            )
+            .with_for_update()
+        ).all()
+        for job in pending_jobs:
+            job.state = IssueStatusUpdateState.CANCELLED
+            job.lock_token = None
+            job.locked_until = None
+            job.last_error = None
+        entry = self._append_entry(
+            session,
+            case=case,
+            kind=CaseEntryKind.CASE_METADATA_UPDATED,
+            side=EntrySide.SYSTEM,
+            actor_user=actor_user,
+            metadata={
+                "action": "set_issue_current_status",
+                "changes": {
+                    "issue_current_status": {
+                        "from": previous_status,
+                        "to": command.issue_current_status,
+                    }
+                },
+            },
         )
         return self._result(case, entry.id)
 
@@ -884,8 +1120,15 @@ class CaseDesk:
             metadata={"action": "post_formal_message"},
         )
         self._add_parts(session, entry, parts)
-        if side is EntrySide.DEV and case.issue_current_status == "问题未回复":
-            case.issue_current_status = "问题已回复"
+        session.add(
+            IssueStatusUpdateJob(
+                id=uuid4(),
+                case_id=case.id,
+                entry_id=entry.id,
+                entry_sequence=entry.sequence,
+                next_attempt_at=utc_now(),
+            )
+        )
         destination_type, destination_address = self._destination_for_side(session, case, side)
         wait_after = (
             self._opposite_waiting_side(side) if command.intent is MessageIntent.HANDOFF else None
@@ -1598,6 +1841,35 @@ class CaseDesk:
             .order_by(CaseEntryPart.position.asc())
         ).all()
 
+    def _status_update_timeline(
+        self, session: Session, entries: Sequence[CaseEntry]
+    ) -> str:
+        lines: list[str] = []
+        for entry in entries[-50:]:
+            text_parts: list[str] = []
+            has_image = False
+            for part in self._entry_parts(session, entry.id):
+                if part.kind is PartKind.TEXT and part.text:
+                    text_parts.append(part.text)
+                elif part.kind is PartKind.IMAGE:
+                    has_image = True
+            content = "\n".join(text_parts).strip()
+            if has_image:
+                content = f"{content}\n[含图片附件]".strip()
+            if not content:
+                changes = (entry.metadata_json or {}).get("changes")
+                content = f"事件 {entry.kind.value}"
+                if changes:
+                    content += f"：{changes}"
+            lines.append(
+                f"[{entry.sequence} | {entry.side.value} | "
+                f"{_as_utc(entry.created_at).isoformat()}] {content}"
+            )
+        timeline = "\n\n".join(lines)
+        if len(timeline) > 30_000:
+            timeline = "…（较早记录已省略）…\n" + timeline[-29_980:]
+        return timeline
+
     def _part_from_orm(self, part: CaseEntryPart) -> ContentPart:
         if part.kind is PartKind.TEXT:
             assert part.text is not None
@@ -1787,7 +2059,6 @@ class CaseDesk:
             first_recorder_id=case.creator_id,
             first_recorder_name=self._user_name(session, case.creator_id)
             or case.consult_handler_name,
-            feedback_event_point=case.feedback_event_point,
             issue_source=case.issue_source,
             initial_expires_at=(
                 _as_utc(case.initial_expires_at) if case.initial_expires_at else None

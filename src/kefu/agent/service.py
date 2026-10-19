@@ -17,6 +17,7 @@ from kefu.case_desk.contracts import (
     CaseFilter,
     CloseCase,
     ExtendCaseDeadline,
+    IssueStatusUpdateWork,
     MessageIntent,
     PostFormalMessage,
     ReopenCase,
@@ -38,7 +39,14 @@ from kefu.messages.recipients import (
     RecipientReference,
     RecipientResolver,
 )
-from kefu.persistence.models import CasePriority, CaseStatus, LifecycleStatus, WaitingOn
+from kefu.persistence.models import (
+    CasePriority,
+    CaseStatus,
+    IssueCurrentStatus,
+    IssueModule,
+    LifecycleStatus,
+    WaitingOn,
+)
 from kefu.tools import LoggedHttpClient
 
 logger = logging.getLogger(__name__)
@@ -130,11 +138,12 @@ class Agent:
         if not pasted_text.strip():
             raise ValidationError("请先粘贴需要整理的问题内容")
         group_list = "、".join(acceptance_groups) if acceptance_groups else "无可用团队"
+        module_list = "、".join(module.value for module in IssueModule)
         prompt = (
             "根据咨询人员粘贴的企微聊天文本，生成问题草稿。只返回 JSON 对象，键为 "
             "issue_description、initial_acceptance_group、suspected_type、current_situation。"
             "initial_acceptance_group 必须从给定团队名中原样选择；无法判断时返回空字符串。"
-            "suspected_type 无法判断时返回空字符串，不要发明枚举。"
+            f"suspected_type 必须从给定问题模块中选择；无法判断时返回空字符串：{module_list}。"
             "图片占位符 [图片] 仅作为文本线索，"
             "不要推断图片内容。不要生成编号、过期时间、来源或受理人。\n\n"
             f"可选初次受理组：{group_list}\n\n粘贴文本：\n{pasted_text}"
@@ -153,11 +162,61 @@ class Agent:
             "suspected_type",
             "current_situation",
         }
-        return {
-            key: value.strip()
-            for key, value in result.items()
-            if key in allowed and isinstance(value, str)
-        } | {key: "" for key in allowed if key not in result}
+        normalized = {
+            key: result[key].strip() if isinstance(result.get(key), str) else ""
+            for key in allowed
+        }
+        if normalized["suspected_type"] not in {module.value for module in IssueModule}:
+            normalized["suspected_type"] = ""
+        return normalized
+
+    async def classify_issue_status(
+        self,
+        work: IssueStatusUpdateWork,
+        *,
+        request_id: str | None = None,
+    ) -> str:
+        definitions = (
+            "问题未回复：研发还没有回复任何有价值的信息。\n"
+            "需求待受理：客户反馈的能力当前产品不支持，需要提交产品，再由研发确定二开方案。\n"
+            "已解决：问题已经解决。\n"
+            "升级需跟进：该 Bug 计划在下一次软件升级版本时修复。\n"
+            "数据待处理：问题排查需要的具体异常数据尚未提供。\n"
+            "当前无法解决：客户拒绝配合提供日志，导致问题无法解决。"
+        )
+        prompt = (
+            "根据问题信息和沟通时间线判断当前问题状态。只返回 JSON 对象，且只包含键 "
+            "issue_current_status；值必须精确等于六个选项之一。若新沟通没有改变状态，"
+            "继续选择当前状态，不要输出解释或其他字段。\n\n"
+            f"状态定义：\n{definitions}\n\n"
+            f"问题标题：{work.title}\n"
+            f"问题描述：{work.issue_description or '未填写'}\n"
+            f"问题模块：{work.suspected_type or '未填写'}\n"
+            f"现状说明：{work.current_situation or '未填写'}\n"
+            f"当前状态：{work.current_status}\n"
+            f"触发本次判定的沟通序号：{work.entry_sequence}\n"
+            f"沟通时间线：\n{work.timeline}"
+        )
+        result = await self._request_json(
+            [
+                {
+                    "role": "system",
+                    "content": "你负责根据事实更新问题状态。不得编造信息，只能选择规定状态。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            request_id=request_id,
+            operation="classify_issue_status",
+        )
+        status = result.get("issue_current_status")
+        allowed = {item.value for item in IssueCurrentStatus}
+        if (
+            set(result) != {"issue_current_status"}
+            or not isinstance(status, str)
+            or status.strip() not in allowed
+        ):
+            raise RuntimeError("Agent 返回了无效的问题状态")
+        return status.strip()
 
     async def chat(
         self,

@@ -40,7 +40,9 @@ from kefu.persistence.models import (
     Case,
     CaseEntryPart,
     CasePriority,
+    IssueCurrentStatus,
     IssueIntakeDraft,
+    IssueModule,
     PartKind,
     StoredMedia,
     TeamKind,
@@ -142,8 +144,6 @@ class IssueManagement:
             if normalized_number is None:
                 raise Conflict("无法生成未冲突的问题编号")
             fields = intake.fields
-            if (fields.suspected_type or "").strip().casefold() == "bug" and not fields.bug_number:
-                fields = replace(fields, bug_number=f"BUG-{normalized_number}")
             actor_user = self._directory.get_user(session, actor.user_id)
             fields_json = _fields_to_json(
                 fields,
@@ -215,7 +215,7 @@ class IssueManagement:
         return self._desk.get_media_access(issue_number, media_id, actor)
 
     def confirm_intake(self, draft_id: UUID, fields: IssueFields, actor: Actor) -> ConfirmedIssue:
-        self._validate_fields(fields, require_team=True)
+        self._validate_fields(fields, require_team=True, require_module=True)
         with self._session_factory() as session:
             record = self._owned_draft(session, draft_id, actor)
             if record.confirmed_issue_id is not None:
@@ -259,8 +259,6 @@ class IssueManagement:
                 suspected_type=fields.suspected_type.strip() or None,
                 issue_current_situation=fields.current_situation.strip() or None,
                 issue_current_status=fields.issue_current_status.strip() or "问题未回复",
-                bug_number=fields.bug_number.strip() or None,
-                feedback_event_point=fields.feedback_event_point.strip() or None,
                 issue_source=fields.issue_source.strip() or "工作台",
                 parts=parts,
                 source_msgid=f"issue-intake:{draft_id}",
@@ -345,19 +343,26 @@ class IssueManagement:
             raise NotFound("问题草稿已过期，请重新上传")
         return record
 
-    def _validate_fields(self, fields: IssueFields, *, require_team: bool = False) -> None:
+    def _validate_fields(
+        self,
+        fields: IssueFields,
+        *,
+        require_team: bool = False,
+        require_module: bool = False,
+    ) -> None:
         if not fields.issue_description.strip():
             raise ValidationError("问题描述不能为空")
         if len(fields.issue_description) > 20_000:
             raise ValidationError("问题描述不能超过20000个字符")
-        if not fields.issue_current_status.strip() or len(fields.issue_current_status) > 128:
-            raise ValidationError("问题状态不能为空且不能超过128个字符")
-        if len(fields.suspected_type) > 128:
-            raise ValidationError("怀疑类型不能超过128个字符")
+        if fields.issue_current_status not in {status.value for status in IssueCurrentStatus}:
+            raise ValidationError("请选择有效的问题状态")
+        suspected_type = fields.suspected_type.strip()
+        if suspected_type and suspected_type not in {module.value for module in IssueModule}:
+            raise ValidationError("请选择有效的问题模块")
+        if require_module and not suspected_type:
+            raise ValidationError("请选择问题模块")
         if len(fields.current_situation) > 20_000:
             raise ValidationError("现状说明不能超过20000个字符")
-        if len(fields.bug_number) > 64:
-            raise ValidationError("Bug编号不能超过64个字符")
         if len(fields.issue_source) > 256:
             raise ValidationError("问题来源不能超过256个字符")
         if require_team and fields.initial_acceptance_team_id is None:
@@ -405,8 +410,6 @@ def _fields_to_json(
         "suspected_type": fields.suspected_type,
         "current_situation": fields.current_situation,
         "issue_current_status": fields.issue_current_status,
-        "bug_number": fields.bug_number,
-        "feedback_event_point": fields.feedback_event_point,
         "issue_source": fields.issue_source,
         "deadline": fields.deadline.isoformat() if fields.deadline else "",
         "consult_queue_id": str(consult_queue_id),
@@ -427,8 +430,6 @@ def _fields_from_json(data: dict[str, str]) -> IssueFields:
         suspected_type=data.get("suspected_type", ""),
         current_situation=data.get("current_situation", ""),
         issue_current_status=data.get("issue_current_status", "问题未回复"),
-        bug_number=data.get("bug_number", ""),
-        feedback_event_point=data.get("feedback_event_point", ""),
         issue_source=data.get("issue_source", "工作台"),
         deadline=datetime.fromisoformat(deadline) if deadline else None,
     )

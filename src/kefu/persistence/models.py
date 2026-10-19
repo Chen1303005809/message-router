@@ -88,6 +88,32 @@ class CasePriority(StrEnum):
     SEVERE = "severe"
 
 
+class IssueCurrentStatus(StrEnum):
+    NO_REPLY = "问题未回复"
+    REQUEST_PENDING = "需求待受理"
+    RESOLVED = "已解决"
+    FOLLOW_UP_ON_UPGRADE = "升级需跟进"
+    DATA_PENDING = "数据待处理"
+    CURRENTLY_UNRESOLVABLE = "当前无法解决"
+
+
+class IssueModule(StrEnum):
+    INTRADAY = "盘中"
+    DAILY_USE = "日常使用"
+    TRADING = "交易"
+    RISK_CONTROL = "风控端"
+    SETTLEMENT = "结算"
+    PERFORMANCE = "绩效"
+    ACCOUNTING = "核算"
+
+
+class IssueStatusUpdateState(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
 class CaseEntryKind(StrEnum):
     FORMAL_MESSAGE = "formal_message"
     TRANSFER_CONSULTANT = "transfer_consultant"
@@ -217,7 +243,6 @@ class Case(Base):
     __tablename__ = "issues"
     __table_args__ = (
         UniqueConstraint("case_ref", name="uq_cases_case_ref"),
-        UniqueConstraint("bug_number", name="uq_issues_bug_number"),
         CheckConstraint("version >= 1", name="ck_cases_version_positive"),
         CheckConstraint("last_entry_sequence >= 0", name="ck_cases_sequence_nonnegative"),
         CheckConstraint(
@@ -289,7 +314,6 @@ class Case(Base):
         String(128), default="问题未回复", server_default="问题未回复"
     )
     bug_number: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    feedback_event_point: Mapped[str | None] = mapped_column(Text, nullable=True)
     issue_source: Mapped[str | None] = mapped_column(String(256), nullable=True)
     issue_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     initial_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -482,6 +506,47 @@ class IssueIntakeDraft(Base):
         Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class BugDailySequence(Base):
+    """Atomic sequence counter scoped to a Shanghai calendar date."""
+
+    __tablename__ = "bug_daily_sequences"
+
+    date_key: Mapped[str] = mapped_column(String(10), primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class IssueStatusUpdateJob(Base):
+    """Durable Agent classification request for a formal timeline message."""
+
+    __tablename__ = "issue_status_update_jobs"
+    __table_args__ = (
+        UniqueConstraint("entry_id", name="uq_issue_status_update_jobs_entry_id"),
+        Index("ix_issue_status_update_jobs_pending", "state", "next_attempt_at"),
+        Index("ix_issue_status_update_jobs_issue_sequence", "case_id", "entry_sequence"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    case_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("issues.id", ondelete="CASCADE"), index=True
+    )
+    entry_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("issue_entries.id", ondelete="CASCADE")
+    )
+    entry_sequence: Mapped[int] = mapped_column(Integer)
+    state: Mapped[IssueStatusUpdateState] = mapped_column(
+        enum_column(IssueStatusUpdateState, length=16),
+        default=IssueStatusUpdateState.PENDING,
+        server_default=IssueStatusUpdateState.PENDING.value,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    lock_token: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class IssueInspectionState(Base):

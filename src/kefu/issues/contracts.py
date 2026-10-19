@@ -21,6 +21,7 @@ from kefu.case_desk.contracts import (
     ReopenCase,
     SetCaseApproachingWindow,
     SetCaseStatus,
+    SetIssueCurrentStatus,
     TransferConsultant,
     TransferDevTeam,
     UpdateCaseMetadata,
@@ -34,8 +35,6 @@ class IssueFields:
     suspected_type: str = ""
     current_situation: str = ""
     issue_current_status: str = "问题未回复"
-    bug_number: str = ""
-    feedback_event_point: str = ""
     issue_source: str = "工作台"
     deadline: datetime | None = None
 
@@ -96,6 +95,7 @@ PostIssueMessage = PostFormalMessage
 ReopenIssue = ReopenCase
 SetIssueApproachingWindow = SetCaseApproachingWindow
 SetIssueStatus = SetCaseStatus
+SetIssueCurrentStatusCommand = SetIssueCurrentStatus
 TransferIssueConsultant = TransferConsultant
 TransferIssueDevTeam = TransferDevTeam
 UpdateIssueMetadata = UpdateCaseMetadata

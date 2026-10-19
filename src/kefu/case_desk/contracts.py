@@ -84,8 +84,6 @@ class CreateCase:
     suspected_type: str | None = None
     issue_current_situation: str | None = None
     issue_current_status: str = "问题未回复"
-    bug_number: str | None = None
-    feedback_event_point: str | None = None
     issue_source: str | None = None
     issue_metadata: Mapping[str, Any] = field(default_factory=dict)
     approaching_window_minutes: int | None = None
@@ -133,6 +131,13 @@ class UpdateCaseMetadata:
     customer_contact_name: str | None
     customer_contact_method: str | None
     priority: CasePriority
+
+
+@dataclass(frozen=True, slots=True)
+class SetIssueCurrentStatus:
+    case_ref: str
+    expected_version: int
+    issue_current_status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +208,7 @@ type Command = (
     | SetCaseApproachingWindow
     | PostFormalMessage
     | UpdateCaseMetadata
+    | SetIssueCurrentStatus
     | TransferConsultant
     | TransferDevTeam
     | CloseCase
@@ -289,7 +295,6 @@ class CaseView:
     bug_number: str | None
     first_recorder_id: UUID
     first_recorder_name: str
-    feedback_event_point: str | None
     issue_source: str | None
     initial_expires_at: datetime | None
     created_at: datetime
@@ -382,6 +387,20 @@ class DeliveryWork:
     case_ref: str
     entry_id: UUID
     items: tuple[DeliveryWorkItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IssueStatusUpdateWork:
+    id: UUID
+    lock_token: UUID
+    case_ref: str
+    entry_sequence: int
+    title: str
+    issue_description: str | None
+    suspected_type: str | None
+    current_situation: str | None
+    current_status: str
+    timeline: str
 
 
 @dataclass(frozen=True, slots=True)
