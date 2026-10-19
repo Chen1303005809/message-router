@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from kefu.case_desk.contracts import Actor
 from kefu.case_desk.errors import CaseDeskError, Forbidden
+from kefu.case_desk.markers import format_case_marker
+from kefu.case_desk.numbering import next_bug_number
 from kefu.config import Settings
 from kefu.messages.contracts import PushTarget
 from kefu.messages.receiver import MessageReceiver
@@ -26,6 +28,7 @@ from kefu.persistence.models import (
     User,
     utc_now,
 )
+from kefu.wecom.formatting import format_case_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,16 +63,22 @@ class IssueInspectionService:
                 user = session.get(User, actor.user_id)
                 if user is None or not user.active or not user.is_global_admin:
                     raise Forbidden("只有总管理员可以手动运行问题巡检")
-        with self._session_factory() as session:
+        with self._session_factory() as session, session.begin():
             issues = session.scalars(
                 select(Case)
                 .where(Case.lifecycle_status == LifecycleStatus.OPEN)
                 .order_by(Case.created_at.asc())
+                .with_for_update()
             ).all()
+            for issue in issues:
+                if not issue.bug_number:
+                    issue.bug_number = next_bug_number(session, _as_utc(issue.created_at))
+                assert issue.bug_number is not None
             snapshots = tuple(
                 (
                     issue.id,
                     issue.case_ref,
+                    issue.bug_number,
                     issue.title,
                     issue.issue_current_status,
                     issue.deadline,
@@ -86,6 +95,7 @@ class IssueInspectionService:
         for (
             issue_id,
             issue_number,
+            bug_number,
             title,
             status,
             deadline,
@@ -108,7 +118,12 @@ class IssueInspectionService:
                         message_id=f"periodic:{issue_id}:{next_periodic_due.isoformat()}",
                         target=target,
                         text=_reminder_text(
-                            issue_number, title, status, deadline, approaching=False
+                            issue_number,
+                            bug_number,
+                            title,
+                            status,
+                            deadline,
+                            approaching=False,
                         ),
                         idempotency_key=f"inspection:periodic:{issue_id}:{next_periodic_due.isoformat()}",
                     )
@@ -136,7 +151,12 @@ class IssueInspectionService:
                         continue
                     targets[(target.destination_type.value, target.address)] = target
                 message_text = _reminder_text(
-                    issue_number, title, status, deadline, approaching=True
+                    issue_number,
+                    bug_number,
+                    title,
+                    status,
+                    deadline,
+                    approaching=True,
                 )
                 for target in targets.values():
                     key = (
@@ -198,6 +218,7 @@ def _as_utc(value: datetime) -> datetime:
 
 def _reminder_text(
     issue_number: str,
+    bug_number: str,
     title: str,
     status: str,
     deadline: datetime,
@@ -205,10 +226,19 @@ def _reminder_text(
     approaching: bool,
 ) -> str:
     kind = "问题临期提醒" if approaching else "问题巡检提醒"
-    return (
-        f"**{kind}**\n"
-        f"问题编号：〔KF·{issue_number}〕\n"
-        f"问题描述：{title}\n"
-        f"当前状态：{status}\n"
-        f"初次过期时间：{_as_utc(deadline).astimezone(UTC).strftime('%Y-%m-%d %H:%M UTC')}"
+    body = (
+        "问题即将到达初次过期时间，请及时跟进。"
+        if approaching
+        else "已到问题巡检时间，请关注并继续跟进。"
+    )
+    return format_case_message(
+        case_title=title,
+        body=body,
+        details_after=(
+            f"消息类型：{kind}",
+            f"BUG 编号：{bug_number}",
+            f"当前状态：{status}",
+            f"初次过期时间：{_as_utc(deadline).astimezone(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
+            f"机器人引用编号：{format_case_marker(issue_number)}",
+        ),
     )

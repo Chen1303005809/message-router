@@ -1643,6 +1643,7 @@ class CaseDesk:
         try:
             rendered = build_formal_bundle(
                 case_ref=case.case_ref,
+                bug_number=self._ensure_bug_number(session, case),
                 case_title=case.title,
                 speaker_name=_original_speaker_name(entry),
                 assignee_name=(case.consult_handler_name if entry.side is EntrySide.DEV else None),
@@ -1682,12 +1683,20 @@ class CaseDesk:
             waiting_on_after_delivery=None,
             rendered_items=build_notice_bundle(
                 case_ref=case.case_ref,
+                bug_number=self._ensure_bug_number(session, case),
                 case_title=case.title,
                 operator_name=entry.actor_name_snapshot,
                 content=content,
                 history_url=f"{self._web_base_url}/events/{case.case_ref}",
             ),
         )
+
+    def _ensure_bug_number(self, session: Session, case: Case) -> str:
+        """Assign a number to legacy cases before rendering a human-facing message."""
+        if not case.bug_number:
+            case.bug_number = next_bug_number(session, _as_utc(case.created_at))
+        assert case.bug_number is not None
+        return case.bug_number
 
     def _create_delivery(
         self,

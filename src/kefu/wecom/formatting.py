@@ -30,6 +30,7 @@ class RenderedDeliveryItem:
 def build_formal_bundle(
     *,
     case_ref: str,
+    bug_number: str,
     case_title: str,
     speaker_name: str,
     assignee_name: str | None = None,
@@ -52,16 +53,20 @@ def build_formal_bundle(
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
     speaker_label = "转发人" if side is EntrySide.CONSULT else "发送人"
-    routing_details = ""
+    routing_detail = None
     if side is EntrySide.CONSULT and dev_team_name:
-        routing_details = f"> 研发处理团队：{dev_team_name}\n\n"
+        routing_detail = f"研发处理团队：{dev_team_name}"
     elif side is EntrySide.DEV and assignee_name:
-        routing_details = f"> 指定经办人：{assignee_name}\n\n"
-    content = (
-        f"## {case_title}\n\n"
-        f"{routing_details}"
-        f"**{message_text}**\n\n\n"
-        f"> {speaker_label}：{speaker_name}  问题编号：{marker}"
+        routing_detail = f"指定经办人：{assignee_name}"
+    content = format_case_message(
+        case_title=case_title,
+        body=message_text,
+        details_before=(routing_detail,) if routing_detail else (),
+        details_after=(
+            f"{speaker_label}：{speaker_name}",
+            f"BUG 编号：{bug_number}",
+            f"机器人引用编号：{marker}",
+        ),
     )
     rendered: list[RenderedDeliveryItem] = [
         RenderedDeliveryItem(
@@ -87,9 +92,29 @@ def _strip_at_mentions(text: str) -> str:
     return _AT_MENTION_RE.sub("", without_markup_mentions)
 
 
+def format_case_message(
+    *,
+    case_title: str,
+    body: str,
+    details_before: Iterable[str] = (),
+    details_after: Iterable[str] = (),
+) -> str:
+    """Render a case message with the same title, body, and metadata hierarchy."""
+    sections = [f"## {case_title}"]
+    leading_details = tuple(details_before)
+    if leading_details:
+        sections.append("\n".join(f"> {detail}" for detail in leading_details))
+    sections.append(f"**{body}**")
+    trailing_details = tuple(details_after)
+    if trailing_details:
+        sections.append("\n".join(f"> {detail}" for detail in trailing_details))
+    return "\n\n".join(sections)
+
+
 def build_notice_bundle(
     *,
     case_ref: str,
+    bug_number: str,
     case_title: str,
     operator_name: str,
     content: str,
@@ -102,17 +127,27 @@ def build_notice_bundle(
             kind=PartKind.TEXT,
             payload={
                 "content": (
-                    f"问题标题：{case_title}\n操作人：{operator_name}\n\n"
-                    f"{content}\n\n{marker}"
+                    format_case_message(
+                        case_title=case_title,
+                        body=content,
+                        details_after=(
+                            f"BUG 编号：{bug_number}",
+                            f"操作人：{operator_name}",
+                            f"机器人引用编号：{marker}",
+                        ),
+                    )
                 )
             },
         ),
-        _history_card(case_ref, case_title, operator_name, "操作人", history_url),
+        _history_card(
+            case_ref, bug_number, case_title, operator_name, "操作人", history_url
+        ),
     )
 
 
 def _history_card(
     case_ref: str,
+    bug_number: str,
     case_title: str,
     actor_name: str,
     actor_label: str,
@@ -129,7 +164,9 @@ def _history_card(
                     "title": case_title[:26],
                     "desc": f"{actor_label}：{actor_name}"[:30],
                 },
-                "sub_title_text": f"{marker} · 点击查看完整问题时间线",
+                "sub_title_text": (
+                    f"BUG 编号：{bug_number} · {marker} · 点击查看完整问题时间线"
+                ),
                 "jump_list": [action],
                 "card_action": {"type": 1, "url": history_url},
                 "task_id": f"kefu_history_{uuid4().hex}",
