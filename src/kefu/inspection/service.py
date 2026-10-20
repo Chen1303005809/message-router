@@ -23,6 +23,7 @@ from kefu.messages.recipients import (
 )
 from kefu.persistence.models import (
     Case,
+    IssueCurrentStatus,
     IssueInspectionState,
     LifecycleStatus,
     User,
@@ -104,13 +105,17 @@ class IssueInspectionService:
             consult_queue_id,
             created_at,
         ) in snapshots:
+            resolved = status == IssueCurrentStatus.RESOLVED.value
             state = self._state(issue_id)
             next_periodic_due = _as_utc(state.last_periodic_sent_at or created_at) + interval
             if next_periodic_due <= current:
+                periodic_recipient = (
+                    RecipientReference(RecipientKind.CONSULT_QUEUE, consult_queue_id)
+                    if resolved
+                    else RecipientReference(RecipientKind.TEAM, acceptance_team_id)
+                )
                 try:
-                    target = self._recipients.resolve(
-                        RecipientReference(RecipientKind.TEAM, acceptance_team_id)
-                    )
+                    target = self._recipients.resolve(periodic_recipient)
                 except CaseDeskError:
                     unresolved += 1
                 else:
@@ -137,8 +142,12 @@ class IssueInspectionService:
             )
             if entering_soon_window and state.approaching_notified_at is None:
                 references = (
-                    RecipientReference(RecipientKind.TEAM, acceptance_team_id),
-                    RecipientReference(RecipientKind.CONSULT_QUEUE, consult_queue_id),
+                    (RecipientReference(RecipientKind.CONSULT_QUEUE, consult_queue_id),)
+                    if resolved
+                    else (
+                        RecipientReference(RecipientKind.TEAM, acceptance_team_id),
+                        RecipientReference(RecipientKind.CONSULT_QUEUE, consult_queue_id),
+                    )
                 )
                 targets: dict[tuple[str, str], PushTarget] = {}
                 missing = False
