@@ -38,6 +38,9 @@ class IssueFields:
     issue_source: str = "工作台"
     deadline: datetime | None = None
     issue_title: str = ""
+    customer_name: str = ""
+    customer_contact_name: str = ""
+    customer_contact_method: str = ""
 
 
 @dataclass(frozen=True, slots=True)

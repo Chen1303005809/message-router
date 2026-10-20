@@ -142,10 +142,13 @@ class Agent:
         prompt = (
             "根据咨询人员粘贴的企微聊天文本，生成问题草稿。只返回 JSON 对象，键为 "
             "issue_title、issue_description、initial_acceptance_group、suspected_type、"
-            "current_situation。"
+            "current_situation、customer_name、customer_contact_name、customer_contact_method。"
             "issue_title 和 issue_description 是独立字段：issue_title 用简短内容概括核心问题，"
             "建议不超过30个中文字符；issue_description 保留具体现象、时间、影响范围和复现步骤等"
             "详细信息，不要把整段描述复制为标题。"
+            "customer_name 填写聊天中明确提及的客户或企业名称，不得根据联系人、域名或上下文猜测；"
+            "未明确提及时返回空字符串。customer_contact_name 和 customer_contact_method 只填写"
+            "聊天中明确提及的联系人姓名和联系方式；未提及时返回空字符串。"
             "initial_acceptance_group 必须从给定团队名中原样选择；无法判断时返回空字符串。"
             f"suspected_type 必须从给定问题模块中选择；无法判断时返回空字符串：{module_list}。"
             "图片占位符 [图片] 仅作为文本线索，"
@@ -166,6 +169,9 @@ class Agent:
             "initial_acceptance_group",
             "suspected_type",
             "current_situation",
+            "customer_name",
+            "customer_contact_name",
+            "customer_contact_method",
         }
         normalized = {
             key: result[key].strip() if isinstance(result.get(key), str) else ""
@@ -446,7 +452,8 @@ def build_tool_registry(
     )
     registry.register(
         "issue.create_intake_draft",
-        "基于已整理的文字创建问题草稿；问题确认和首次推送必须由咨询人员在工作台完成。",
+        "基于已整理的文字创建问题草稿，提取明确出现的客户信息且不要猜测；"
+        "问题确认和首次推送必须由咨询人员在工作台完成。",
         _object_schema(
             {
                 "consult_queue_id": {"type": "string", "format": "uuid"},
@@ -456,6 +463,9 @@ def build_tool_registry(
                 "issue_description": {"type": "string"},
                 "suspected_type": {"type": "string"},
                 "current_situation": {"type": "string"},
+                "customer_name": {"type": "string", "maxLength": 256},
+                "customer_contact_name": {"type": "string", "maxLength": 256},
+                "customer_contact_method": {"type": "string", "maxLength": 256},
             },
             [
                 "consult_queue_id",
@@ -465,6 +475,7 @@ def build_tool_registry(
                 "issue_description",
                 "suspected_type",
                 "current_situation",
+                "customer_name",
             ],
         ),
         lambda args, actor: _create_issue_draft(args, actor, issues),
@@ -677,6 +688,19 @@ def _create_issue_draft(args: Mapping[str, Any], actor: Actor, issues: IssueMana
                 current_situation=_string(args, "current_situation")
                 if args.get("current_situation")
                 else "",
+                customer_name=(
+                    _string(args, "customer_name") if args.get("customer_name") else ""
+                ),
+                customer_contact_name=(
+                    _string(args, "customer_contact_name")
+                    if args.get("customer_contact_name")
+                    else ""
+                ),
+                customer_contact_method=(
+                    _string(args, "customer_contact_method")
+                    if args.get("customer_contact_method")
+                    else ""
+                ),
             ),
         ),
         actor,

@@ -380,7 +380,7 @@ def create_app(
         <main class="create-main intake-page">
           <header class="page-heading"><div class="eyebrow">问题工作台 · 新建问题</div>
             <h1>上传咨询材料</h1>
-            <p class="muted">粘贴企微聊天内容并添加图片。Agent 会整理文字草稿，图片只作为附件保存。</p>
+            <p class="muted">粘贴企微聊天内容并添加图片。Agent 会整理问题草稿并提取客户信息，图片只作为附件保存。</p>
           </header>
           <form class="panel create-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
             <label>咨询队列
@@ -498,6 +498,9 @@ def create_app(
                 issue_source="工作台",
                 deadline=datetime.now(ZoneInfo("Asia/Shanghai"))
                 + timedelta(hours=settings.issue_default_expiry_hours),
+                customer_name=generated.get("customer_name", ""),
+                customer_contact_name=generated.get("customer_contact_name", ""),
+                customer_contact_method=generated.get("customer_contact_method", ""),
             )
             draft = issue_management.create_intake_draft(
                 IssueIntake(
@@ -566,11 +569,19 @@ def create_app(
         <main class="create-main intake-review-page">
           <a class="back-link" href="{external_path("/issues/new")}">← 重新上传材料</a>
           <header class="page-heading"><div class="eyebrow">Agent 草稿 · 请检查后确认</div>
-            <h1>确认问题信息</h1><p class="muted">Agent 只生成草稿；确认后由程序创建问题和首条投递任务。</p></header>
+            <h1>确认问题信息</h1><p class="muted">Agent 生成问题和客户信息草稿；请核对客户名称，确认后由程序创建问题和首条投递任务。</p></header>
           <section class="panel intake-source"><h2>收到的材料</h2><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</section>
           <form class="panel create-form" method="post" action="{external_path(f"/issues/drafts/{draft.id}/confirm")}">
             <label>问题标题 <input name="issue_title" required maxlength="512" value="{escape(fields.issue_title)}" placeholder="Agent 生成的简短问题概括"></label>
             <label>问题描述 <textarea name="issue_description" required maxlength="20000" rows="6">{escape(fields.issue_description)}</textarea></label>
+            <section class="intake-customer-info">
+              <h2>客户信息</h2>
+              <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="Agent 根据聊天内容识别；无法确认时请补充"></label>
+              <div class="form-row">
+                <label>联系人（选填） <input name="customer_contact_name" maxlength="256" value="{escape(fields.customer_contact_name)}"></label>
+                <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" value="{escape(fields.customer_contact_method)}" placeholder="电话、邮箱或其他联系方法"></label>
+              </div>
+            </section>
             <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
             <div class="form-row">
               <label>怀疑类型（问题所属模块）
@@ -623,6 +634,9 @@ def create_app(
             fields = IssueFields(
                 issue_title=_required_form_text(form, "issue_title"),
                 issue_description=_required_form_text(form, "issue_description"),
+                customer_name=_required_form_text(form, "customer_name"),
+                customer_contact_name=_optional_form_text(form, "customer_contact_name") or "",
+                customer_contact_method=_optional_form_text(form, "customer_contact_method") or "",
                 initial_acceptance_team_id=UUID(
                     _required_form_text(form, "initial_acceptance_team_id")
                 ),

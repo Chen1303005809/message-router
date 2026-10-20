@@ -263,6 +263,9 @@ class IssueManagement:
                 issue_current_situation=fields.current_situation.strip() or None,
                 issue_current_status=fields.issue_current_status.strip() or "问题未回复",
                 issue_source=fields.issue_source.strip() or "工作台",
+                customer_name=fields.customer_name.strip() or None,
+                customer_contact_name=fields.customer_contact_name.strip() or None,
+                customer_contact_method=fields.customer_contact_method.strip() or None,
                 parts=parts,
                 source_msgid=f"issue-intake:{draft_id}",
             ),
@@ -370,6 +373,12 @@ class IssueManagement:
             raise ValidationError("现状说明不能超过20000个字符")
         if len(fields.issue_source) > 256:
             raise ValidationError("问题来源不能超过256个字符")
+        if len(fields.customer_name) > 256:
+            raise ValidationError("客户 / 企业名称不能超过256个字符")
+        if len(fields.customer_contact_name) > 256:
+            raise ValidationError("联系人不能超过256个字符")
+        if len(fields.customer_contact_method) > 256:
+            raise ValidationError("联系方式不能超过256个字符")
         if require_team and fields.initial_acceptance_team_id is None:
             raise ValidationError("请选择初次受理组")
 
@@ -418,6 +427,9 @@ def _fields_to_json(
         "issue_current_status": fields.issue_current_status,
         "issue_source": fields.issue_source,
         "deadline": fields.deadline.isoformat() if fields.deadline else "",
+        "customer_name": fields.customer_name,
+        "customer_contact_name": fields.customer_contact_name,
+        "customer_contact_method": fields.customer_contact_method,
         "consult_queue_id": str(consult_queue_id),
         "first_recorder_id": str(first_recorder_id),
         "initial_expires_at": initial_expires_at.isoformat(),
@@ -443,6 +455,9 @@ def _fields_from_json(data: dict[str, str]) -> IssueFields:
         issue_current_status=data.get("issue_current_status", "问题未回复"),
         issue_source=data.get("issue_source", "工作台"),
         deadline=datetime.fromisoformat(deadline) if deadline else None,
+        customer_name=data.get("customer_name", ""),
+        customer_contact_name=data.get("customer_contact_name", ""),
+        customer_contact_method=data.get("customer_contact_method", ""),
     )
 
 
