@@ -39,11 +39,14 @@ from kefu.case_desk.contracts import (
     ExtendCaseDeadline,
     GroupActor,
     ImagePart,
+    IssueStatusQueueItem,
+    IssueStatusUpdateClaim,
     IssueStatusUpdateWork,
     MediaAccess,
     Page,
     PartView,
     PostFormalMessage,
+    RecentIssueStatusChange,
     ReopenCase,
     SetCaseApproachingWindow,
     SetCaseStatus,
@@ -495,7 +498,7 @@ class CaseDesk:
         *,
         lease: timedelta = DEFAULT_STATUS_UPDATE_LEASE,
     ) -> tuple[IssueStatusUpdateWork, ...]:
-        """Lease status evaluations in timeline order, one active job per issue."""
+        """Lease all currently queued status evaluations for each selected issue."""
         if limit < 1:
             raise ValidationError("状态判定批次大小必须大于零")
         now = utc_now()
@@ -543,83 +546,250 @@ class CaseDesk:
                 .with_for_update(of=IssueStatusUpdateJob, skip_locked=True)
             ).all()
             work: list[IssueStatusUpdateWork] = []
+            claimed_case_ids: set[UUID] = set()
             for job, case in rows:
-                token = uuid4()
-                job.state = IssueStatusUpdateState.PROCESSING
-                job.lock_token = token
-                job.locked_until = now + lease
+                if case.id in claimed_case_ids:
+                    continue
+                claimed_case_ids.add(case.id)
+                active_lease = session.scalar(
+                    select(IssueStatusUpdateJob.id)
+                    .where(
+                        IssueStatusUpdateJob.case_id == case.id,
+                        IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
+                        IssueStatusUpdateJob.locked_until >= now,
+                    )
+                    .limit(1)
+                )
+                if active_lease is not None:
+                    continue
+                active_jobs = session.scalars(
+                    select(IssueStatusUpdateJob)
+                    .where(
+                        IssueStatusUpdateJob.case_id == case.id,
+                        IssueStatusUpdateJob.entry_sequence <= case.last_entry_sequence,
+                        IssueStatusUpdateJob.state.in_(
+                            (IssueStatusUpdateState.PENDING, IssueStatusUpdateState.PROCESSING)
+                        ),
+                    )
+                    .order_by(
+                        IssueStatusUpdateJob.entry_sequence.asc(),
+                        IssueStatusUpdateJob.created_at.asc(),
+                    )
+                    .with_for_update()
+                ).all()
+                if not active_jobs:
+                    continue
+                claims: list[IssueStatusUpdateClaim] = []
+                for active_job in active_jobs:
+                    token = uuid4()
+                    active_job.state = IssueStatusUpdateState.PROCESSING
+                    active_job.lock_token = token
+                    active_job.locked_until = now + lease
+                    claims.append(
+                        IssueStatusUpdateClaim(
+                            id=active_job.id,
+                            lock_token=token,
+                            entry_sequence=active_job.entry_sequence,
+                        )
+                    )
                 entries = session.scalars(
                     select(CaseEntry)
                     .where(
                         CaseEntry.case_id == case.id,
-                        CaseEntry.sequence <= job.entry_sequence,
+                        CaseEntry.sequence <= case.last_entry_sequence,
                     )
                     .order_by(CaseEntry.sequence.asc())
                 ).all()
                 work.append(
                     IssueStatusUpdateWork(
-                        id=job.id,
-                        lock_token=token,
+                        case_id=case.id,
+                        id=claims[0].id,
+                        claims=tuple(claims),
                         case_ref=case.case_ref,
-                        entry_sequence=job.entry_sequence,
+                        entry_sequence=max(claim.entry_sequence for claim in claims),
+                        trigger_sequences=tuple(claim.entry_sequence for claim in claims),
                         title=case.title,
                         issue_description=case.issue_description,
                         suspected_type=case.suspected_type,
                         current_situation=case.issue_current_situation,
                         current_status=case.issue_current_status,
+                        workflow_status=case.status,
+                        waiting_on=case.waiting_on,
                         timeline=self._status_update_timeline(session, entries),
                     )
                 )
             return tuple(work)
 
+    def list_issue_status_queue(self, limit: int = 100) -> tuple[IssueStatusQueueItem, ...]:
+        """Return active status-evaluation jobs across all issues for the queue page."""
+        page_size = max(1, min(limit, 200))
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(IssueStatusUpdateJob, Case)
+                .join(Case, Case.id == IssueStatusUpdateJob.case_id)
+                .where(
+                    IssueStatusUpdateJob.state.in_(
+                        (IssueStatusUpdateState.PENDING, IssueStatusUpdateState.PROCESSING)
+                    )
+                )
+                .order_by(
+                    IssueStatusUpdateJob.created_at.asc(),
+                    IssueStatusUpdateJob.entry_sequence.asc(),
+                )
+                .limit(page_size)
+            ).all()
+            return tuple(
+                IssueStatusQueueItem(
+                    id=job.id,
+                    case_ref=case.case_ref,
+                    title=case.title,
+                    entry_sequence=job.entry_sequence,
+                    state=job.state.value,
+                    attempts=job.attempts,
+                    created_at=job.created_at,
+                    next_attempt_at=job.next_attempt_at,
+                    last_error=job.last_error,
+                )
+                for job, case in rows
+            )
+
+    def list_recent_issue_status_changes(
+        self, limit: int = 50
+    ) -> tuple[RecentIssueStatusChange, ...]:
+        """Return recent workflow and issue-conclusion status transitions."""
+        page_size = max(1, min(limit, 100))
+        batch_size = max(page_size * 4, 200)
+        with self._session_factory() as session:
+            results: list[RecentIssueStatusChange] = []
+            cursor_created_at: datetime | None = None
+            cursor_entry_id: UUID | None = None
+            while len(results) < page_size:
+                statement = (
+                    select(CaseEntry, Case)
+                    .join(Case, Case.id == CaseEntry.case_id)
+                    .where(
+                        CaseEntry.kind.in_(
+                            (CaseEntryKind.STATUS_CHANGED, CaseEntryKind.CASE_METADATA_UPDATED)
+                        )
+                    )
+                    .order_by(CaseEntry.created_at.desc(), CaseEntry.id.desc())
+                )
+                if cursor_created_at is not None and cursor_entry_id is not None:
+                    statement = statement.where(
+                        or_(
+                            CaseEntry.created_at < cursor_created_at,
+                            and_(
+                                CaseEntry.created_at == cursor_created_at,
+                                CaseEntry.id < cursor_entry_id,
+                            ),
+                        )
+                    )
+                rows = session.execute(statement.limit(batch_size)).all()
+                if not rows:
+                    break
+                for entry, case in rows:
+                    metadata = entry.metadata_json or {}
+                    if entry.kind is CaseEntryKind.STATUS_CHANGED:
+                        from_status = metadata.get("from_status")
+                        to_status = metadata.get("to_status")
+                        if not isinstance(from_status, str) or not isinstance(to_status, str):
+                            continue
+                        results.append(
+                            RecentIssueStatusChange(
+                                case_ref=case.case_ref,
+                                title=case.title,
+                                field_label="协作流程状态",
+                                from_status=from_status,
+                                to_status=to_status,
+                                actor_name=entry.actor_name_snapshot,
+                                created_at=entry.created_at,
+                            )
+                        )
+                    elif metadata.get("action") in {
+                        "set_issue_current_status",
+                        "agent_issue_status_update",
+                    }:
+                        changes = metadata.get("changes")
+                        status_change = changes.get("issue_current_status") if isinstance(
+                            changes, Mapping
+                        ) else None
+                        if not isinstance(status_change, Mapping):
+                            continue
+                        from_status = status_change.get("from")
+                        to_status = status_change.get("to")
+                        if not isinstance(from_status, str) or not isinstance(to_status, str):
+                            continue
+                        results.append(
+                            RecentIssueStatusChange(
+                                case_ref=case.case_ref,
+                                title=case.title,
+                                field_label="问题结论状态",
+                                from_status=from_status,
+                                to_status=to_status,
+                                actor_name=entry.actor_name_snapshot,
+                                created_at=entry.created_at,
+                            )
+                        )
+                    if len(results) >= page_size:
+                        break
+                if len(rows) < batch_size:
+                    break
+                last_entry = rows[-1][0]
+                cursor_created_at = last_entry.created_at
+                cursor_entry_id = last_entry.id
+            return tuple(results[:page_size])
+
     def complete_issue_status_update(
-        self, job_id: UUID, lock_token: UUID, issue_current_status: str
-    ) -> bool:
+        self, claims: Sequence[IssueStatusUpdateClaim], issue_current_status: str
+    ) -> int:
         if issue_current_status not in {status.value for status in IssueCurrentStatus}:
             raise ValidationError("Agent 返回了无效的问题状态")
+        if not claims:
+            return 0
+        claim_by_id = {claim.id: claim.lock_token for claim in claims}
+        if len(claim_by_id) != len(claims):
+            raise ValidationError("状态判定批次中包含重复任务")
         with self._session_factory() as session, session.begin():
             case_id = session.scalar(
                 select(IssueStatusUpdateJob.case_id).where(
-                    IssueStatusUpdateJob.id == job_id,
+                    IssueStatusUpdateJob.id == claims[0].id,
                     IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
-                    IssueStatusUpdateJob.lock_token == lock_token,
+                    IssueStatusUpdateJob.lock_token == claim_by_id[claims[0].id],
                 )
             )
             if case_id is None:
-                return False
+                return 0
             case = session.scalar(select(Case).where(Case.id == case_id).with_for_update())
             if case is None:
-                return False
-            job = session.scalar(
+                return 0
+            jobs = session.scalars(
                 select(IssueStatusUpdateJob)
                 .where(
-                    IssueStatusUpdateJob.id == job_id,
+                    IssueStatusUpdateJob.id.in_(tuple(claim_by_id)),
+                    IssueStatusUpdateJob.case_id == case.id,
                     IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
-                    IssueStatusUpdateJob.lock_token == lock_token,
+                    IssueStatusUpdateJob.lock_token.in_(tuple(claim_by_id.values())),
                 )
                 .with_for_update()
-            )
-            if job is None:
-                return False
-
-            newer_active_job = session.scalar(
-                select(IssueStatusUpdateJob.id)
-                .where(
-                    IssueStatusUpdateJob.case_id == case.id,
-                    IssueStatusUpdateJob.entry_sequence > job.entry_sequence,
-                    IssueStatusUpdateJob.state.in_(
-                        (IssueStatusUpdateState.PENDING, IssueStatusUpdateState.PROCESSING)
-                    ),
-                )
-                .limit(1)
-            )
-            job.state = IssueStatusUpdateState.COMPLETED
-            job.completed_at = utc_now()
-            job.lock_token = None
-            job.locked_until = None
-            job.last_error = None
-            if newer_active_job is not None or case.issue_current_status == issue_current_status:
-                return True
+            ).all()
+            jobs_by_id = {job.id: job for job in jobs}
+            if len({job.case_id for job in jobs}) != 1:
+                return 0
+            if len(jobs_by_id) != len(claim_by_id) or any(
+                jobs_by_id.get(job_id) is None
+                or jobs_by_id[job_id].lock_token != lock_token
+                for job_id, lock_token in claim_by_id.items()
+            ):
+                return 0
+            for job in jobs:
+                job.state = IssueStatusUpdateState.COMPLETED
+                job.completed_at = utc_now()
+                job.lock_token = None
+                job.locked_until = None
+                job.last_error = None
+            completed_count = len(jobs)
+            if case.issue_current_status == issue_current_status:
+                return completed_count
 
             previous_status = case.issue_current_status
             case.issue_current_status = issue_current_status
@@ -641,32 +811,49 @@ class CaseDesk:
                     },
                 },
             )
-            return True
+            return completed_count
 
-    def fail_issue_status_update(self, job_id: UUID, lock_token: UUID, error: str) -> bool:
+    def fail_issue_status_update(
+        self, claims: Sequence[IssueStatusUpdateClaim], error: str
+    ) -> int:
+        if not claims:
+            return 0
+        claim_by_id = {claim.id: claim.lock_token for claim in claims}
+        if len(claim_by_id) != len(claims):
+            raise ValidationError("状态判定批次中包含重复任务")
         now = utc_now()
         with self._session_factory() as session, session.begin():
-            job = session.scalar(
+            jobs = session.scalars(
                 select(IssueStatusUpdateJob)
                 .where(
-                    IssueStatusUpdateJob.id == job_id,
+                    IssueStatusUpdateJob.id.in_(tuple(claim_by_id)),
                     IssueStatusUpdateJob.state == IssueStatusUpdateState.PROCESSING,
-                    IssueStatusUpdateJob.lock_token == lock_token,
                 )
                 .with_for_update()
-            )
-            if job is None:
-                return False
-            job.attempts += 1
+            ).all()
+            jobs_by_id = {job.id: job for job in jobs}
+            if (
+                len({job.case_id for job in jobs}) != 1
+                or len(jobs_by_id) != len(claim_by_id)
+                or any(
+                    jobs_by_id.get(job_id) is None
+                    or jobs_by_id[job_id].lock_token != lock_token
+                    for job_id, lock_token in claim_by_id.items()
+                )
+            ):
+                return 0
+            next_attempts = [job.attempts + 1 for job in jobs]
             retry_after = STATUS_UPDATE_RETRY_DELAYS[
-                min(job.attempts - 1, len(STATUS_UPDATE_RETRY_DELAYS) - 1)
+                min(max(next_attempts) - 1, len(STATUS_UPDATE_RETRY_DELAYS) - 1)
             ]
-            job.state = IssueStatusUpdateState.PENDING
-            job.next_attempt_at = now + retry_after
-            job.lock_token = None
-            job.locked_until = None
-            job.last_error = error[:2000]
-            return True
+            for job in jobs:
+                job.attempts += 1
+                job.state = IssueStatusUpdateState.PENDING
+                job.next_attempt_at = now + retry_after
+                job.lock_token = None
+                job.locked_until = None
+                job.last_error = error[:2000]
+            return len(jobs)
 
     def complete_deferred_deliveries(self, delivery_ids: Sequence[UUID]) -> int:
         """Finalize group deliveries that were sent through a passive callback."""
@@ -1866,10 +2053,31 @@ class CaseDesk:
             if has_image:
                 content = f"{content}\n[含图片附件]".strip()
             if not content:
-                changes = (entry.metadata_json or {}).get("changes")
-                content = f"事件 {entry.kind.value}"
-                if changes:
-                    content += f"：{changes}"
+                metadata = entry.metadata_json or {}
+                if entry.kind is CaseEntryKind.STATUS_CHANGED:
+                    status_labels = {
+                        CaseStatus.PENDING_CONFIRMATION.value: "待确定",
+                        CaseStatus.IN_PROGRESS.value: "处理中",
+                        CaseStatus.WAITING_CUSTOMER.value: "待客户反馈",
+                        CaseStatus.CLOSED.value: "关闭",
+                        CaseStatus.SUSPENDED.value: "挂起",
+                    }
+                    previous = status_labels.get(
+                        str(metadata.get("from_status")), str(metadata.get("from_status"))
+                    )
+                    updated = status_labels.get(
+                        str(metadata.get("to_status")), str(metadata.get("to_status"))
+                    )
+                    content = f"协作流程状态由“{previous}”变更为“{updated}”"
+                elif entry.kind is CaseEntryKind.CLOSED:
+                    content = "问题已关闭"
+                elif entry.kind is CaseEntryKind.REOPENED:
+                    content = "问题已重新打开"
+                else:
+                    changes = metadata.get("changes")
+                    content = f"事件 {entry.kind.value}"
+                    if changes:
+                        content += f"：{changes}"
             lines.append(
                 f"[{entry.sequence} | {entry.side.value} | "
                 f"{_as_utc(entry.created_at).isoformat()}] {content}"

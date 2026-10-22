@@ -35,13 +35,12 @@ class IssueStatusUpdateWorker:
         request_id = f"issue-status-{work.id.hex}"
         try:
             status = await self._agent.classify_issue_status(work, request_id=request_id)
-            applied = await asyncio.to_thread(
+            completed = await asyncio.to_thread(
                 self._desk.complete_issue_status_update,
-                work.id,
-                work.lock_token,
+                work.claims,
                 status,
             )
-            return int(applied)
+            return completed
         except Exception as error:
             logger.exception(
                 "issue_status_agent_update_failed job_id=%s issue=%s entry_sequence=%s",
@@ -52,8 +51,7 @@ class IssueStatusUpdateWorker:
             try:
                 await asyncio.to_thread(
                     self._desk.fail_issue_status_update,
-                    work.id,
-                    work.lock_token,
+                    work.claims,
                     str(error),
                 )
             except Exception:

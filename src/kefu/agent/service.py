@@ -195,6 +195,18 @@ class Agent:
             "数据待处理：问题排查需要的具体异常数据尚未提供。\n"
             "当前无法解决：客户拒绝配合提供日志，导致问题无法解决。"
         )
+        workflow_status_label = {
+            CaseStatus.PENDING_CONFIRMATION: "待确定",
+            CaseStatus.IN_PROGRESS: "处理中",
+            CaseStatus.WAITING_CUSTOMER: "待客户反馈",
+            CaseStatus.CLOSED: "关闭",
+            CaseStatus.SUSPENDED: "挂起",
+        }[work.workflow_status]
+        waiting_on_label = {
+            WaitingOn.CONSULT: "咨询",
+            WaitingOn.DEV: "研发",
+            WaitingOn.NONE: "无人",
+        }[work.waiting_on]
         prompt = (
             "根据问题信息和沟通时间线判断当前问题状态。只返回 JSON 对象，且只包含键 "
             "issue_current_status；值必须精确等于六个选项之一。若新沟通没有改变状态，"
@@ -205,7 +217,11 @@ class Agent:
             f"问题模块：{work.suspected_type or '未填写'}\n"
             f"现状说明：{work.current_situation or '未填写'}\n"
             f"当前状态：{work.current_status}\n"
-            f"触发本次判定的沟通序号：{work.entry_sequence}\n"
+            f"当前协作流程进度：{workflow_status_label}\n"
+            f"当前等待方：{waiting_on_label}\n"
+            f"本批触发沟通序号：{'、'.join(str(value) for value in work.trigger_sequences)}\n"
+            f"本批合并状态判定任务数：{len(work.claims)}。\n"
+            "以下时间线包含本批沟通及之后已记录的流程进度，需根据完整上下文只判定一次当前问题状态。\n"
             f"沟通时间线：\n{work.timeline}"
         )
         result = await self._request_json(

@@ -1017,6 +1017,7 @@ def create_app(
             if administration.is_global_admin(actor)
             else ""
         )
+        queue_link = f'<a href="{external_path("/status-queue")}">异步任务队列</a>'
         create_link = (
             f'<a class="nav-create" href="{external_path("/issues/new")}">＋ 新建问题</a>'
             if consult_queues
@@ -1036,7 +1037,7 @@ def create_app(
                 "问题中心",
                 f'<header class="topbar"><div><div class="eyebrow">客户问题 · 全链路跟踪</div>'
                 f'<h1>问题工作台</h1><p class="muted">按当前责任方和紧急程度跟进每一条问题</p></div>'
-                f"<nav>{tabs}{admin_link}{create_link}</nav></header>"
+                f"<nav>{tabs}{queue_link}{admin_link}{create_link}</nav></header>"
                 f'<section class="overview-grid" aria-label="问题数据一览">{overview_cards}</section>'
                 f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
                 f'<nav class="priority-filters">{priority_filters}</nav></section>'
@@ -1057,6 +1058,76 @@ def create_app(
                 "items": [_summary_json(item) for item in page.items],
                 "offset": page.offset,
                 "next_offset": page.next_offset,
+            }
+        )
+
+    @app.get("/status-queue", response_class=HTMLResponse)
+    async def status_queue_page(request: Request) -> Response:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        active_tasks = desk.list_issue_status_queue()
+        recent_changes = desk.list_recent_issue_status_changes()
+        task_cards = "".join(
+            _status_queue_card(item, external_path) for item in active_tasks
+        ) or '<p class="empty">当前没有排队或执行中的状态判定任务。</p>'
+        change_cards = "".join(
+            _recent_status_change_card(item, external_path) for item in recent_changes
+        ) or '<p class="empty">暂无状态变化记录。</p>'
+        events_path = external_path("/issues")
+        queue_path = external_path("/status-queue")
+        body = f"""
+        <main class="status-queue-main">
+          <header class="topbar"><div><div class="eyebrow">问题工作台 · 后台任务</div>
+            <h1>异步任务队列</h1>
+            <p class="muted">同一问题的待判定任务会合并为一次 Agent 状态判定；页面数据为当前快照。</p></div>
+            <nav><a href="{queue_path}">刷新</a><a href="{events_path}">问题工作台</a></nav>
+          </header>
+          <section class="queue-section panel">
+            <div class="section-heading"><h2>当前任务</h2><span>显示 {len(active_tasks)} 条，最多 100 条</span></div>
+            <div class="queue-stack">{task_cards}</div>
+          </section>
+          <section class="queue-section panel">
+            <div class="section-heading"><h2>最近状态变化</h2><span>最多 50 条</span></div>
+            <div class="status-history">{change_cards}</div>
+          </section>
+        </main>
+        """
+        return HTMLResponse(_page("异步任务队列", body, body_class="status-queue-page"))
+
+    @app.get("/api/status-queue")
+    async def status_queue_api(request: Request) -> JSONResponse:
+        actor_or_error(request)
+        active_tasks = desk.list_issue_status_queue()
+        recent_changes = desk.list_recent_issue_status_changes()
+        return JSONResponse(
+            {
+                "items": [
+                    {
+                        "id": str(item.id),
+                        "issue_number": item.case_ref,
+                        "title": item.title,
+                        "entry_sequence": item.entry_sequence,
+                        "state": item.state,
+                        "attempts": item.attempts,
+                        "created_at": item.created_at.isoformat(),
+                        "next_attempt_at": item.next_attempt_at.isoformat(),
+                        "last_error": item.last_error,
+                    }
+                    for item in active_tasks
+                ],
+                "recent_status_changes": [
+                    {
+                        "issue_number": item.case_ref,
+                        "title": item.title,
+                        "field": item.field_label,
+                        "from_status": item.from_status,
+                        "to_status": item.to_status,
+                        "actor_name": item.actor_name,
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in recent_changes
+                ],
             }
         )
 
@@ -2043,6 +2114,7 @@ body {
 }
 body.event-page { max-width: 1180px; padding: 30px 28px 48px; }
 body.case-detail-page, body.case-create-page { max-width: 980px; padding: 26px 24px 48px; }
+body.status-queue-page { max-width: 1120px; padding: 30px 28px 48px; }
 body.admin-page { max-width: 1200px; background: var(--page); }
 body.setup-page { max-width: 100%; min-height: 100vh; padding: 24px; background: #edf3ff; }
 h1 { color: var(--ink); }
@@ -2218,6 +2290,23 @@ h2 { color: #23344f; }
 .entry-description { margin: 6px 0 2px; color: #52627b; font-size: 12px; }
 .entry-content .part { margin: 8px 0; line-height: 1.65; overflow-wrap: anywhere; }
 .entry-content img { display: block; max-height: 460px; margin: 9px 0; object-fit: contain; }
+.status-queue-main { max-width: 1040px; margin: 0 auto; }
+.queue-section { padding: 18px 20px; margin: 14px 0; }
+.queue-stack, .status-history { display: grid; gap: 9px; }
+.queue-card, .status-change-card { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfe; }
+.queue-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.queue-card-heading a, .status-change-card a { color: var(--ink); font-size: 13px; font-weight: 750; overflow-wrap: anywhere; }
+.queue-card p, .status-change-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.queue-error { color: var(--red) !important; overflow-wrap: anywhere; }
+.queue-state { flex: 0 0 auto; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; }
+.queue-pending { color: #805000; background: #fff2cc; }
+.queue-processing { color: #155eef; background: #eaf1ff; }
+.queue-retry { color: #b42318; background: #fee4e2; }
+.status-change-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.status-change-card > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.status-change-field { padding: 3px 7px; border-radius: 999px; color: #52627b; background: #eef1f5; font-size: 10px; font-weight: 700; }
+.status-change-card p { margin: 0; color: #34445d; white-space: nowrap; }
+.status-change-card small { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .action-panel { padding: 18px 20px; margin-top: 20px; }
 .action-panel section h2 { font-size: 16px; }
 .action-panel form { margin: 0; }
@@ -2230,7 +2319,7 @@ input, select, textarea { border-color: #cbd5e1; border-radius: 9px; }
 input:focus, select:focus, textarea:focus { outline: 3px solid #dce8ff; border-color: #789af2; }
 button.primary { background: var(--blue); }
 @media (max-width: 760px) {
-  body.event-page, body.case-detail-page, body.case-create-page { padding: 18px 14px 34px; }
+  body.event-page, body.case-detail-page, body.case-create-page, body.status-queue-page { padding: 18px 14px 34px; }
   .topbar { align-items: flex-start; flex-direction: column; gap: 10px; }
   .topbar nav { justify-content: flex-start; margin: 0; }
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
@@ -2255,6 +2344,8 @@ button.primary { background: var(--blue); }
   .entry-heading { flex-direction: column; gap: 2px; }
   .entry-heading time { font-size: 10px; }
   .case-card-meta { align-items: flex-start; flex-direction: column; }
+  .status-change-card { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .status-change-card p { white-space: normal; }
 }
 """
 
@@ -2609,6 +2700,52 @@ def _case_status_badge(status: CaseStatus) -> str:
         CaseStatus.SUSPENDED: "case-status-suspended",
     }[status]
     return f'<span class="status-badge {color}">{_case_status_label(status)}</span>'
+
+
+def _status_queue_card(item: Any, path_for: Callable[[str], str]) -> str:
+    case_ref = escape(item.case_ref)
+    issue_path = path_for(f"/issues/{case_ref}")
+    state_label, state_class = (
+        ("处理中", "queue-processing")
+        if item.state == "processing"
+        else (("等待重试", "queue-retry") if item.attempts else ("排队中", "queue-pending"))
+    )
+    retry = (
+        f'<p class="queue-error">最近错误：{escape(item.last_error[:300])}</p>'
+        if item.last_error
+        else ""
+    )
+    attempts = f" · 已重试 {item.attempts} 次" if item.attempts else ""
+    retry_at = f" · 下次重试 {_format_datetime(item.next_attempt_at)}" if item.attempts else ""
+    return (
+        '<article class="queue-card">'
+        f'<div class="queue-card-heading"><a href="{issue_path}">'
+        f'〔KF·{case_ref}〕{escape(item.title)}</a>'
+        f'<span class="queue-state {state_class}">{state_label}</span></div>'
+        f'<p>触发沟通序号 {item.entry_sequence} · 入队 {_format_datetime(item.created_at)}'
+        f'{attempts}{retry_at}</p>{retry}</article>'
+    )
+
+
+def _recent_status_change_card(item: Any, path_for: Callable[[str], str]) -> str:
+    case_ref = escape(item.case_ref)
+    issue_path = path_for(f"/issues/{case_ref}")
+    previous = item.from_status
+    updated = item.to_status
+    if item.field_label == "协作流程状态":
+        try:
+            previous = _case_status_label(CaseStatus(previous))
+            updated = _case_status_label(CaseStatus(updated))
+        except ValueError:
+            pass
+    return (
+        '<article class="status-change-card">'
+        f'<div><a href="{issue_path}">〔KF·{case_ref}〕{escape(item.title)}</a>'
+        f'<span class="status-change-field">{escape(item.field_label)}</span></div>'
+        f'<p>{escape(previous)} <span aria-hidden="true">→</span> {escape(updated)}</p>'
+        f'<small>{escape(item.actor_name)} · {_format_datetime(item.created_at)}</small>'
+        '</article>'
+    )
 
 
 def _waiting_badge(waiting: WaitingOn) -> str:

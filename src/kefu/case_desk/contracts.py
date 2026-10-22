@@ -390,17 +390,52 @@ class DeliveryWork:
 
 
 @dataclass(frozen=True, slots=True)
-class IssueStatusUpdateWork:
+class IssueStatusUpdateClaim:
     id: UUID
     lock_token: UUID
+    entry_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class IssueStatusUpdateWork:
+    case_id: UUID
+    id: UUID
+    claims: tuple[IssueStatusUpdateClaim, ...]
     case_ref: str
     entry_sequence: int
+    trigger_sequences: tuple[int, ...]
     title: str
     issue_description: str | None
     suspected_type: str | None
     current_situation: str | None
     current_status: str
+    workflow_status: CaseStatus
+    waiting_on: WaitingOn
     timeline: str
+
+
+@dataclass(frozen=True, slots=True)
+class IssueStatusQueueItem:
+    id: UUID
+    case_ref: str
+    title: str
+    entry_sequence: int
+    state: str
+    attempts: int
+    created_at: datetime
+    next_attempt_at: datetime
+    last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecentIssueStatusChange:
+    case_ref: str
+    title: str
+    field_label: str
+    from_status: str
+    to_status: str
+    actor_name: str
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
