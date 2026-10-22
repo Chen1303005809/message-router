@@ -569,11 +569,12 @@ def create_app(
         <main class="create-main intake-review-page">
           <a class="back-link" href="{external_path("/issues/new")}">← 重新上传材料</a>
           <header class="page-heading"><div class="eyebrow">Agent 草稿 · 请检查后确认</div>
-            <h1>确认问题信息</h1><p class="muted">Agent 生成问题和客户信息草稿；请核对客户名称，确认后由程序创建问题和首条投递任务。</p></header>
+            <h1>确认问题信息</h1><p class="muted">Agent 整理问题正文和客户信息；请对照收到的材料核对，确认后问题描述会作为首条转发正文。</p></header>
           <section class="panel intake-source"><h2>收到的材料</h2><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</section>
           <form class="panel create-form" method="post" action="{external_path(f"/issues/drafts/{draft.id}/confirm")}">
             <label>问题标题 <input name="issue_title" required maxlength="512" value="{escape(fields.issue_title)}" placeholder="Agent 生成的简短问题概括"></label>
-            <label>问题描述 <textarea name="issue_description" required maxlength="20000" rows="6">{escape(fields.issue_description)}</textarea></label>
+            <label>转发正文 / 问题描述 <textarea name="issue_description" required maxlength="20000" rows="8">{escape(fields.issue_description)}</textarea></label>
+            <p class="muted">此处内容会作为机器人发给初次受理组的正文。请对照上方原始材料核对，修正遗漏或不准确之处；图片仍作为附件按原顺序转发。</p>
             <section class="intake-customer-info">
               <h2>客户信息</h2>
               <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="Agent 根据聊天内容识别；无法确认时请补充"></label>

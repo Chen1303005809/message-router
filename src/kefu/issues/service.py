@@ -243,13 +243,16 @@ class IssueManagement:
             initial_expires_at = fields.deadline or datetime.fromisoformat(
                 record.fields_json["initial_expires_at"]
             )
-            parts = tuple(_part_from_json(item) for item in record.parts_json)
-            raw_text = record.raw_text
+            source_parts = tuple(_part_from_json(item) for item in record.parts_json)
+            image_ids = [
+                part.media_id for part in source_parts if isinstance(part, ImagePart)
+            ]
+            forwarded_parts = map_image_placeholders(fields.issue_description.strip(), image_ids)
         result = self._desk.execute(
             CreateCase(
                 title=(
                     fields.issue_title.strip()
-                    or _issue_title(fields.issue_description, raw_text)
+                    or _issue_title(fields.issue_description, "")
                 ),
                 consult_queue_id=consult_queue_id,
                 dev_team_id=fields.initial_acceptance_team_id,
@@ -267,7 +270,7 @@ class IssueManagement:
                 customer_name=fields.customer_name.strip() or None,
                 customer_contact_name=fields.customer_contact_name.strip() or None,
                 customer_contact_method=fields.customer_contact_method.strip() or None,
-                parts=parts,
+                parts=forwarded_parts,
                 source_msgid=f"issue-intake:{draft_id}",
             ),
             actor,
