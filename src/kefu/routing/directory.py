@@ -212,6 +212,23 @@ class DatabaseRoutingDirectory:
         )
         return team.kind
 
+    def active_team_for_chatid(self, session: Session, chatid: str) -> Team:
+        """Return the active team behind an initialized group binding."""
+        normalized_chatid = chatid.strip()
+        channel = session.scalar(
+            select(WeComChannel).where(WeComChannel.chatid == normalized_chatid)
+        )
+        if (
+            channel is None
+            or not channel.active
+            or channel.initialized_at is None
+        ):
+            raise RoutingUnavailable("当前群聊没有有效的团队绑定")
+        team = session.get(Team, channel.team_id)
+        if team is None or not team.active:
+            raise RoutingUnavailable("当前群聊绑定的团队已停用")
+        return team
+
     def active_consult_channel(self, session: Session, queue_id: UUID) -> TeamChannel:
         """Resolve the required active group for a consultation queue."""
         team = session.get(Team, queue_id)

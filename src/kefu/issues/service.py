@@ -17,6 +17,7 @@ from kefu.case_desk.contracts import (
     Command,
     CommandResult,
     CreateCase,
+    GroupActor,
     ImagePart,
     MediaAccess,
     TextPart,
@@ -188,7 +189,7 @@ class IssueManagement:
     def list(self, issue_filter: IssueFilter, actor: Actor) -> IssuePage:
         return self._desk.list_cases(issue_filter, actor)
 
-    def execute(self, command: Command, actor: Actor) -> IssueCommandResult:
+    def execute(self, command: Command, actor: Actor | GroupActor) -> IssueCommandResult:
         if isinstance(command, CreateCase):
             command = replace(
                 command,

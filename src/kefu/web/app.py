@@ -3317,7 +3317,9 @@ def _case_json(case: Any) -> dict[str, Any]:
         "current_situation": case.current_situation,
         "issue_current_status": case.issue_current_status,
         "bug_number": case.bug_number,
-        "first_recorder_id": str(case.first_recorder_id),
+        "first_recorder_id": (
+            str(case.first_recorder_id) if case.first_recorder_id is not None else None
+        ),
         "first_recorder_name": case.first_recorder_name,
         "issue_source": case.issue_source,
         "initial_expires_at": (

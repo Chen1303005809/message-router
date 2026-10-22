@@ -16,6 +16,8 @@ from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
 from kefu.inspection.service import IssueInspectionService
+from kefu.issues.group_intake import GroupIssueIntakeService
+from kefu.issues.service import IssueManagement
 from kefu.media.storage import (
     MediaIngestor,
     ObjectStorage,
@@ -126,12 +128,24 @@ async def _inspection_loop(inspection: IssueInspectionService, settings: Setting
         await asyncio.sleep(settings.issue_inspection_scan_seconds)
 
 
+async def _group_issue_intake_cleanup_loop(intake: GroupIssueIntakeService) -> None:
+    while True:
+        try:
+            removed = await intake.cleanup_expired()
+            if removed:
+                logger.info("expired group issue intake sessions removed=%s", removed)
+        except Exception:
+            logger.exception("group_issue_intake_cleanup_failed")
+        await asyncio.sleep(60)
+
+
 async def _inbound_loop(
     *,
     relay: Relay,
     transport: WeComTransport,
     receiver: MessageReceiver | None = None,
     deferred_replies: DeferredPassiveReplyStore | None = None,
+    group_intake: GroupIssueIntakeService | None = None,
 ) -> None:
     async for event in transport.events():
         if event.chattype == "group":
@@ -178,6 +192,36 @@ async def _inbound_loop(
                 if origin_side_resolved
                 else None
             )
+            if (
+                group_intake is not None
+                and not relay.is_channel_binding_attempt(event)
+                and group_intake.should_handle(event, origin_side)
+            ):
+                try:
+                    intake_reply = await group_intake.handle(event)
+                    await transport.reply(event, InboundReply(text=intake_reply))
+                    logger.info(
+                        "group_issue_intake_callback_replied msgid=%s chatid_fp=%s",
+                        event.msgid,
+                        opaque_id_fingerprint(event.chatid),
+                    )
+                except Exception:
+                    logger.exception(
+                        "group_issue_intake_callback_failed msgid=%s chatid_fp=%s",
+                        event.msgid,
+                        opaque_id_fingerprint(event.chatid),
+                    )
+                    try:
+                        await transport.reply(
+                            event,
+                            InboundReply(text="问题受理暂时失败，请引用提案或重新 @机器人 重试。"),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "group_issue_intake_callback_error_reply_failed msgid=%s",
+                            event.msgid,
+                        )
+                continue
             suppress_delivery = await asyncio.to_thread(
                 _deferred_delivery_suppression,
                 event=event,
@@ -492,6 +536,13 @@ async def run() -> None:
     deferred_store.purge_expired()
     deferred_replies = deferred_store if settings.wecom_deferred_passive_reply_enabled else None
     status_agent = Agent(settings)
+    group_intake = GroupIssueIntakeService(
+        session_factory,
+        IssueManagement(session_factory, desk, settings, storage=storage),
+        status_agent,
+        MediaIngestor(session_factory, storage),
+        storage,
+    )
     status_update_worker = IssueStatusUpdateWorker(desk, status_agent)
     logger.info(
         "[GROUP-TRACE] bot_worker_starting transport=%s database_target_fp=%s",
@@ -513,12 +564,14 @@ async def run() -> None:
                 tasks.create_task(_message_delivery_loop(message_worker))
                 tasks.create_task(_issue_status_update_loop(status_update_worker))
                 tasks.create_task(_inspection_loop(inspection, settings))
+                tasks.create_task(_group_issue_intake_cleanup_loop(group_intake))
                 tasks.create_task(
                     _inbound_loop(
                         relay=relay,
                         transport=transport,
                         receiver=message_receiver,
                         deferred_replies=deferred_replies,
+                        group_intake=group_intake,
                     )
                 )
         except* TransportDisplacedError:

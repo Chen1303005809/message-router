@@ -88,6 +88,10 @@ class CreateCase:
     issue_metadata: Mapping[str, Any] = field(default_factory=dict)
     approaching_window_minutes: int | None = None
     issue_number: str | None = None
+    # Required when a bound consultation group creates the case without an
+    # authenticated individual actor. The desk verifies this against the
+    # active queue binding before accepting the command.
+    origin_chatid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,7 +297,7 @@ class CaseView:
     current_situation: str | None
     issue_current_status: str
     bug_number: str | None
-    first_recorder_id: UUID
+    first_recorder_id: UUID | None
     first_recorder_name: str
     issue_source: str | None
     initial_expires_at: datetime | None

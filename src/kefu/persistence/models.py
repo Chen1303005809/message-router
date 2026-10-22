@@ -114,6 +114,12 @@ class IssueStatusUpdateState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class GroupIssueIntakeState(StrEnum):
+    ACTIVE = "active"
+    DISPATCHING = "dispatching"
+    COMPLETED = "completed"
+
+
 class CaseEntryKind(StrEnum):
     FORMAL_MESSAGE = "formal_message"
     TRANSFER_CONSULTANT = "transfer_consultant"
@@ -302,7 +308,9 @@ class Case(Base):
     current_developer_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
-    creator_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"))
+    creator_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
     first_recorder_id = synonym("creator_id")
     related_case_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
@@ -505,6 +513,60 @@ class IssueIntakeDraft(Base):
     confirmed_issue_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class GroupIssueIntakeSession(Base):
+    """Durable, group-scoped Agent conversation for an unconfirmed new issue."""
+
+    __tablename__ = "group_issue_intake_sessions"
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_group_issue_intake_sessions_token"),
+        UniqueConstraint("source_msgid", name="uq_group_issue_intake_sessions_source_msgid"),
+        Index("ix_group_issue_intake_sessions_expiry", "state", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    token: Mapped[str] = mapped_column(String(32))
+    chatid: Mapped[str] = mapped_column(String(256), index=True)
+    consult_queue_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("teams.id"))
+    source_msgid: Mapped[str] = mapped_column(String(256))
+    raw_text: Mapped[str] = mapped_column(Text)
+    parts_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    fields_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    state: Mapped[GroupIssueIntakeState] = mapped_column(
+        enum_column(GroupIssueIntakeState, length=16),
+        default=GroupIssueIntakeState.ACTIVE,
+        server_default=GroupIssueIntakeState.ACTIVE.value,
+    )
+    issue_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class GroupIssueIntakeTurn(Base):
+    """One idempotent user turn and its saved bot response in a group intake."""
+
+    __tablename__ = "group_issue_intake_turns"
+    __table_args__ = (
+        UniqueConstraint("msgid", name="uq_group_issue_intake_turns_msgid"),
+        Index("ix_group_issue_intake_turns_session_created", "session_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("group_issue_intake_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    msgid: Mapped[str] = mapped_column(String(256))
+    user_text: Mapped[str] = mapped_column(Text)
+    reply_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

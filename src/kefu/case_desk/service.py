@@ -198,6 +198,8 @@ class CaseDesk:
 
             if isinstance(command, PostFormalMessage) and isinstance(actor, GroupActor):
                 return self._post_formal_message(session, command, actor)
+            if isinstance(command, CreateCase) and isinstance(actor, GroupActor):
+                return self._create_case(session, command, actor)
             if not isinstance(actor, Actor):
                 raise Forbidden("此操作需要已认证的人员身份")
             if isinstance(command, CreateCase):
@@ -547,7 +549,7 @@ class CaseDesk:
             ).all()
             work: list[IssueStatusUpdateWork] = []
             claimed_case_ids: set[UUID] = set()
-            for job, case in rows:
+            for _job, case in rows:
                 if case.id in claimed_case_ids:
                     continue
                 claimed_case_ids.add(case.id)
@@ -945,16 +947,35 @@ class CaseDesk:
                 restored += 1
         return restored
 
-    def _create_case(self, session: Session, command: CreateCase, actor: Actor) -> CommandResult:
-        actor_user = self._directory.get_user(session, actor.user_id)
-        self._directory.assert_consultant_in_queue(
-            session, consultant_id=actor.user_id, queue_id=command.consult_queue_id
-        )
+    def _create_case(
+        self, session: Session, command: CreateCase, actor: Actor | GroupActor
+    ) -> CommandResult:
+        if isinstance(actor, Actor):
+            actor_user = self._directory.get_user(session, actor.user_id)
+            self._directory.assert_consultant_in_queue(
+                session, consultant_id=actor.user_id, queue_id=command.consult_queue_id
+            )
+            actor_id = actor.user_id
+            handler_name = command.consult_handler_name or actor_user.display_name
+        else:
+            if actor.side is not EntrySide.CONSULT or not command.origin_chatid:
+                raise Forbidden("只有已绑定的咨询群可以创建问题")
+            source_team = self._directory.active_team_for_chatid(session, command.origin_chatid)
+            if source_team.kind is not TeamKind.CONSULT_QUEUE:
+                raise Forbidden("当前群聊不是咨询队列群")
+            if source_team.id != command.consult_queue_id:
+                raise Forbidden("咨询群与问题所属队列不匹配")
+            actor_user = None
+            actor_id = None
+            handler_name = source_team.name
         if command.source_msgid:
             existing = self._existing_source_entry(session, command.source_msgid)
             if existing is not None:
                 existing_case = self._case_by_id(session, existing.case_id)
-                self._directory.assert_case_visible(session, actor.user_id, existing_case)
+                if actor_id is not None:
+                    self._directory.assert_case_visible(session, actor_id, existing_case)
+                elif existing_case.consult_queue_id != command.consult_queue_id:
+                    raise Conflict("该群聊消息已归入另一个问题")
                 return self._result(existing_case, existing.id, idempotent=True)
 
         parts = self._validate_parts(command.parts)
@@ -963,7 +984,10 @@ class CaseDesk:
             existing = self._existing_source_entry(session, source_msgid)
             if existing is not None:
                 existing_case = self._case_by_id(session, existing.case_id)
-                self._directory.assert_case_visible(session, actor.user_id, existing_case)
+                if actor_id is not None:
+                    self._directory.assert_case_visible(session, actor_id, existing_case)
+                elif existing_case.consult_queue_id != command.consult_queue_id:
+                    raise Conflict("该群聊消息已归入另一个问题")
                 return self._result(existing_case, existing.id, idempotent=True)
         self._assert_media_exists(session, parts)
         initial_acceptance_team_id = command.initial_acceptance_team_id or command.dev_team_id
@@ -972,9 +996,7 @@ class CaseDesk:
         self._directory.active_consult_channel(session, command.consult_queue_id)
         title = self._validated_title(command.title, parts)
         customer_name = self._validated_customer_name(command.customer_name)
-        consult_handler_name = self._validated_handler_name(
-            command.consult_handler_name or actor_user.display_name
-        )
+        consult_handler_name = self._validated_handler_name(handler_name)
         related_case_id = self._validated_related_case(session, command.related_case_id)
         created_at = utc_now()
         deadline = created_at + timedelta(hours=DEFAULT_CASE_DEADLINE_HOURS)
@@ -1035,11 +1057,11 @@ class CaseDesk:
             # succeeds, so a newly-created event remains on the submitting side.
             waiting_on=WaitingOn.CONSULT,
             consult_queue_id=command.consult_queue_id,
-            current_consultant_id=actor.user_id,
+            current_consultant_id=actor_id,
             consult_handler_name=consult_handler_name,
             current_dev_team_id=channel.team_id,
             initial_acceptance_team_id=dev_team.id,
-            creator_id=actor.user_id,
+            creator_id=actor_id,
             issue_description=issue_description,
             suspected_type=suspected_type,
             issue_current_situation=current_situation,
