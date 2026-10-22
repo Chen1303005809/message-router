@@ -137,7 +137,8 @@ def test_group_intake_requires_confirmation_and_dispatches_original_order(
 
     assert "问题受理提案（尚未派发）" in proposal
     assert "〔KF-INTAKE:" in proposal
-    assert "研发一组" in proposal
+    assert "问题标题：**行情查询报错**" in proposal
+    assert "目标研发群：**研发一组**" in proposal
     with desk_context.session_factory() as session:
         assert session.scalar(select(func.count(Case.id))) == 0
         intake_session = session.scalar(select(GroupIssueIntakeSession))
@@ -156,7 +157,8 @@ def test_group_intake_requires_confirmation_and_dispatches_original_order(
     )
     result = asyncio.run(service.handle(confirmation))
 
-    assert "已派发到「研发一组」" in result
+    assert "目标研发群：**研发一组**" in result
+    assert "问题编号：**" in result
     with desk_context.session_factory() as session:
         issue = session.scalar(select(Case))
         assert issue is not None
@@ -267,7 +269,7 @@ def test_group_intake_lists_missing_options_and_applies_edit_with_confirmation(
     proposal = asyncio.run(service.handle(initial))
 
     assert "待补齐" in proposal
-    assert "可选研发群：研发一组、研发二组" in proposal
+    assert "可选研发群：**研发一组**、**研发二组**" in proposal
     assert "可选模块：" in proposal
     followup = _event(
         "followup-confirm",
@@ -279,7 +281,7 @@ def test_group_intake_lists_missing_options_and_applies_edit_with_confirmation(
 
     result = asyncio.run(service.handle(followup))
 
-    assert "已派发到「研发二组」" in result
+    assert "目标研发群：**研发二组**" in result
     with desk_context.session_factory() as session:
         issue = session.scalar(select(Case))
         assert issue is not None
@@ -308,7 +310,7 @@ def test_unknown_retarget_clears_old_target_and_confirmation_stays_blocked(
         )
     )
 
-    assert "目标研发群：未确定" in changed
+    assert "目标研发群：**未确定**" in changed
     assert "待补齐" in changed
     still_blocked = asyncio.run(
         service.handle(
@@ -373,7 +375,7 @@ def test_group_intake_agent_failure_does_not_dispatch_and_can_retry(
 
     result = asyncio.run(service.handle(retry))
 
-    assert "已派发到「研发一组」" in result
+    assert "目标研发群：**研发一组**" in result
     assert agent.calls == 2
     with desk_context.session_factory() as session:
         assert session.scalar(select(func.count(Case.id))) == 1

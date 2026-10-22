@@ -705,7 +705,14 @@ class GroupIssueIntakeService:
                 return "该提案已经完成派发。"
             team = session.get(Team, issue.initial_acceptance_team_id or issue.current_dev_team_id)
             team_name = team.name if team else "目标研发群"
-            return f"已派发到「{team_name}」，问题编号：{issue.case_ref}。〔KF·{issue.case_ref}〕"
+            return "\n\n".join(
+                (
+                    "问题已派发",
+                    f"目标研发群：**{_markdown_value(team_name)}**",
+                    f"问题编号：**{_markdown_value(issue.case_ref)}**",
+                    f"机器人引用编号：〔KF·{issue.case_ref}〕",
+                )
+            )
 
     def _proposal_reply(
         self,
@@ -720,33 +727,43 @@ class GroupIssueIntakeService:
         target_name = team_by_id.get(target_id, "未确定")
         lines = [
             "问题受理提案（尚未派发）",
-            f"问题标题：{fields.get('issue_title') or '未整理'}",
-            f"问题描述：{fields.get('issue_description') or '未补充'}",
-            f"目标研发群：{target_name}",
-            f"问题模块：{fields.get('suspected_type') or '未确定'}",
-            f"现状说明：{fields.get('current_situation') or '未填写'}",
+            "",
+            f"问题标题：**{_markdown_value(fields.get('issue_title') or '未整理')}**",
+            f"问题描述：**{_markdown_value(fields.get('issue_description') or '未补充')}**",
+            "",
+            f"目标研发群：**{_markdown_value(target_name)}**",
+            f"问题模块：**{_markdown_value(fields.get('suspected_type') or '未确定')}**",
+            f"现状说明：**{_markdown_value(fields.get('current_situation') or '未填写')}**",
         ]
         if fields.get("customer_name"):
-            lines.append(f"客户 / 企业：{fields['customer_name']}")
+            lines.append(f"客户 / 企业：**{_markdown_value(fields['customer_name'])}**")
         if fields.get("customer_contact_name"):
-            lines.append(f"联系人：{fields['customer_contact_name']}")
+            lines.append(f"联系人：**{_markdown_value(fields['customer_contact_name'])}**")
         if fields.get("customer_contact_method"):
-            lines.append(f"联系方式：{fields['customer_contact_method']}")
+            lines.append(f"联系方式：**{_markdown_value(fields['customer_contact_method'])}**")
         missing = _missing_fields(fields, teams)
         if missing:
-            lines.append("待补齐：" + "、".join(missing))
+            lines.extend(("", "待补齐：" + "、".join(missing)))
         if "目标研发群" in missing:
             lines.append(
-                "可选研发群：" + ("、".join(item["name"] for item in teams) or "暂无可用群聊")
+                "可选研发群："
+                + (
+                    "、".join(f"**{_markdown_value(item['name'])}**" for item in teams)
+                    or "暂无可用群聊"
+                )
             )
         if "问题模块" in missing:
-            lines.append("可选模块：" + "、".join(module.value for module in IssueModule))
+            lines.append(
+                "可选模块："
+                + "、".join(f"**{_markdown_value(module.value)}**" for module in IssueModule)
+            )
         if extra:
-            lines.append(extra)
+            lines.extend(("", extra))
         lines.extend(
             [
                 "",
                 f"会话标记：{INTAKE_MARKER_PREFIX}{token}〕",
+                "",
                 "请引用本条提案并 @机器人 继续修改；资料无误且已补齐后，"
                 "回复“确认派发”才会创建正式问题并推送到目标研发群。",
             ]
@@ -825,6 +842,17 @@ def _event_text(event: InboundEvent) -> str:
         part.text if isinstance(part, InboundTextPart) else "[图片]"
         for part in event.parts
     ).strip()
+
+
+def _markdown_value(value: str) -> str:
+    """Escape untrusted Markdown punctuation while preserving value line breaks."""
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in normalized.split("\n") if line.strip()]
+    escaped = [
+        re.sub(r"([\\`*_{}\[\]()#+\-.!|>])", r"\\\1", line)
+        for line in lines
+    ]
+    return "  \n".join(escaped)
 
 
 def _validated_msgid(msgid: str) -> str:
