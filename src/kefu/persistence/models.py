@@ -612,7 +612,7 @@ class IssueStatusUpdateJob(Base):
 
 
 class IssueInspectionState(Base):
-    """Durable reminder state that makes inspection notifications idempotent."""
+    """Legacy per-issue reminder state retained for existing database records."""
 
     __tablename__ = "issue_inspection_states"
 

@@ -657,7 +657,7 @@ def build_tool_registry(
     )
     registry.register(
         "inspection.run",
-        "立即巡检所有未关闭问题；仅总管理员可以手动运行。",
+        "立即按当前研发责任团队汇总所有未关闭问题；仅总管理员可以手动运行。",
         _object_schema({}, []),
         lambda _args, actor: inspection.inspect(actor=actor),
     )

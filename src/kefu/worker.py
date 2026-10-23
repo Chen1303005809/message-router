@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from kefu.case_desk.errors import CaseDeskError
 from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
+from kefu.inspection.schedule import INSPECTION_TIMEZONE, next_inspection_at
 from kefu.inspection.service import IssueInspectionService
 from kefu.issues.group_intake import GroupIssueIntakeService
 from kefu.issues.service import IssueManagement
@@ -107,25 +109,41 @@ async def _issue_status_update_loop(worker: IssueStatusUpdateWorker) -> None:
         await asyncio.sleep(1)
 
 
-async def _inspection_loop(inspection: IssueInspectionService, settings: Settings) -> None:
+async def _inspection_loop(inspection: IssueInspectionService) -> None:
     while True:
-        try:
-            result = await asyncio.to_thread(inspection.inspect)
+        now = datetime.now(UTC)
+        next_run = next_inspection_at(now)
+        delay = max(
+            0.0,
+            (next_run - now.astimezone(INSPECTION_TIMEZONE)).total_seconds(),
+        )
+        await asyncio.sleep(delay)
+        while True:
+            current = datetime.now(UTC)
+            local_current = current.astimezone(INSPECTION_TIMEZONE)
             if (
-                result.periodic_reminders
-                or result.approaching_reminders
-                or result.unresolved_targets
+                local_current.date() != next_run.date()
+                or local_current.hour != next_run.hour
+                or local_current.minute != next_run.minute
             ):
+                break
+            try:
+                result = await asyncio.to_thread(
+                    inspection.inspect_scheduled,
+                    now=current,
+                )
+            except Exception:
+                logger.exception("issue_inspection_failed")
+                await asyncio.sleep(1)
+                continue
+            if result.summary_messages or result.unresolved_targets:
                 logger.info(
-                    "issue_inspection scanned=%s periodic=%s approaching=%s unresolved=%s",
+                    "issue_inspection scanned=%s summaries=%s unresolved=%s",
                     result.scanned_issues,
-                    result.periodic_reminders,
-                    result.approaching_reminders,
+                    result.summary_messages,
                     result.unresolved_targets,
                 )
-        except Exception:
-            logger.exception("issue_inspection_failed")
-        await asyncio.sleep(settings.issue_inspection_scan_seconds)
+            break
 
 
 async def _group_issue_intake_cleanup_loop(intake: GroupIssueIntakeService) -> None:
@@ -563,7 +581,7 @@ async def run() -> None:
                 tasks.create_task(_delivery_loop(worker))
                 tasks.create_task(_message_delivery_loop(message_worker))
                 tasks.create_task(_issue_status_update_loop(status_update_worker))
-                tasks.create_task(_inspection_loop(inspection, settings))
+                tasks.create_task(_inspection_loop(inspection))
                 tasks.create_task(_group_issue_intake_cleanup_loop(group_intake))
                 tasks.create_task(
                     _inbound_loop(

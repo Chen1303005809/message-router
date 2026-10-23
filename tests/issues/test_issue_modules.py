@@ -34,7 +34,6 @@ from kefu.persistence.models import (
     Delivery,
     DeliveryDestination,
     DeliveryStatus,
-    IssueInspectionState,
     LifecycleStatus,
     MembershipRole,
     MessageOutbox,
@@ -209,7 +208,7 @@ def test_confirm_intake_writes_issue_timeline_and_initial_delivery_idempotently(
         assert repeated.result.idempotent is True
 
 
-def test_inspection_sends_periodic_and_one_time_approaching_reminders(issue_context):
+def test_manual_inspection_sends_one_summary_per_current_dev_team(issue_context):
     actor = issue_context["actor"]
     deadline = datetime.now(UTC) + timedelta(hours=18)
     draft = issue_context["management"].create_intake_draft(
@@ -219,6 +218,7 @@ def test_inspection_sends_periodic_and_one_time_approaching_reminders(issue_cont
             parts=(TextPart("问题需要排查"),),
             fields=IssueFields(
                 issue_description="登录接口失败",
+                customer_name="客户甲",
                 initial_acceptance_team_id=issue_context["acceptance_id"],
                 deadline=deadline,
             ),
@@ -232,23 +232,18 @@ def test_inspection_sends_periodic_and_one_time_approaching_reminders(issue_cont
         created_at = issue.created_at.replace(tzinfo=UTC)
 
     first = issue_context["inspection"].inspect(now=created_at + timedelta(minutes=1))
-    periodic = issue_context["inspection"].inspect(now=created_at + timedelta(hours=12))
     repeated = issue_context["inspection"].inspect(now=created_at + timedelta(hours=12))
 
     assert first.scanned_issues == 1
-    assert first.periodic_reminders == 0
-    assert first.approaching_reminders == 2
-    assert periodic.periodic_reminders == 1
-    assert periodic.approaching_reminders == 0
-    assert repeated.periodic_reminders == 0
+    assert first.summary_messages == 1
+    assert repeated.summary_messages == 1
     with issue_context["factory"]() as session:
         messages = session.scalars(select(MessageOutbox)).all()
-        assert len(messages) == 3
-        assert {message.destination_address for message in messages} == {
-            "chat-consult",
-            "chat-dev",
+        assert len(messages) == 2
+        assert {message.destination_address for message in messages} == {"chat-dev"}
+        assert {message.content for message in messages} == {
+            f"{issue.bug_number}｜客户甲"
         }
-        assert session.get(IssueInspectionState, issue.id).approaching_notified_at is not None
         closed_issue = session.get(Case, issue.id)
         assert closed_issue is not None
         closed_issue.lifecycle_status = LifecycleStatus.CLOSED
@@ -257,6 +252,7 @@ def test_inspection_sends_periodic_and_one_time_approaching_reminders(issue_cont
 
     closed = issue_context["inspection"].inspect(now=created_at + timedelta(hours=24))
     assert closed.scanned_issues == 0
+    assert closed.summary_messages == 0
 
 
 def test_person_target_push_is_idempotent_and_retries_transient_failure(issue_context):

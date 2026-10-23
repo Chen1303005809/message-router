@@ -1,4 +1,4 @@
-"""Automated open-issue inspection and reminder delivery."""
+"""Scheduled summaries of open issues."""
 
 from kefu.inspection.service import InspectionResult, IssueInspectionService
 

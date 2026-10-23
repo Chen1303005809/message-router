@@ -45,6 +45,7 @@ class Settings:
     agent_model: str | None = None
     issue_default_expiry_hours: int = 3
     issue_approaching_window_hours: int = 24
+    # Legacy compatibility values; inspection now runs at fixed daily times.
     issue_inspection_interval_hours: int = 12
     issue_inspection_scan_seconds: int = 60
 
