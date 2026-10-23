@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy import case as sql_case
 from sqlalchemy.orm import Session, aliased
 
@@ -39,6 +39,7 @@ from kefu.case_desk.contracts import (
     ExtendCaseDeadline,
     GroupActor,
     ImagePart,
+    IssueDraftProcessingQueueItem,
     IssueStatusQueueItem,
     IssueStatusUpdateClaim,
     IssueStatusUpdateWork,
@@ -80,6 +81,7 @@ from kefu.persistence.models import (
     DeliveryStatus,
     EntrySide,
     IssueCurrentStatus,
+    IssueDraftProcessingTask,
     IssueIntakeDraft,
     IssueModule,
     IssueStatusUpdateJob,
@@ -653,6 +655,54 @@ class CaseDesk:
                     last_error=job.last_error,
                 )
                 for job, case in rows
+            )
+
+    def start_issue_draft_processing(self) -> UUID:
+        """Register a workbench draft request while its Agent call is running."""
+        now = utc_now()
+        task_id = uuid4()
+        stale_before = now - timedelta(minutes=30)
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                delete(IssueDraftProcessingTask).where(
+                    IssueDraftProcessingTask.started_at < stale_before
+                )
+            )
+            session.add(IssueDraftProcessingTask(id=task_id, started_at=now))
+        return task_id
+
+    def finish_issue_draft_processing(self, task_id: UUID) -> None:
+        """Remove a workbench draft request after it succeeds or fails."""
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                delete(IssueDraftProcessingTask).where(IssueDraftProcessingTask.id == task_id)
+            )
+
+    def list_issue_draft_processing_tasks(
+        self, limit: int = 100
+    ) -> tuple[IssueDraftProcessingQueueItem, ...]:
+        """Return recent, currently running workbench draft requests."""
+        page_size = max(1, min(limit, 200))
+        now = utc_now()
+        stale_before = now - timedelta(minutes=30)
+        with self._session_factory() as session, session.begin():
+            session.execute(
+                delete(IssueDraftProcessingTask).where(
+                    IssueDraftProcessingTask.started_at < stale_before
+                )
+            )
+            rows = session.scalars(
+                select(IssueDraftProcessingTask)
+                .where(IssueDraftProcessingTask.started_at >= stale_before)
+                .order_by(IssueDraftProcessingTask.started_at.asc())
+                .limit(page_size)
+            ).all()
+            return tuple(
+                IssueDraftProcessingQueueItem(
+                    id=row.id,
+                    started_at=_as_utc(row.started_at),
+                )
+                for row in rows
             )
 
     def list_recent_issue_status_changes(

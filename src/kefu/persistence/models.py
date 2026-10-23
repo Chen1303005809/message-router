@@ -611,6 +611,16 @@ class IssueStatusUpdateJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class IssueDraftProcessingTask(Base):
+    """Short-lived marker for a workbench request currently waiting on the Agent."""
+
+    __tablename__ = "issue_draft_processing_tasks"
+    __table_args__ = (Index("ix_issue_draft_processing_tasks_started_at", "started_at"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class IssueInspectionState(Base):
     """Legacy per-issue reminder state retained for existing database records."""
 

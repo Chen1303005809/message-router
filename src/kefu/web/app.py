@@ -392,8 +392,33 @@ def create_app(
             </label>
             {_image_upload_controls()}
             <p class="muted">上传图片按文本中 [图片] 的顺序对应；多出的图片会追加到内容末尾，未匹配的占位符会保留为文字。</p>
-            <button class="primary" type="submit">交给 Agent 整理草稿</button>
+            <button class="primary" type="submit" data-issue-draft-submit="true">快速上传</button>
+            <p class="draft-submit-status muted" data-issue-draft-status="true" role="status"
+              aria-live="polite" hidden>
+              <span class="draft-loading-spinner" aria-hidden="true"></span>
+              正在上传材料并整理问题草稿。完成后会自动进入确认页，请勿重复提交。
+            </p>
           </form>
+          <script>
+          (() => {{
+            const form = document.querySelector('.intake-page form');
+            const button = form?.querySelector('[data-issue-draft-submit="true"]');
+            const status = form?.querySelector('[data-issue-draft-status="true"]');
+            if (!form || !button || !status) return;
+            let submitting = false;
+            form.addEventListener('submit', (event) => {{
+              if (submitting) {{
+                event.preventDefault();
+                return;
+              }}
+              submitting = true;
+              button.disabled = true;
+              button.textContent = '正在上传…';
+              status.hidden = false;
+              form.setAttribute('aria-busy', 'true');
+            }});
+          }})();
+          </script>
           <nav class="intake-secondary"><a href="{external_path("/issues")}">查看问题列表</a>
             <a href="{external_path("/admin")}">组织与授权</a></nav>
         </main>
@@ -407,6 +432,7 @@ def create_app(
         if isinstance(actor, RedirectResponse):
             return actor
         form = await request.form()
+        draft_processing_task_id: UUID | None = None
         try:
             pasted_text = _required_form_text(form, "pasted_text")
             if len(pasted_text) > 50_000:
@@ -426,6 +452,7 @@ def create_app(
                 len(pasted_text),
                 len(dev_teams),
             )
+            draft_processing_task_id = desk.start_issue_draft_processing()
             message_id = uuid4()
             message = message_receiver.receive_workbench(message_id, pasted_text)
             logger.info(
@@ -523,6 +550,14 @@ def create_app(
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
         finally:
+            if draft_processing_task_id is not None:
+                try:
+                    desk.finish_issue_draft_processing(draft_processing_task_id)
+                except Exception:
+                    logger.exception(
+                        "issue_draft_processing_task_cleanup_failed request_id=%s",
+                        request_id,
+                    )
             await form.close()
         return RedirectResponse(
             external_path(f"/issues/drafts/{draft.id}"),
@@ -1068,10 +1103,15 @@ def create_app(
         if isinstance(actor, RedirectResponse):
             return actor
         active_tasks = desk.list_issue_status_queue()
+        active_draft_tasks = desk.list_issue_draft_processing_tasks()
         recent_changes = desk.list_recent_issue_status_changes()
         task_cards = "".join(
+            _issue_draft_queue_card(item)
+            for item in active_draft_tasks
+        ) + "".join(
             _status_queue_card(item, external_path) for item in active_tasks
-        ) or '<p class="empty">当前没有排队或执行中的状态判定任务。</p>'
+        ) or '<p class="empty">当前没有排队或执行中的任务。</p>'
+        task_count = len(active_tasks) + len(active_draft_tasks)
         change_cards = "".join(
             _recent_status_change_card(item, external_path) for item in recent_changes
         ) or '<p class="empty">暂无状态变化记录。</p>'
@@ -1081,11 +1121,11 @@ def create_app(
         <main class="status-queue-main">
           <header class="topbar"><div><div class="eyebrow">问题工作台 · 后台任务</div>
             <h1>异步任务队列</h1>
-            <p class="muted">同一问题的待判定任务会合并为一次 Agent 状态判定；页面数据为当前快照。</p></div>
-            <nav><a href="{queue_path}">刷新</a><a href="{events_path}">问题工作台</a></nav>
+            <p class="muted">这里显示 Agent 草稿整理和问题状态判定任务；页面每 5 秒自动刷新。</p></div>
+            <nav><a href="{queue_path}">立即刷新</a><a href="{events_path}">问题工作台</a></nav>
           </header>
           <section class="queue-section panel">
-            <div class="section-heading"><h2>当前任务</h2><span>显示 {len(active_tasks)} 条，最多 100 条</span></div>
+            <div class="section-heading"><h2>当前任务</h2><span>显示 {task_count} 条，最多各 100 条</span></div>
             <div class="queue-stack">{task_cards}</div>
           </section>
           <section class="queue-section panel">
@@ -1093,6 +1133,7 @@ def create_app(
             <div class="status-history">{change_cards}</div>
           </section>
         </main>
+        <script>window.setTimeout(() => window.location.reload(), 5000);</script>
         """
         return HTMLResponse(_page("异步任务队列", body, body_class="status-queue-page"))
 
@@ -1100,6 +1141,7 @@ def create_app(
     async def status_queue_api(request: Request) -> JSONResponse:
         actor_or_error(request)
         active_tasks = desk.list_issue_status_queue()
+        active_draft_tasks = desk.list_issue_draft_processing_tasks()
         recent_changes = desk.list_recent_issue_status_changes()
         return JSONResponse(
             {
@@ -1116,6 +1158,16 @@ def create_app(
                         "last_error": item.last_error,
                     }
                     for item in active_tasks
+                ],
+                "draft_tasks": [
+                    {
+                        "id": str(item.id),
+                        "type": "issue_draft",
+                        "title": "Agent 整理问题草稿",
+                        "state": "processing",
+                        "started_at": item.started_at.isoformat(),
+                    }
+                    for item in active_draft_tasks
                 ],
                 "recent_status_changes": [
                     {
@@ -2299,6 +2351,11 @@ h2 { color: #23344f; }
 .queue-card-heading a, .status-change-card a { color: var(--ink); font-size: 13px; font-weight: 750; overflow-wrap: anywhere; }
 .queue-card p, .status-change-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .queue-error { color: var(--red) !important; overflow-wrap: anywhere; }
+.draft-submit-status { display: flex; align-items: center; gap: 9px; margin: 11px 0 0; font-size: 13px; }
+.draft-submit-status[hidden] { display: none; }
+.draft-loading-spinner { width: 16px; height: 16px; flex: 0 0 auto; border: 2px solid #c8d7ff; border-top-color: var(--blue); border-radius: 50%; animation: draft-spin .8s linear infinite; }
+button.primary:disabled { opacity: .72; cursor: wait; }
+@keyframes draft-spin { to { transform: rotate(360deg); } }
 .queue-state { flex: 0 0 auto; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; }
 .queue-pending { color: #805000; background: #fff2cc; }
 .queue-processing { color: #155eef; background: #eaf1ff; }
@@ -2725,6 +2782,16 @@ def _status_queue_card(item: Any, path_for: Callable[[str], str]) -> str:
         f'<span class="queue-state {state_class}">{state_label}</span></div>'
         f'<p>触发沟通序号 {item.entry_sequence} · 入队 {_format_datetime(item.created_at)}'
         f'{attempts}{retry_at}</p>{retry}</article>'
+    )
+
+
+def _issue_draft_queue_card(item: Any) -> str:
+    return (
+        '<article class="queue-card">'
+        '<div class="queue-card-heading"><strong>Agent 整理问题草稿</strong>'
+        '<span class="queue-state queue-processing">处理中</span></div>'
+        f'<p>快速上传 · 开始时间 {_format_datetime(item.started_at)}</p>'
+        '</article>'
     )
 
 

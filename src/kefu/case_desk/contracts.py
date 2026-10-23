@@ -432,6 +432,12 @@ class IssueStatusQueueItem:
 
 
 @dataclass(frozen=True, slots=True)
+class IssueDraftProcessingQueueItem:
+    id: UUID
+    started_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class RecentIssueStatusChange:
     case_ref: str
     title: str
