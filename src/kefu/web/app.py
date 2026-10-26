@@ -106,6 +106,12 @@ from kefu.web.auth import AuthenticationError, WebAuthenticator
 from kefu.wecom.customer_groups import WeComCustomerGroupClient, WeComCustomerGroupError
 from kefu.wecom.transport import InboundImagePart
 
+# Uvicorn's default config does not add a root handler, so application INFO
+# records would otherwise be filtered by Python's default WARNING level.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
