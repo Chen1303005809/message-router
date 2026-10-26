@@ -1574,10 +1574,6 @@ def create_app(
               <div><span>客户 / 企业</span><strong>{escape(case.customer_name or "未录入")}</strong></div>
               <div><span>客户群聊名称</span><strong>{escape(case.customer_group_name or "未获取")}</strong></div>
               <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
-              <div><span>咨询经办显示名</span><strong>{escape(case.consult_handler_name)}</strong></div>
-              <div><span>当前咨询账号负责人</span><strong>{escape(case.current_consultant_name or "未指定")}</strong></div>
-              <div><span>研发团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
-              <div><span>研发经办人</span><strong>{escape(case.current_dev_team_lead_display_name or case.current_dev_team_name)}</strong></div>
               <div><span>创建时间</span><strong>{_format_datetime(case.created_at)}</strong></div>
               <div><span>截止时间</span><strong>{_format_datetime(case.deadline)}</strong></div>
               <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
@@ -2442,6 +2438,7 @@ h2 { color: #23344f; }
 }
 .status-open { color: #075985; background: #e0f2fe; }
 .status-closed, .waiting-none { color: #58667b; background: #edf0f4; }
+.issue-current-status { color: #475467; background: #f2f4f7; }
 .case-status-pending { color: #805000; background: #fff2cc; }
 .case-status-progress { color: #087a54; background: #e5f7ef; }
 .case-status-feedback { color: #155eef; background: #eaf1ff; }
@@ -3284,6 +3281,10 @@ def _waiting_badge(waiting: WaitingOn) -> str:
     return f'<span class="status-badge {color}">{label}</span>'
 
 
+def _issue_current_status_badge(status: str) -> str:
+    return f'<span class="status-badge issue-current-status">{escape(status)}</span>'
+
+
 def _waiting_on_label(waiting: WaitingOn) -> str:
     return {
         WaitingOn.CONSULT: "待咨询处理",
@@ -3779,6 +3780,7 @@ def _summary_json(summary: Any) -> dict[str, Any]:
         "bug_number": summary.bug_number,
         "title": summary.title,
         "customer_name": summary.customer_name,
+        "issue_current_status": summary.issue_current_status,
         "priority": summary.priority.value,
         "status": summary.status.value,
         "lifecycle_status": summary.lifecycle_status.value,
@@ -3811,7 +3813,7 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
     card_content = (
         f'<div class="case-card-top"><strong class="case-card-title">{title}</strong>'
         f'<div class="case-card-badges">{_priority_badge(summary.priority)}'
-        f"{_case_status_badge(summary.status)}{_waiting_badge(summary.waiting_on)}"
+        f"{_case_status_badge(summary.status)}{_issue_current_status_badge(summary.issue_current_status)}"
         f"{_deadline_badge(summary.deadline_status)}</div></div>"
         f'<div class="case-customer">客户 / 企业：{customer_name}</div>'
         f'<div class="case-card-meta"><span class="case-ref">{human_number}</span>'

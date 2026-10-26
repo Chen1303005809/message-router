@@ -333,6 +333,7 @@ class CaseSummary:
     title: str
     customer_name: str
     bug_number: str | None
+    issue_current_status: str
     priority: CasePriority
     status: CaseStatus
     lifecycle_status: LifecycleStatus

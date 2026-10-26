@@ -2435,6 +2435,7 @@ class CaseDesk:
             title=case.title,
             customer_name=case.customer_name,
             bug_number=case.bug_number,
+            issue_current_status=case.issue_current_status,
             priority=case.priority,
             status=case.status,
             lifecycle_status=case.lifecycle_status,
