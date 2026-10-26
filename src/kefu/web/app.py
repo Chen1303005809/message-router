@@ -1219,12 +1219,7 @@ def create_app(
             if consult_queues
             else ""
         )
-        overview_cards = "".join(
-            f'<article class="overview-card"><span>{label}</span><strong>{count}</strong></article>'
-            for label, count in (
-                ("已关闭", overview.closed_count),
-            )
-        )
+        
         return HTMLResponse(
             _page(
                 "问题中心",
