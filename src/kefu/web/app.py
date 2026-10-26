@@ -385,7 +385,10 @@ def create_app(
             raise _http_error(Forbidden("当前没有已绑定群聊的初次受理组"))
         body = f"""
         <main class="create-main intake-page">
-          <header class="page-heading intake-heading"><h1>新建问题</h1></header>
+          <header class="page-heading intake-heading">
+            <h1>新建问题</h1>
+            <a class="intake-back-link" href="{external_path("/issues")}">返回事件列表</a>
+          </header>
           <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
               aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
@@ -2330,8 +2333,10 @@ h2 { color: #23344f; }
 .create-form label, .metadata-editor label { font-size: 13px; }
 .issue-intake-page { min-height: 100vh; display: grid; align-items: center; }
 .issue-intake-page .intake-page { width: 100%; }
-.intake-heading { margin: 0 0 10px; }
+.intake-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
 .intake-heading h1 { margin: 0; font-size: 22px; }
+.intake-back-link { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; color: #52627b; background: #fff; font-size: 13px; font-weight: 650; }
+.intake-back-link:hover { border-color: #b6c9f3; color: var(--blue); background: var(--blue-soft); }
 .intake-form { padding: 14px; margin: 0; }
 .intake-form > textarea { min-height: min(38vh, 340px); margin: 0; padding: 14px; resize: vertical; }
 .intake-form > textarea::placeholder { color: #98a2b3; }
