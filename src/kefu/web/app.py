@@ -371,32 +371,33 @@ def create_app(
         )
         if len(queues) > 1:
             queue_options = (
-                '<option value="" disabled selected>选择你收到咨询消息的队列</option>'
+                '<option value="" disabled selected>选择队列</option>'
                 + queue_options
             )
+            queue_control = (
+                '<label class="intake-queue"><span class="visually-hidden">咨询队列</span>'
+                f'<select name="consult_queue_id" required aria-label="咨询队列">{queue_options}</select>'
+                "</label>"
+            )
+        else:
+            queue_control = f'<input type="hidden" name="consult_queue_id" value="{queues[0].id}">'
         if not dev_teams:
             raise _http_error(Forbidden("当前没有已绑定群聊的初次受理组"))
         body = f"""
         <main class="create-main intake-page">
-          <header class="page-heading"><div class="eyebrow">问题工作台 · 新建问题</div>
-            <h1>上传咨询材料</h1>
-            <p class="muted">粘贴企微聊天内容并添加图片。Agent 会整理问题草稿并提取客户信息，图片只作为附件保存。</p>
-          </header>
-          <form class="panel create-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
-            <label>咨询队列
-              <select name="consult_queue_id" required>{queue_options}</select>
-            </label>
-            <label>粘贴企微消息
-              <textarea name="pasted_text" required maxlength="50000" rows="12"
-                placeholder="粘贴引用机器人消息并 @机器人 回复的聊天文本。图片请保留为 [图片] 占位符。"></textarea>
-            </label>
-            {_image_upload_controls()}
-            <p class="muted">上传图片按文本中 [图片] 的顺序对应；多出的图片会追加到内容末尾，未匹配的占位符会保留为文字。</p>
-            <button class="primary" type="submit" data-issue-draft-submit="true">快速上传</button>
+          <header class="page-heading intake-heading"><h1>新建问题</h1></header>
+          <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
+            <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
+              aria-label="粘贴问题内容" placeholder="粘贴问题内容…"></textarea>
+            <div class="intake-actions">
+              {_image_upload_controls(compact=True)}
+              {queue_control}
+              <button class="primary" type="submit" data-issue-draft-submit="true">上传</button>
+            </div>
             <p class="draft-submit-status muted" data-issue-draft-status="true" role="status"
               aria-live="polite" hidden>
               <span class="draft-loading-spinner" aria-hidden="true"></span>
-              正在上传材料并整理问题草稿。完成后会自动进入确认页，请勿重复提交。
+              正在整理…
             </p>
           </form>
           <script>
@@ -419,8 +420,6 @@ def create_app(
             }});
           }})();
           </script>
-          <nav class="intake-secondary"><a href="{external_path("/issues")}">查看问题列表</a>
-            <a href="{external_path("/admin")}">组织与授权</a></nav>
         </main>
         """
         return HTMLResponse(_page("上传问题材料", body, body_class="issue-intake-page"))
@@ -2296,6 +2295,26 @@ h2 { color: #23344f; }
 .source-panel, .create-form { padding: 18px 20px; margin: 12px 0; }
 .source-panel h2, .create-form h2 { font-size: 16px; margin-bottom: 13px; }
 .create-form label, .metadata-editor label { font-size: 13px; }
+.issue-intake-page { min-height: 100vh; display: grid; align-items: center; }
+.issue-intake-page .intake-page { width: 100%; }
+.intake-heading { margin: 0 0 10px; }
+.intake-heading h1 { margin: 0; font-size: 22px; }
+.intake-form { padding: 14px; margin: 0; }
+.intake-form > textarea { min-height: min(38vh, 340px); margin: 0; padding: 14px; resize: vertical; }
+.intake-form > textarea::placeholder { color: #98a2b3; }
+.intake-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 9px; }
+.intake-actions button { min-width: 88px; margin: 0; font-weight: 700; }
+.intake-queue { margin: 0; }
+.intake-queue select { width: auto; max-width: 220px; min-height: 40px; margin: 0; padding: 7px 28px 7px 10px; font-size: 13px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.image-upload-control.intake-image-control { position: relative; margin: 0 auto 0 0; }
+.intake-image-control > label { display: inline-flex; align-items: center; min-height: 40px; margin: 0; padding: 7px 11px; border: 1px solid var(--line); border-radius: 9px; color: #34445d; background: #fff; font-weight: 650; cursor: pointer; }
+.intake-image-control > label:hover { background: #f8fafc; border-color: #98a2b3; }
+.intake-image-control > label:focus-within { outline: 3px solid #dce8ff; border-color: #789af2; }
+.intake-image-control .intake-image-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.intake-image-control .image-upload-list { margin: 8px 0 0; }
+.intake-image-control .image-upload-error { max-width: 420px; margin: 5px 0 0; }
+.intake-form .draft-submit-status { margin-bottom: 0; }
 .image-upload-control { margin: 12px 0; }
 .image-upload-control > label { margin-bottom: 5px; }
 .image-upload-control input[type="file"] { margin-top: 0; }
@@ -2541,8 +2560,20 @@ body.setup-page{{background:#eef4ff}}
 </style></head><body class="{escape(body_class)}">{body}</body></html>"""
 
 
-def _image_upload_controls() -> str:
-    return """
+def _image_upload_controls(*, compact: bool = False) -> str:
+    controls = (
+        """
+    <div class="image-upload-control intake-image-control" data-image-uploader="true" data-max-image-bytes="20971520">
+      <label for="issue-images">＋ 图片
+        <input id="issue-images" class="intake-image-input" name="images" type="file" accept="image/*" multiple
+          data-image-input="true" aria-label="添加问题图片">
+      </label>
+      <ul class="image-upload-list" data-image-list="true" aria-live="polite"></ul>
+      <p class="image-upload-error" data-image-error="true" role="alert" hidden></p>
+    </div>
+    """
+        if compact
+        else """
     <div class="image-upload-control" data-image-uploader="true" data-max-image-bytes="20971520">
       <label for="issue-images">问题图片（可拖拽、多选或粘贴，单张不超过 20 MiB）</label>
       <input id="issue-images" name="images" type="file" accept="image/*" multiple
@@ -2556,6 +2587,9 @@ def _image_upload_controls() -> str:
       <ul class="image-upload-list" data-image-list="true" aria-live="polite"></ul>
       <p class="image-upload-error" data-image-error="true" role="alert" hidden></p>
     </div>
+    """
+    )
+    return controls + """
     <script>
     (() => {
       const uploader = document.querySelector('[data-image-uploader="true"]');
