@@ -2341,6 +2341,7 @@ h2 { color: #23344f; }
 .case-card-link:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; border-radius: 6px; }
 .case-card-auto-accept { position: relative; }
 .case-card-hitbox { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 14px; color: transparent; background: transparent; cursor: pointer; }
+.case-card-hitbox:hover { border-color: transparent; background: transparent; }
 .case-card-hitbox:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; }
 .case-card-content { display: grid; gap: 8px; pointer-events: none; }
 .case-card-top, .case-card-meta, .case-card-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
