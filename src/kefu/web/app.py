@@ -455,7 +455,6 @@ def create_app(
               <span class="draft-loading-spinner" aria-hidden="true"></span>
               正在整理…
             </p>
-            <p class="muted">从企微外部客户群工具栏打开时，系统会尝试读取群名，作为客户名称的识别线索。</p>
           </form>
           <script>
           (() => {{
