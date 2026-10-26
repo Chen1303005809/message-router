@@ -689,6 +689,7 @@ def create_app(
                     raw_text=message.text,
                     parts=parts,
                     fields=fields,
+                    source_group_name=source_group_name or "",
                 ),
                 actor,
             )
@@ -753,43 +754,28 @@ def create_app(
         initial_deadline = _datetime_local_value(draft.initial_expires_at)
         fields = draft.fields
         module_options = _issue_module_options(fields.suspected_type)
-        issue_status_options = _issue_status_options(fields.issue_current_status)
         body = f"""
         <main class="create-main intake-review-page">
           <a class="back-link" href="{external_path("/issues/new")}">← 重新上传材料</a>
-          <header class="page-heading"><div class="eyebrow">Agent 草稿 · 请检查后确认</div>
-            <h1>确认问题信息</h1><p class="muted">Agent 整理问题正文和客户信息；请对照收到的材料核对，确认后问题描述会作为首条转发正文。</p></header>
-          <section class="panel intake-source"><h2>收到的材料</h2><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</section>
           <form class="panel create-form" method="post" action="{external_path(f"/issues/drafts/{draft.id}/confirm")}">
             <label>问题标题 <input name="issue_title" required maxlength="512" value="{escape(fields.issue_title)}" placeholder="Agent 生成的简短问题概括"></label>
-            <label>转发正文 / 问题描述 <textarea name="issue_description" required maxlength="20000" rows="8">{escape(fields.issue_description)}</textarea></label>
-            <p class="muted">此处内容会作为机器人发给初次受理组的正文。请对照上方原始材料核对，修正遗漏或不准确之处；图片仍作为附件按原顺序转发。</p>
-            <section class="intake-customer-info">
-              <h2>客户信息</h2>
-              <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="Agent 根据聊天或客户群名称线索识别；无法确认时请补充"></label>
-              <div class="form-row">
-                <label>联系人（选填） <input name="customer_contact_name" maxlength="256" value="{escape(fields.customer_contact_name)}"></label>
-                <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" value="{escape(fields.customer_contact_method)}" placeholder="电话、邮箱或其他联系方法"></label>
-              </div>
-            </section>
-            <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
-            <div class="form-row">
-              <label>怀疑类型（问题所属模块）
-                <select name="suspected_type" required>{module_options}</select>
-              </label>
-              <label>问题状态 <select name="issue_current_status" required>{issue_status_options}</select></label>
+            <label>转发正文 <textarea name="issue_description" required maxlength="20000" rows="8">{escape(fields.issue_description)}</textarea></label>
+            <p class="muted intake-review-hint">标题和正文会转发给初次受理组，图片按原顺序作为附件转发。</p>
+            <div class="intake-key-fields">
+              <label>客户名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="请输入客户名称"></label>
+              <div class="intake-readonly-field"><span>客户群聊名称</span><strong>{escape(draft.source_group_name or "未获取")}</strong></div>
+              <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
+              <label>怀疑类型 <select name="suspected_type" required>{module_options}</select></label>
             </div>
-            <label>现状说明 <textarea name="current_situation" maxlength="20000" rows="4">{escape(fields.current_situation)}</textarea></label>
-            <label>问题初次过期时间
-              <input name="deadline" type="datetime-local" step="60" required value="{initial_deadline}">
-            </label>
-            <div class="form-row">
-              <label>问题编号 <input value="{escape(draft.issue_number)}" readonly></label>
-              <label>BUG 编号 <input value="确认建单后自动生成" readonly></label>
-            </div>
-            <label>首次记录人 <input value="{escape(draft.first_recorder_name)}" readonly></label>
-            <label>问题来源 <input name="issue_source" maxlength="256" value="{escape(fields.issue_source)}"></label>
-            <p class="muted">初次过期时间默认创建后 {settings.issue_default_expiry_hours} 小时；临期窗口为提前 {settings.issue_approaching_window_hours} 小时。</p>
+            <details class="panel intake-source">
+              <summary>收到的材料</summary>
+              <div class="intake-source-content"><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</div>
+            </details>
+            <input type="hidden" name="customer_contact_name" value="{escape(fields.customer_contact_name)}">
+            <input type="hidden" name="customer_contact_method" value="{escape(fields.customer_contact_method)}">
+            <input type="hidden" name="issue_current_status" value="{escape(fields.issue_current_status)}">
+            <input type="hidden" name="current_situation" value="{escape(fields.current_situation)}">
+            <input type="hidden" name="deadline" value="{initial_deadline}">
             <button class="primary" type="submit">确认并推送给初次受理组</button>
           </form>
         </main>
@@ -2483,6 +2469,15 @@ h2 { color: #23344f; }
 .source-panel, .create-form { padding: 18px 20px; margin: 12px 0; }
 .source-panel h2, .create-form h2 { font-size: 16px; margin-bottom: 13px; }
 .create-form label, .metadata-editor label { font-size: 13px; }
+.intake-review-page .create-form { display: grid; gap: 10px; padding: 16px; }
+.intake-review-page .create-form > label { margin: 0; }
+.intake-review-page .create-form > button { justify-self: start; margin: 0; }
+.intake-review-hint { margin: -5px 0 0; font-size: 12px; }
+.intake-key-fields { display: grid; grid-template-columns: 1.1fr 1.1fr 1fr .85fr; align-items: end; gap: 10px; }
+.intake-key-fields label { min-width: 0; margin: 0; }
+.intake-readonly-field { display: grid; grid-template-rows: auto 42px; gap: 5px; min-width: 0; color: #344054; font-size: 13px; font-weight: 600; }
+.intake-readonly-field span { color: var(--ink); }
+.intake-readonly-field strong { display: flex; align-items: center; min-width: 0; padding: 0 10px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 9px; background: #f8fafc; color: #52627b; font-size: 13px; font-weight: 500; }
 .issue-intake-page { min-height: 100vh; display: grid; align-items: center; }
 .issue-intake-page .intake-page { width: 100%; }
 .intake-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
@@ -2511,7 +2506,11 @@ h2 { color: #23344f; }
 .image-upload-control input[type="file"] { margin-top: 0; }
 .image-drop-zone { margin-top: 8px; padding: 18px; border: 1px dashed #98a2b3; border-radius: 10px; background: #fbfcff; color: #667085; text-align: center; }
 .image-drop-zone.drag-active { border-color: #155eef; background: #eff4ff; color: #155eef; }
-.intake-source { margin-bottom: 14px; }
+.intake-source { margin: 0; padding: 0 12px; box-shadow: none; }
+.intake-source summary { padding: 10px 0; color: var(--blue); font-size: 13px; font-weight: 700; cursor: pointer; }
+.intake-source[open] summary { border-bottom: 1px solid var(--line); }
+.intake-source-content { padding: 8px 0 10px; }
+.intake-source-content > .muted { margin: 0 0 8px; }
 .intake-part { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 .intake-image { display: block; max-height: 420px; margin: 10px auto; object-fit: contain; }
 .intake-secondary { margin-top: 16px; }
@@ -2597,6 +2596,7 @@ button.primary { background: var(--blue); }
   .case-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .transfer-control-grid, .deadline-control-grid { grid-template-columns: 1fr; }
   .form-row { grid-template-columns: 1fr; gap: 0; }
+  .intake-key-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 480px) {
   body { padding: 16px 12px; }

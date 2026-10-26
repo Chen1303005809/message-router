@@ -151,6 +151,7 @@ class IssueManagement:
                 consult_queue_id=intake.consult_queue_id,
                 first_recorder_id=actor.user_id,
                 initial_expires_at=initial_expires_at,
+                source_group_name=intake.source_group_name,
             )
             record = IssueIntakeDraft(
                 id=uuid4(),
@@ -175,6 +176,7 @@ class IssueManagement:
                 initial_expires_at=initial_expires_at,
                 expires_at=expires_at,
                 confirmed_issue_id=None,
+                source_group_name=intake.source_group_name,
             )
 
     def get_intake_draft(self, draft_id: UUID, actor: Actor) -> IssueIntakeDraftView:
@@ -240,6 +242,7 @@ class IssueManagement:
                     )
             issue_number = record.issue_number
             consult_queue_id = UUID(record.fields_json["consult_queue_id"])
+            source_group_name = record.fields_json.get("source_group_name", "")
             initial_expires_at = fields.deadline or datetime.fromisoformat(
                 record.fields_json["initial_expires_at"]
             )
@@ -289,6 +292,7 @@ class IssueManagement:
                 consult_queue_id=consult_queue_id,
                 first_recorder_id=actor.user_id,
                 initial_expires_at=initial_expires_at,
+                source_group_name=source_group_name,
             )
         return ConfirmedIssue(issue_number=public_result.issue_number, result=public_result)
 
@@ -417,6 +421,7 @@ def _fields_to_json(
     consult_queue_id: UUID,
     first_recorder_id: UUID,
     initial_expires_at: datetime,
+    source_group_name: str = "",
 ) -> dict[str, str]:
     return {
         "issue_title": fields.issue_title,
@@ -434,6 +439,7 @@ def _fields_to_json(
         "customer_name": fields.customer_name,
         "customer_contact_name": fields.customer_contact_name,
         "customer_contact_method": fields.customer_contact_method,
+        "source_group_name": source_group_name,
         "consult_queue_id": str(consult_queue_id),
         "first_recorder_id": str(first_recorder_id),
         "initial_expires_at": initial_expires_at.isoformat(),
@@ -493,4 +499,5 @@ def _draft_view(record: IssueIntakeDraft, first_recorder_name: str) -> IssueInta
         initial_expires_at=datetime.fromisoformat(record.fields_json["initial_expires_at"]),
         expires_at=record.expires_at,
         confirmed_issue_id=record.confirmed_issue_id,
+        source_group_name=record.fields_json.get("source_group_name", ""),
     )

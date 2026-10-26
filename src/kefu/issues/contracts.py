@@ -49,6 +49,7 @@ class IssueIntake:
     raw_text: str
     parts: tuple[ContentPart, ...]
     fields: IssueFields
+    source_group_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,7 @@ class IssueIntakeDraftView:
     initial_expires_at: datetime
     expires_at: datetime
     confirmed_issue_id: UUID | None
+    source_group_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
