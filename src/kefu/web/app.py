@@ -436,7 +436,7 @@ def create_app(
         <main class="create-main intake-page">
           <header class="page-heading intake-heading">
             <h1>新建问题</h1>
-            <a class="intake-back-link" href="{external_path("/issues")}">返回事件列表</a>
+            <a class="intake-back-link" href="{external_path("/issues")}">返回问题列表</a>
           </header>
           <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
@@ -1193,9 +1193,7 @@ def create_app(
             f'<a class="{"active" if state == value else ""}" '
             f'href="{_event_filter_url(events_path, value, priority)}">{label}</a>'
             for value, label in (
-                ("mine", _waiting_on_label(WaitingOn.CONSULT)),
-                ("dev", _waiting_on_label(WaitingOn.DEV)),
-                ("open", "全部进行中"),
+                ("open", "问题列表"),
                 ("closed", "已关闭"),
             )
         )
@@ -1224,9 +1222,6 @@ def create_app(
         overview_cards = "".join(
             f'<article class="overview-card"><span>{label}</span><strong>{count}</strong></article>'
             for label, count in (
-                ("全部进行中", overview.open_count),
-                (_waiting_on_label(WaitingOn.CONSULT), overview.waiting_consult_count),
-                (_waiting_on_label(WaitingOn.DEV), overview.waiting_dev_count),
                 ("已关闭", overview.closed_count),
             )
         )
@@ -3261,14 +3256,6 @@ def _recent_status_change_card(item: Any, path_for: Callable[[str], str]) -> str
         f'<small>{escape(item.actor_name)} · {_format_datetime(item.created_at)}</small>'
         '</article>'
     )
-
-
-def _waiting_on_label(waiting: WaitingOn) -> str:
-    return {
-        WaitingOn.CONSULT: "待咨询处理",
-        WaitingOn.DEV: "待研发处理",
-        WaitingOn.NONE: "无待处理动作",
-    }[waiting]
 
 
 def _deadline_badge(status: DeadlineStatus | None) -> str:
