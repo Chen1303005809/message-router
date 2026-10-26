@@ -1233,6 +1233,7 @@ def create_app(
         return HTMLResponse(
             _page(
                 "问题中心",
+                f'<header class="topbar"><div><div class="eyebrow"></div>'
                 f"<nav>{tabs}{queue_link}{admin_link}{create_link}</nav></header>"
                 f'<section class="overview-grid" aria-label="问题数据一览">{overview_cards}</section>'
                 f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
