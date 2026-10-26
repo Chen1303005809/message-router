@@ -1597,7 +1597,6 @@ def create_app(
           {_metadata_form(case, external_path)}
           {_transfer_controls(case, external_path)}
           {_deadline_controls(case, external_path)}
-          {_case_status_controls(case, external_path)}
           <section class="timeline-section">
             <div class="section-heading"><h2>问题时间线</h2><span>{len(case.entries)} 条记录</span></div>
             <div class="timeline">{entries}</div>
@@ -2493,25 +2492,6 @@ h2 { color: #23344f; }
 .deadline-control-card .muted { margin: 0; }
 .transfer-control-empty { padding: 10px 12px; border-radius: 9px; background: #f1f4f8; }
 .transfer-controls button { justify-self: start; }
-.status-controls { margin-top: 12px; padding: 18px 20px; }
-.status-controls-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 5px; }
-.status-controls-heading h2 { margin: 0; font-size: 16px; }
-.status-controls-help { margin: 5px 0 12px; color: var(--muted); font-size: 12px; }
-.status-control-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.status-control-actions form { margin: 0; }
-.status-control-actions button { min-height: 40px; padding: 8px 15px; border: 1px solid transparent; border-radius: 9px; color: #34445d; background: #edf1f7; font-size: 13px; font-weight: 750; transition: transform .12s ease, box-shadow .12s ease, background .12s ease; }
-.status-control-actions button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 10px #18243a20; }
-.status-control-actions button:focus-visible { outline: 3px solid #9db8ff; outline-offset: 2px; }
-.status-control-actions button:disabled { cursor: default; opacity: .8; }
-.status-control-actions button.status-action-accept { color: #fff; background: #285fe8; }
-.status-control-actions button.status-action-feedback { color: #fff; background: #9a5b00; }
-.status-control-actions button.status-action-suspend { color: #fff; background: #6941c6; }
-.status-control-actions button.status-action-close { color: #fff; background: #b42318; }
-.status-control-actions button.status-action-accept:hover:not(:disabled) { background: #174bc4; }
-.status-control-actions button.status-action-feedback:hover:not(:disabled) { background: #7a4800; }
-.status-control-actions button.status-action-suspend:hover:not(:disabled) { background: #5330a3; }
-.status-control-actions button.status-action-close:hover:not(:disabled) { background: #8f1c13; }
-.status-closed-note { margin: 0; color: var(--muted); font-size: 13px; }
 .metadata-editor { margin-top: 12px; padding: 0 16px; }
 .metadata-editor summary { padding: 13px 0; cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 700; }
 .metadata-editor form { border-top: 1px solid var(--line); padding: 6px 0 14px; }
@@ -2659,7 +2639,7 @@ button.primary { background: var(--blue); }
   .priority-filters a { padding: 5px 7px; font-size: 12px; }
   .case-card { padding: 14px; }
   .case-meta-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .case-overview, .source-panel, .create-form, .action-panel, .transfer-controls, .deadline-controls, .status-controls { padding: 15px; }
+  .case-overview, .source-panel, .create-form, .action-panel, .transfer-controls, .deadline-controls { padding: 15px; }
   .entry { padding: 11px 12px; }
   .entry-heading { flex-direction: column; gap: 2px; }
   .entry-heading time { font-size: 10px; }
@@ -3666,62 +3646,6 @@ def _top_close_control(case: Any, path_for: Callable[[str], str]) -> str:
       <input type="hidden" name="version" value="{case.version}">
       <button type="submit" class="status-action-close">关闭问题</button>
     </form>
-    """
-
-
-def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
-    if case.lifecycle_status is LifecycleStatus.CLOSED:
-        reopen_note = (
-            "问题已关闭。如需继续处理，请使用下方“重新打开”。"
-            if case.can_change_consult_status
-            else "问题已关闭。如需继续处理，请联系当前咨询处理人或咨询队列管理员。"
-        )
-        return f"""
-        <section class="status-controls panel" aria-label="问题状态操作">
-          <div class="status-controls-heading"><h2>状态操作</h2></div>
-          <p class="status-closed-note">{reopen_note}</p>
-        </section>
-        """
-
-    status_action = path_for(f"/issues/{escape(case.case_ref)}/status")
-    buttons: list[str] = []
-
-    def status_button(status: CaseStatus, label: str, extra_class: str = "") -> str:
-        return (
-            f'<form method="post" action="{status_action}">'
-            f'<input type="hidden" name="version" value="{case.version}">'
-            f'<input type="hidden" name="status" value="{status.value}">'
-            f'<button type="submit" class="{extra_class}">{label}</button></form>'
-        )
-
-    if case.status is CaseStatus.PENDING_CONFIRMATION:
-        if case.can_accept_pending:
-            buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
-        help_text = "待确定是初始状态，仅研发人员可通过“受理”进入处理中。"
-    elif case.status is CaseStatus.IN_PROGRESS:
-        if case.can_change_consult_status:
-            buttons.append(
-                status_button(
-                    CaseStatus.WAITING_CUSTOMER,
-                    "待客户反馈",
-                    "status-action-feedback",
-                )
-            )
-        buttons.append(status_button(CaseStatus.SUSPENDED, "挂起", "status-action-suspend"))
-        help_text = "处理中可由咨询人员设为待客户反馈或关闭；暂时无法推进时可挂起。"
-    elif case.status is CaseStatus.WAITING_CUSTOMER:
-        buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
-        help_text = "收到客户反馈后点击“受理”继续处理；关闭仅咨询侧可操作。"
-    else:
-        buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
-        help_text = "暂时无法推进时挂起，恢复处理后点击“受理”；关闭仅咨询侧可操作。"
-
-    return f"""
-    <section class="status-controls panel" aria-label="问题状态操作">
-      <div class="status-controls-heading"><h2>状态操作</h2></div>
-      <p class="status-controls-help">{help_text}<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在问题时间线。</p>
-      <div class="status-control-actions">{"".join(buttons)}</div>
-    </section>
     """
 
 
