@@ -388,7 +388,8 @@ def create_app(
           <header class="page-heading intake-heading"><h1>新建问题</h1></header>
           <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
-              aria-label="粘贴问题内容" placeholder="粘贴问题内容…"></textarea>
+              aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
+              placeholder="粘贴问题内容；图片可拖入此处…"></textarea>
             <div class="intake-actions">
               {_image_upload_controls(compact=True)}
               {queue_control}
@@ -2334,6 +2335,7 @@ h2 { color: #23344f; }
 .intake-form { padding: 14px; margin: 0; }
 .intake-form > textarea { min-height: min(38vh, 340px); margin: 0; padding: 14px; resize: vertical; }
 .intake-form > textarea::placeholder { color: #98a2b3; }
+.intake-form > textarea.drag-active { border-color: #155eef; background: #eff4ff; box-shadow: 0 0 0 3px #dce8ff; }
 .intake-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 9px; }
 .intake-actions button { min-width: 88px; margin: 0; font-weight: 700; }
 .intake-queue { margin: 0; }
@@ -2627,10 +2629,11 @@ def _image_upload_controls(*, compact: bool = False) -> str:
       const uploader = document.querySelector('[data-image-uploader="true"]');
       if (!uploader) return;
       const input = uploader.querySelector('[data-image-input="true"]');
-      const dropZone = uploader.querySelector('[data-image-drop-zone="true"]');
       const list = uploader.querySelector('[data-image-list="true"]');
       const error = uploader.querySelector('[data-image-error="true"]');
       const form = input && input.form;
+      const dropZone = form?.querySelector('[data-image-drop-zone="true"]')
+        || uploader.querySelector('[data-image-drop-zone="true"]');
       if (!input || !list || !error || !form) return;
 
       const maxBytes = Number(uploader.dataset.maxImageBytes);
