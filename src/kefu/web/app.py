@@ -112,6 +112,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+# httpx's built-in INFO log prints full request URLs, including access_token query values.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -445,6 +447,7 @@ def create_app(
               placeholder="粘贴问题内容；图片可拖入此处…"></textarea>
             <input type="hidden" name="source_chat_id" value="">
             <input type="hidden" name="source_chat_status" value="not_reported">
+            <input type="hidden" name="source_chat_error" value="">
             <div class="intake-actions">
               {_image_upload_controls(compact=True)}
               {queue_control}
@@ -463,7 +466,8 @@ def create_app(
             const status = form?.querySelector('[data-issue-draft-status="true"]');
             const sourceChatId = form?.querySelector('[name="source_chat_id"]');
             const sourceChatStatus = form?.querySelector('[name="source_chat_status"]');
-            if (!form || !button || !status || !sourceChatId || !sourceChatStatus) return;
+            const sourceChatError = form?.querySelector('[name="source_chat_error"]');
+            if (!form || !button || !status || !sourceChatId || !sourceChatStatus || !sourceChatError) return;
             let submitting = false;
             form.addEventListener('submit', async (event) => {{
               if (submitting) {{
@@ -479,9 +483,11 @@ def create_app(
               try {{
                 sourceChatId.value = await getWeComCustomerGroupId();
                 sourceChatStatus.value = window.wecomCustomerGroupLookupStatus || 'unknown';
+                sourceChatError.value = window.wecomCustomerGroupLookupError || '';
               }} catch (_) {{
                 sourceChatId.value = '';
                 sourceChatStatus.value = 'client_exception';
+                sourceChatError.value = '';
               }}
               HTMLFormElement.prototype.submit.call(form);
             }});
@@ -544,11 +550,18 @@ def create_app(
             }
             if reported_group_lookup_status not in valid_group_lookup_statuses:
                 reported_group_lookup_status = "unknown"
+            reported_group_lookup_error = _optional_form_text(form, "source_chat_error") or ""
+            reported_group_lookup_error = "".join(
+                char
+                for char in reported_group_lookup_error[:100]
+                if char.isascii() and (char.isalnum() or char in "_.:-")
+            ) or "unavailable"
             logger.info(
                 "issue_draft_customer_group_lookup_received request_id=%s browser_status=%s "
-                "chat_id_present=%s chat_id_length=%s chatid_fp=%s",
+                "browser_error=%s chat_id_present=%s chat_id_length=%s chatid_fp=%s",
                 request_id,
                 reported_group_lookup_status,
+                reported_group_lookup_error,
                 bool(source_chat_id),
                 len(source_chat_id) if source_chat_id else 0,
                 opaque_id_fingerprint(source_chat_id) if source_chat_id else "unavailable",
@@ -1217,7 +1230,6 @@ def create_app(
             _page(
                 "问题中心",
                 f'<header class="topbar"><div><div class="eyebrow">客户问题 · 全链路跟踪</div>'
-                f'<h1>问题工作台</h1><p class="muted">按当前责任方和紧急程度跟进每一条问题</p></div>'
                 f"<nav>{tabs}{queue_link}{admin_link}{create_link}</nav></header>"
                 f'<section class="overview-grid" aria-label="问题数据一览">{overview_cards}</section>'
                 f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
@@ -2661,12 +2673,16 @@ def _wecom_group_context_scripts(config_url: str) -> str:
         }
       });
       window.getWeComCustomerGroupId = () => {
-        const emptyResult = (status) => ({ chatId: '', status });
+        const emptyResult = (status, error = '') => ({ chatId: '', status, error });
+        const sanitizeSdkError = (value) => typeof value === 'string'
+          ? value.replace(/[^A-Za-z0-9_.:-]+/g, '_').slice(0, 100)
+          : '';
         const reportResult = (result) => {
           window.wecomCustomerGroupLookupStatus = result.status;
+          window.wecomCustomerGroupLookupError = result.error || '';
           try {
             if (window.console && typeof window.console.info === 'function') {
-              window.console.info('[wecom-group-context]', result.status);
+              window.console.info('[wecom-group-context]', result.status, result.error || '');
             }
           } catch (_) {}
           return result.chatId;
@@ -2705,6 +2721,7 @@ def _wecom_group_context_scripts(config_url: str) -> str:
               return emptyResult('js_sdk_config_invalid');
             }
             let contextStatus = 'agent_config_timeout';
+            let contextError = '';
             const context = await new Promise((resolve) => {
               let finished = false;
               const timer = window.setTimeout(() => finish(null), 5000);
@@ -2727,10 +2744,14 @@ def _wecom_group_context_scripts(config_url: str) -> str:
                     contextStatus = result && result.err_msg === 'getContext:ok'
                       ? 'context_ready'
                       : 'get_context_failed';
+                    if (contextStatus === 'get_context_failed') {
+                      contextError = sanitizeSdkError(result && result.err_msg);
+                    }
                     finish(result && result.err_msg === 'getContext:ok' ? result : null);
                   },
-                  fail: () => {
+                  fail: (error) => {
                     contextStatus = 'agent_config_failed';
+                    contextError = sanitizeSdkError(error && (error.err_msg || error.errMsg));
                     finish(null);
                   }
                 });
@@ -2739,14 +2760,17 @@ def _wecom_group_context_scripts(config_url: str) -> str:
                 finish(null);
               }
             });
-            if (!context) return emptyResult(contextStatus);
+            if (!context) return emptyResult(contextStatus, contextError);
             if (context.entry !== 'group_chat_tools') {
               return emptyResult('not_group_chat_tools');
             }
             const group = await invoke('getCurExternalChat');
             if (!group) return emptyResult('get_cur_external_chat_timeout');
             if (group.err_msg !== 'getCurExternalChat:ok') {
-              return emptyResult('get_cur_external_chat_failed');
+              return emptyResult(
+                'get_cur_external_chat_failed',
+                sanitizeSdkError(group.err_msg)
+              );
             }
             if (typeof group.chatId !== 'string' || !group.chatId.trim()) {
               return emptyResult('chat_id_missing');

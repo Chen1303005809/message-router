@@ -667,6 +667,7 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
         assert upload_page.status_code == 200
         assert "getWeComCustomerGroupId" in upload_page.text
         assert 'name="source_chat_status"' in upload_page.text
+        assert 'name="source_chat_error"' in upload_page.text
         assert "not_group_chat_tools" in upload_page.text
         config_response = client.get(
             "/api/wecom/agent-js-sdk-config",
@@ -685,6 +686,7 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
                 "pasted_text": "页面保存失败",
                 "source_chat_id": "verified-by-wecom",
                 "source_chat_status": "success",
+                "source_chat_error": "getCurExternalChat:fail_no_permission",
                 "source_group_name": "浏览器伪造的名称",
             },
             follow_redirects=False,
@@ -692,7 +694,11 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
         assert draft_response.status_code == 303, draft_response.text
         assert group_lookups == [("verified-by-wecom", "consult-1")]
         assert captured_group_names == ["杭州星河科技客户群"]
-        assert "browser_status=success chat_id_present=True" in caplog.text
+        assert (
+            "browser_status=success browser_error=getCurExternalChat:fail_no_permission "
+            "chat_id_present=True"
+        ) in caplog.text
+        assert "browser_error=getCurExternalChat:fail_no_permission" in caplog.text
         assert "group_name='杭州星河科技客户群'" in caplog.text
         assert "customer_name='杭州星河科技'" in caplog.text
 
