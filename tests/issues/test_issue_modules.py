@@ -605,10 +605,11 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
 
 
 def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
-    issue_context, monkeypatch
+    issue_context, monkeypatch, caplog
 ):
     import kefu.web.app as web_app
 
+    caplog.set_level("INFO", logger="kefu.web.app")
     captured_group_names: list[str | None] = []
     group_lookups: list[tuple[str, str]] = []
 
@@ -665,6 +666,8 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
         upload_page = client.get("/issues/new", headers=headers)
         assert upload_page.status_code == 200
         assert "getWeComCustomerGroupId" in upload_page.text
+        assert 'name="source_chat_status"' in upload_page.text
+        assert "not_group_chat_tools" in upload_page.text
         config_response = client.get(
             "/api/wecom/agent-js-sdk-config",
             headers=headers,
@@ -681,6 +684,7 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
                 "consult_queue_id": str(issue_context["queue_id"]),
                 "pasted_text": "页面保存失败",
                 "source_chat_id": "verified-by-wecom",
+                "source_chat_status": "success",
                 "source_group_name": "浏览器伪造的名称",
             },
             follow_redirects=False,
@@ -688,6 +692,9 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
         assert draft_response.status_code == 303, draft_response.text
         assert group_lookups == [("verified-by-wecom", "consult-1")]
         assert captured_group_names == ["杭州星河科技客户群"]
+        assert "browser_status=success chat_id_present=True" in caplog.text
+        assert "group_name='杭州星河科技客户群'" in caplog.text
+        assert "customer_name='杭州星河科技'" in caplog.text
 
         preview = client.get(draft_response.headers["location"], headers=headers)
         assert preview.status_code == 200

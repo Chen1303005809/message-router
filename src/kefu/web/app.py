@@ -320,6 +320,10 @@ def create_app(
                 url,
             )
         except WeComCustomerGroupError as error:
+            logger.warning(
+                "wecom_agent_js_sdk_config_unavailable reason=%s",
+                str(error),
+            )
             raise HTTPException(status_code=503, detail="企微 JS-SDK 暂不可用") from error
         return JSONResponse(config, headers={"Cache-Control": "no-store, private"})
 
@@ -434,6 +438,7 @@ def create_app(
               aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
               placeholder="粘贴问题内容；图片可拖入此处…"></textarea>
             <input type="hidden" name="source_chat_id" value="">
+            <input type="hidden" name="source_chat_status" value="not_reported">
             <div class="intake-actions">
               {_image_upload_controls(compact=True)}
               {queue_control}
@@ -452,7 +457,8 @@ def create_app(
             const button = form?.querySelector('[data-issue-draft-submit="true"]');
             const status = form?.querySelector('[data-issue-draft-status="true"]');
             const sourceChatId = form?.querySelector('[name="source_chat_id"]');
-            if (!form || !button || !status || !sourceChatId) return;
+            const sourceChatStatus = form?.querySelector('[name="source_chat_status"]');
+            if (!form || !button || !status || !sourceChatId || !sourceChatStatus) return;
             let submitting = false;
             form.addEventListener('submit', async (event) => {{
               if (submitting) {{
@@ -467,8 +473,10 @@ def create_app(
               form.setAttribute('aria-busy', 'true');
               try {{
                 sourceChatId.value = await getWeComCustomerGroupId();
+                sourceChatStatus.value = window.wecomCustomerGroupLookupStatus || 'unknown';
               }} catch (_) {{
                 sourceChatId.value = '';
+                sourceChatStatus.value = 'client_exception';
               }}
               HTMLFormElement.prototype.submit.call(form);
             }});
@@ -507,7 +515,45 @@ def create_app(
                 len(dev_teams),
             )
             source_chat_id = _optional_form_text(form, "source_chat_id")
+            reported_group_lookup_status = _optional_form_text(form, "source_chat_status")
+            valid_group_lookup_statuses = {
+                "unknown",
+                "not_reported",
+                "not_wecom_client",
+                "sdk_script_load_failed",
+                "sdk_api_unavailable",
+                "js_sdk_config_fetch_failed",
+                "js_sdk_config_http_error",
+                "js_sdk_config_invalid",
+                "agent_config_failed",
+                "agent_config_timeout",
+                "get_context_failed",
+                "not_group_chat_tools",
+                "get_cur_external_chat_failed",
+                "get_cur_external_chat_timeout",
+                "chat_id_missing",
+                "success",
+                "lookup_exception",
+                "lookup_timeout",
+                "client_exception",
+            }
+            if reported_group_lookup_status not in valid_group_lookup_statuses:
+                reported_group_lookup_status = "unknown"
+            logger.info(
+                "issue_draft_customer_group_lookup_received request_id=%s browser_status=%s "
+                "chat_id_present=%s chat_id_length=%s chatid_fp=%s",
+                request_id,
+                reported_group_lookup_status,
+                bool(source_chat_id),
+                len(source_chat_id) if source_chat_id else 0,
+                opaque_id_fingerprint(source_chat_id) if source_chat_id else "unavailable",
+            )
             if source_chat_id and len(source_chat_id) > 256:
+                logger.warning(
+                    "issue_draft_customer_group_chat_id_rejected request_id=%s reason=too_long length=%s",
+                    request_id,
+                    len(source_chat_id),
+                )
                 source_chat_id = None
             source_group_name: str | None = None
             if source_chat_id:
@@ -515,15 +561,23 @@ def create_app(
                     source_user = session.get(User, actor.user_id)
                     wecom_userid = source_user.wecom_userid if source_user is not None else ""
                 try:
+                    logger.info(
+                        "issue_draft_customer_group_lookup_started request_id=%s chatid_fp=%s "
+                        "member_userid_present=%s",
+                        request_id,
+                        opaque_id_fingerprint(source_chat_id),
+                        bool(wecom_userid),
+                    )
                     source_group_name = await asyncio.to_thread(
                         wecom_customer_groups.customer_group_name_for_member,
                         source_chat_id,
                         wecom_userid,
                     )
                     logger.info(
-                        "issue_draft_customer_group_resolved request_id=%s chatid_fp=%s",
+                        "issue_draft_customer_group_resolved request_id=%s chatid_fp=%s group_name=%r",
                         request_id,
                         opaque_id_fingerprint(source_chat_id),
+                        source_group_name,
                     )
                 except WeComCustomerGroupError as error:
                     logger.info(
@@ -572,6 +626,12 @@ def create_app(
                 request_id,
                 sum(bool(value.strip()) for value in generated.values()),
                 selected_team is not None,
+            )
+            logger.info(
+                "issue_draft_customer_name_result request_id=%s group_name_present=%s customer_name=%r",
+                request_id,
+                bool(source_group_name),
+                generated.get("customer_name", ""),
             )
             generated_description = generated.get("issue_description", "")
             if not isinstance(generated_description, str) or not generated_description.strip():
@@ -2596,18 +2656,50 @@ def _wecom_group_context_scripts(config_url: str) -> str:
         }
       });
       window.getWeComCustomerGroupId = () => {
-        if (!/wxwork/i.test(navigator.userAgent || '')) return Promise.resolve('');
+        const emptyResult = (status) => ({ chatId: '', status });
+        const reportResult = (result) => {
+          window.wecomCustomerGroupLookupStatus = result.status;
+          try {
+            if (window.console && typeof window.console.info === 'function') {
+              window.console.info('[wecom-group-context]', result.status);
+            }
+          } catch (_) {}
+          return result.chatId;
+        };
+        if (!/wxwork/i.test(navigator.userAgent || '')) {
+          return Promise.resolve(reportResult(emptyResult('not_wecom_client')));
+        }
         const lookup = async () => {
           try {
-            for (const src of sdkScripts) await loadScript(src);
-            if (!window.wx || typeof window.wx.agentConfig !== 'function') return '';
+            try {
+              for (const src of sdkScripts) await loadScript(src);
+            } catch (_) {
+              return emptyResult('sdk_script_load_failed');
+            }
+            if (!window.wx || typeof window.wx.agentConfig !== 'function') {
+              return emptyResult('sdk_api_unavailable');
+            }
             const pageUrl = window.location.href.split('#', 1)[0];
-            const response = await fetch(
-              `${configEndpoint}?url=${encodeURIComponent(pageUrl)}`,
-              { credentials: 'same-origin' }
-            );
-            if (!response.ok) return '';
-            const config = await response.json();
+            let response;
+            try {
+              response = await fetch(
+                `${configEndpoint}?url=${encodeURIComponent(pageUrl)}`,
+                { credentials: 'same-origin' }
+              );
+            } catch (_) {
+              return emptyResult('js_sdk_config_fetch_failed');
+            }
+            if (!response.ok) return emptyResult('js_sdk_config_http_error');
+            let config;
+            try {
+              config = await response.json();
+            } catch (_) {
+              return emptyResult('js_sdk_config_invalid');
+            }
+            if (!config || !config.corpid || !config.agentid || !config.signature) {
+              return emptyResult('js_sdk_config_invalid');
+            }
+            let contextStatus = 'agent_config_timeout';
             const context = await new Promise((resolve) => {
               let finished = false;
               const timer = window.setTimeout(() => finish(null), 5000);
@@ -2627,26 +2719,45 @@ def _wecom_group_context_scripts(config_url: str) -> str:
                   jsApiList: ['getContext', 'getCurExternalChat'],
                   success: async () => {
                     const result = await invoke('getContext');
+                    contextStatus = result && result.err_msg === 'getContext:ok'
+                      ? 'context_ready'
+                      : 'get_context_failed';
                     finish(result && result.err_msg === 'getContext:ok' ? result : null);
                   },
-                  fail: () => finish(null)
+                  fail: () => {
+                    contextStatus = 'agent_config_failed';
+                    finish(null);
+                  }
                 });
               } catch (_) {
+                contextStatus = 'agent_config_failed';
                 finish(null);
               }
             });
-            if (!context || context.entry !== 'group_chat_tools') return '';
+            if (!context) return emptyResult(contextStatus);
+            if (context.entry !== 'group_chat_tools') {
+              return emptyResult('not_group_chat_tools');
+            }
             const group = await invoke('getCurExternalChat');
-            if (!group || group.err_msg !== 'getCurExternalChat:ok') return '';
-            return typeof group.chatId === 'string' ? group.chatId : '';
+            if (!group) return emptyResult('get_cur_external_chat_timeout');
+            if (group.err_msg !== 'getCurExternalChat:ok') {
+              return emptyResult('get_cur_external_chat_failed');
+            }
+            if (typeof group.chatId !== 'string' || !group.chatId.trim()) {
+              return emptyResult('chat_id_missing');
+            }
+            return { chatId: group.chatId, status: 'success' };
           } catch (_) {
-            return '';
+            return emptyResult('lookup_exception');
           }
         };
         return Promise.race([
           lookup(),
-          new Promise((resolve) => window.setTimeout(() => resolve(''), 9000))
-        ]);
+          new Promise((resolve) => window.setTimeout(
+            () => resolve(emptyResult('lookup_timeout')),
+            9000
+          ))
+        ]).then(reportResult);
       };
     })();
     </script>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import threading
 import time
@@ -15,6 +16,7 @@ from kefu.config import Settings
 from kefu.tools import LoggedHttpClient
 
 _API_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
+logger = logging.getLogger(__name__)
 
 
 class WeComCustomerGroupError(RuntimeError):
@@ -206,6 +208,19 @@ class WeComCustomerGroupClient:
             raise WeComCustomerGroupError("企业微信返回了无效响应")
         errcode = payload.get("errcode")
         if errcode != 0:
+            if isinstance(errcode, int) and not isinstance(errcode, bool):
+                diagnostic_errcode = str(errcode)
+            elif isinstance(errcode, str) and len(errcode) <= 32 and all(
+                char.isascii() and (char.isalnum() or char in "_.:-") for char in errcode
+            ):
+                diagnostic_errcode = errcode or "unavailable"
+            else:
+                diagnostic_errcode = "unavailable"
+            logger.warning(
+                "wecom_customer_group_api_error operation=%s errcode=%s",
+                operation,
+                diagnostic_errcode,
+            )
             raise WeComCustomerGroupError("企业微信客户群查询未获授权或失败")
         return payload
 
