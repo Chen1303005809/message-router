@@ -1511,6 +1511,23 @@ def create_app(
             return actor
         try:
             case = issue_management.get(issue_number, actor)
+            if (
+                case.lifecycle_status is LifecycleStatus.OPEN
+                and case.status is CaseStatus.PENDING_CONFIRMATION
+                and case.can_accept_pending
+            ):
+                try:
+                    issue_management.execute(
+                        SetCaseStatus(
+                            case_ref=case.case_ref,
+                            expected_version=case.version,
+                            status=CaseStatus.IN_PROGRESS,
+                        ),
+                        actor,
+                    )
+                except Conflict:
+                    pass
+                case = issue_management.get(issue_number, actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         can_use_side_selector = administration.is_global_admin(actor)
@@ -1548,8 +1565,6 @@ def create_app(
           <header class="case-titlebar">
             <div><h1>{escape(case.title)}</h1></div>
             <div class="case-state-badges">
-              {_case_status_badge(case.status)}
-              {_waiting_badge(case.waiting_on)}
               {_deadline_badge(case.deadline_status)}
               {_priority_badge(case.priority)}
             </div>
@@ -2437,14 +2452,11 @@ h2 { color: #23344f; }
   font-size: 11px; font-weight: 750; white-space: nowrap;
 }
 .status-open { color: #075985; background: #e0f2fe; }
-.status-closed, .waiting-none { color: #58667b; background: #edf0f4; }
-.issue-current-status { color: #475467; background: #f2f4f7; }
+.status-closed { color: #58667b; background: #edf0f4; }
 .case-status-pending { color: #805000; background: #fff2cc; }
 .case-status-progress { color: #087a54; background: #e5f7ef; }
 .case-status-feedback { color: #155eef; background: #eaf1ff; }
 .case-status-suspended { color: #6941c6; background: #f2edff; }
-.waiting-consult { color: #155eef; background: #eaf1ff; }
-.waiting-dev { color: #067647; background: #e5f7ef; }
 .deadline-approaching { color: #9a5b00; background: #fff2cc; }
 .deadline-overdue { color: #b42318; background: #fee4e2; }
 .priority-normal { color: #58667b; background: #edf0f4; }
@@ -3271,20 +3283,6 @@ def _recent_status_change_card(item: Any, path_for: Callable[[str], str]) -> str
     )
 
 
-def _waiting_badge(waiting: WaitingOn) -> str:
-    label = _waiting_on_label(waiting)
-    color = {
-        WaitingOn.CONSULT: "waiting-consult",
-        WaitingOn.DEV: "waiting-dev",
-        WaitingOn.NONE: "waiting-none",
-    }[waiting]
-    return f'<span class="status-badge {color}">{label}</span>'
-
-
-def _issue_current_status_badge(status: str) -> str:
-    return f'<span class="status-badge issue-current-status">{escape(status)}</span>'
-
-
 def _waiting_on_label(waiting: WaitingOn) -> str:
     return {
         WaitingOn.CONSULT: "待咨询处理",
@@ -3672,7 +3670,6 @@ def _top_close_control(case: Any, path_for: Callable[[str], str]) -> str:
 
 
 def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
-    current_status = _case_status_badge(case.status)
     if case.lifecycle_status is LifecycleStatus.CLOSED:
         reopen_note = (
             "问题已关闭。如需继续处理，请使用下方“重新打开”。"
@@ -3681,7 +3678,7 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
         )
         return f"""
         <section class="status-controls panel" aria-label="问题状态操作">
-          <div class="status-controls-heading"><h2>问题状态</h2>{current_status}</div>
+          <div class="status-controls-heading"><h2>状态操作</h2></div>
           <p class="status-closed-note">{reopen_note}</p>
         </section>
         """
@@ -3721,7 +3718,7 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
 
     return f"""
     <section class="status-controls panel" aria-label="问题状态操作">
-      <div class="status-controls-heading"><h2>问题状态</h2>{current_status}</div>
+      <div class="status-controls-heading"><h2>状态操作</h2></div>
       <p class="status-controls-help">{help_text}<br>待客户反馈和关闭仅当前咨询处理人、咨询队列管理员或总管理员可操作，所有变更都会记录在问题时间线。</p>
       <div class="status-control-actions">{"".join(buttons)}</div>
     </section>
@@ -3813,7 +3810,7 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
     card_content = (
         f'<div class="case-card-top"><strong class="case-card-title">{title}</strong>'
         f'<div class="case-card-badges">{_priority_badge(summary.priority)}'
-        f"{_case_status_badge(summary.status)}{_issue_current_status_badge(summary.issue_current_status)}"
+        f"{_case_list_status_badge(summary)}"
         f"{_deadline_badge(summary.deadline_status)}</div></div>"
         f'<div class="case-customer">客户 / 企业：{customer_name}</div>'
         f'<div class="case-card-meta"><span class="case-ref">{human_number}</span>'
@@ -3832,6 +3829,17 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
         '<article class="case-card">'
         f'<a class="case-card-link" href="{case_path}">{card_content}</a></article>'
     )
+
+
+def _case_list_status_badge(summary: Any) -> str:
+    if summary.lifecycle_status is LifecycleStatus.CLOSED:
+        return ""
+    status = (
+        CaseStatus.PENDING_CONFIRMATION
+        if summary.status is CaseStatus.PENDING_CONFIRMATION
+        else CaseStatus.IN_PROGRESS
+    )
+    return _case_status_badge(status)
 
 
 def _can_auto_accept_case(case: Any) -> bool:

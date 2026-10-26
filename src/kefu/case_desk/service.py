@@ -1419,6 +1419,18 @@ class CaseDesk:
         self._assert_open(case)
         parts = self._validate_parts(command.parts)
         self._assert_media_exists(session, parts)
+        previous_status = case.status
+        mark_processing = (
+            isinstance(actor, GroupActor)
+            and side is EntrySide.DEV
+            and case.lifecycle_status is LifecycleStatus.OPEN
+            and case.status
+            in {
+                CaseStatus.PENDING_CONFIRMATION,
+                CaseStatus.WAITING_CUSTOMER,
+                CaseStatus.SUSPENDED,
+            }
+        )
         entry = self._append_entry(
             session,
             case=case,
@@ -1466,6 +1478,20 @@ class CaseDesk:
                 item_platform_result=item_platform_result,
             )
         ]
+        if mark_processing:
+            case.status = CaseStatus.IN_PROGRESS
+            self._append_entry(
+                session,
+                case=case,
+                kind=CaseEntryKind.STATUS_CHANGED,
+                side=EntrySide.SYSTEM,
+                actor_user=actor_user,
+                actor_name=actor_name,
+                metadata={
+                    "from_status": previous_status.value,
+                    "to_status": CaseStatus.IN_PROGRESS.value,
+                },
+            )
         case.version += 1
         return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
 
