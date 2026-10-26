@@ -106,6 +106,7 @@ docker compose logs -f web bot-worker | grep '\[GROUP-TRACE\]'
 - 让 `WEB_BASE_URL` 成为企业微信 OAuth/模板卡片信任的 HTTPS 域名；
 - `WECOM_BOT_ID`、`WECOM_BOT_SECRET`，以及推荐配置的 `WECOM_BOT_MENTION_NAME`。如果平台回调提供明确的 @ 标识，后者不是必须；否则它用于严格拒绝未 @ 机器人的群聊消息。
 - 每个可新建问题的咨询队列和每个可用研发团队都需要一个活动群聊绑定。群聊机器人操作不依赖成员 userid；H5 登录和账号级操作继续由企业微信 OAuth 与团队权限控制。
+- 启用外部客户群工具栏识别时，将 H5 域名加入企业微信 JS-SDK 可信域名，在自建应用中配置“客户群工具栏”入口，并为该应用开通客户联系的客户群详情查询权限。现有 `WECOM_CORP_SECRET` 必须是该自建应用的 Secret；客户群群主需在应用可见范围内。群名查询或成员校验失败时，H5 上传仍会按普通草稿流程继续。
 
 长连接模式不需要 URL 回调的 Token 或 EncodingAESKey。企业微信机器人凭据和真实企业成员信息都不会写进仓库；未配置 Bot ID/Secret 时，worker 会在启动阶段明确失败，而不会错误地回退到模拟传输或 URL 回调。
 

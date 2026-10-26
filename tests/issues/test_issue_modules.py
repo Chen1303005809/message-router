@@ -161,7 +161,7 @@ def test_confirm_intake_writes_issue_timeline_and_initial_delivery_idempotently(
             fields=IssueFields(
                 issue_description="接口请求超时",
                 initial_acceptance_team_id=issue_context["acceptance_id"],
-                suspected_type="Bug",
+                suspected_type="盘中",
                 current_situation="登录后偶发超时",
                 deadline=deadline,
             ),
@@ -179,11 +179,12 @@ def test_confirm_intake_writes_issue_timeline_and_initial_delivery_idempotently(
         assert issue.creator_id == actor.user_id
         assert issue.initial_acceptance_team_id == issue_context["acceptance_id"]
         assert issue.issue_description == "接口请求超时"
-        assert issue.suspected_type == "Bug"
+        assert issue.suspected_type == "盘中"
         assert issue.issue_current_situation == "登录后偶发超时"
         assert issue.issue_current_status == "问题未回复"
         assert issue.issue_source == "工作台"
-        assert issue.bug_number == f"BUG-{confirmed.issue_number}"
+        expected_bug_number = f"{datetime.now(ZoneInfo('Asia/Shanghai')):%m%d}01"
+        assert issue.bug_number == expected_bug_number
         assert issue.initial_expires_at is not None
         stored_deadline = issue.initial_expires_at
         if stored_deadline.tzinfo is None:
@@ -202,7 +203,7 @@ def test_confirm_intake_writes_issue_timeline_and_initial_delivery_idempotently(
             select(Delivery).where(Delivery.entry_id == confirmed.result.entry_id)
         ).all()
         assert entry_count == 1
-        assert part_count == 4
+        assert part_count == 2
         assert len(deliveries) == 1
         assert deliveries[0].status is DeliveryStatus.PENDING
         assert repeated.result.idempotent is True
@@ -220,6 +221,7 @@ def test_manual_inspection_sends_one_summary_per_current_dev_team(issue_context)
                 issue_description="登录接口失败",
                 customer_name="客户甲",
                 initial_acceptance_team_id=issue_context["acceptance_id"],
+                suspected_type="盘中",
                 deadline=deadline,
             ),
         ),
@@ -344,6 +346,7 @@ def test_agent_issue_execute_uses_issue_management_permissions(issue_context):
             fields=IssueFields(
                 issue_description="登录后页面报错",
                 initial_acceptance_team_id=issue_context["acceptance_id"],
+                suspected_type="盘中",
             ),
         ),
         actor,
@@ -411,7 +414,11 @@ def test_agent_uses_openai_chat_completions_with_text_only(issue_context):
     agent = Agent(issue_context["settings"], client=client)
     try:
         result = asyncio.run(
-            agent.draft_issue("引用消息\n[图片]\n@机器人 保存失败", ["研发一组"])
+            agent.draft_issue(
+                "引用消息\n[图片]\n@机器人 保存失败",
+                ["研发一组"],
+                source_group_name="星河科技客户群",
+            )
         )
     finally:
         asyncio.run(agent.close())
@@ -424,6 +431,10 @@ def test_agent_uses_openai_chat_completions_with_text_only(issue_context):
     assert request.headers["authorization"] == "Bearer test-key"
     assert payload["model"] == "test-model"
     assert "[图片]" in payload["messages"][1]["content"]
+    prompt = payload["messages"][1]["content"]
+    assert '"verified_source_group_name": "星河科技客户群"' in prompt
+    assert "群名不得覆盖聊天材料明确写出的名称" in prompt
+    assert "项目群" in prompt
     assert result["issue_description"] == "接口超时"
     assert "image bytes" not in request_body
 
@@ -486,15 +497,25 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
     import kefu.web.app as web_app
 
     captured_text: list[str] = []
+    captured_group_names: list[str | None] = []
 
     class StubAgent:
-        async def draft_issue(self, pasted_text: str, acceptance_groups: list[str]):
+        async def draft_issue(
+            self,
+            pasted_text: str,
+            acceptance_groups: list[str],
+            *,
+            request_id: str | None = None,
+            source_group_name: str | None = None,
+        ):
             captured_text.append(pasted_text)
+            captured_group_names.append(source_group_name)
             assert acceptance_groups == ["研发一组"]
             return {
                 "issue_description": "工作台生成的问题描述",
+                "customer_name": "客户名称待确认",
                 "initial_acceptance_group": "研发一组",
-                "suspected_type": "Bug",
+                "suspected_type": "盘中",
                 "current_situation": "上传图片供研发查看",
             }
 
@@ -522,7 +543,7 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
         assert legacy_api.status_code == 307
         assert legacy_api.headers["location"] == "/api/issues/issue-123"
         assert upload_page.status_code == 200
-        assert "上传咨询材料" in upload_page.text
+        assert "新建问题" in upload_page.text
 
         pasted_text = "引用内容\n[图片]\n@机器人 保存后报错\n[图片]"
         draft_response = client.post(
@@ -537,13 +558,14 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
         )
         assert draft_response.status_code == 303, draft_response.text
         assert captured_text == [pasted_text]
+        assert captured_group_names == [None]
         assert "PRIVATE_IMAGE_BYTES" not in captured_text[0]
 
         draft_path = draft_response.headers["location"]
         preview = client.get(draft_path, headers=headers)
         assert preview.status_code == 200
         assert "问题状态" in preview.text
-        assert "Bug" in preview.text
+        assert "盘中" in preview.text
         assert "[图片]" in preview.text
         assert "<img class=\"intake-image\"" in preview.text
         draft_id = draft_path.rsplit("/", maxsplit=1)[-1]
@@ -555,9 +577,11 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
             f"/issues/drafts/{draft_id}/confirm",
             headers=headers,
             data={
+                "issue_title": "确认后的问题标题",
                 "issue_description": "确认后的问题描述",
+                "customer_name": "用户确认的客户名称",
                 "initial_acceptance_team_id": str(issue_context["acceptance_id"]),
-                "suspected_type": "Bug",
+                "suspected_type": "盘中",
                 "issue_current_status": "问题未回复",
                 "current_situation": "确认后的现状",
                 "deadline": local_deadline,
@@ -571,9 +595,157 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
         detail = client.get(confirmation.headers["location"], headers=headers)
         assert detail.status_code == 200
         assert "确认后的问题描述" in detail.text
-        assert "版本上线后首次反馈" in detail.text
         issue_number = confirmation.headers["location"].rsplit("/", maxsplit=1)[-1]
         issue_api = client.get(f"/api/issues/{issue_number}", headers=headers)
         assert issue_api.status_code == 200
         assert issue_api.json()["issue_number"] == issue_number
+        assert issue_api.json()["customer_name"] == "用户确认的客户名称"
         assert "case_ref" not in issue_api.json()
+
+
+def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
+    issue_context, monkeypatch
+):
+    import kefu.web.app as web_app
+
+    captured_group_names: list[str | None] = []
+    group_lookups: list[tuple[str, str]] = []
+
+    class StubAgent:
+        async def draft_issue(
+            self,
+            pasted_text: str,
+            acceptance_groups: list[str],
+            *,
+            request_id: str | None = None,
+            source_group_name: str | None = None,
+        ):
+            captured_group_names.append(source_group_name)
+            return {
+                "issue_title": "客户侧问题",
+                "issue_description": "客户侧问题描述",
+                "customer_name": "杭州星河科技",
+                "initial_acceptance_group": "研发一组",
+                "suspected_type": "盘中",
+                "current_situation": "待研发确认",
+            }
+
+        async def close(self):
+            return None
+
+    class FakeCustomerGroups:
+        is_configured = True
+
+        def agent_js_sdk_config(self, page_url: str):
+            assert page_url == "http://localhost:8000/issues/new"
+            return {
+                "corpid": "corp-id",
+                "agentid": 100001,
+                "timestamp": 1,
+                "nonceStr": "nonce",
+                "signature": "signature",
+            }
+
+        def customer_group_name_for_member(self, chat_id: str, wecom_userid: str):
+            group_lookups.append((chat_id, wecom_userid))
+            return "杭州星河科技客户群"
+
+    stub_agent = StubAgent()
+    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: stub_agent)
+    settings = replace(issue_context["settings"], web_base_url="http://localhost:8000")
+    app = web_app.create_app(
+        session_factory=issue_context["factory"],
+        settings=settings,
+        storage=issue_context["storage"],
+        wecom_customer_groups=FakeCustomerGroups(),
+    )
+    headers = {"X-WeCom-UserId": "consult-1"}
+    with TestClient(app) as client:
+        upload_page = client.get("/issues/new", headers=headers)
+        assert upload_page.status_code == 200
+        assert "getWeComCustomerGroupId" in upload_page.text
+        config_response = client.get(
+            "/api/wecom/agent-js-sdk-config",
+            headers=headers,
+            params={"url": "http://localhost:8000/issues/new"},
+        )
+        assert config_response.status_code == 200
+        assert config_response.json()["corpid"] == "corp-id"
+        assert config_response.headers["cache-control"] == "no-store, private"
+
+        draft_response = client.post(
+            "/issues/draft",
+            headers=headers,
+            data={
+                "consult_queue_id": str(issue_context["queue_id"]),
+                "pasted_text": "页面保存失败",
+                "source_chat_id": "verified-by-wecom",
+                "source_group_name": "浏览器伪造的名称",
+            },
+            follow_redirects=False,
+        )
+        assert draft_response.status_code == 303, draft_response.text
+        assert group_lookups == [("verified-by-wecom", "consult-1")]
+        assert captured_group_names == ["杭州星河科技客户群"]
+
+        preview = client.get(draft_response.headers["location"], headers=headers)
+        assert preview.status_code == 200
+        assert 'name="customer_name"' in preview.text
+        assert 'value="杭州星河科技"' in preview.text
+
+
+def test_workbench_upload_continues_without_group_context_when_wecom_lookup_fails(
+    issue_context, monkeypatch
+):
+    import kefu.web.app as web_app
+
+    captured_group_names: list[str | None] = []
+
+    class StubAgent:
+        async def draft_issue(
+            self,
+            pasted_text: str,
+            acceptance_groups: list[str],
+            *,
+            request_id: str | None = None,
+            source_group_name: str | None = None,
+        ):
+            captured_group_names.append(source_group_name)
+            return {
+                "issue_description": "普通问题草稿",
+                "customer_name": "需要补充",
+                "initial_acceptance_group": "研发一组",
+                "suspected_type": "盘中",
+                "current_situation": "",
+            }
+
+        async def close(self):
+            return None
+
+    class FailedCustomerGroups:
+        is_configured = True
+
+        def customer_group_name_for_member(self, chat_id: str, wecom_userid: str):
+            raise web_app.WeComCustomerGroupError("企微暂不可用")
+
+    stub_agent = StubAgent()
+    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: stub_agent)
+    app = web_app.create_app(
+        session_factory=issue_context["factory"],
+        settings=issue_context["settings"],
+        storage=issue_context["storage"],
+        wecom_customer_groups=FailedCustomerGroups(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/issues/draft",
+            headers={"X-WeCom-UserId": "consult-1"},
+            data={
+                "consult_queue_id": str(issue_context["queue_id"]),
+                "pasted_text": "普通上传继续完成",
+                "source_chat_id": "unavailable-group",
+            },
+            follow_redirects=False,
+        )
+    assert response.status_code == 303, response.text
+    assert captured_group_names == [None]

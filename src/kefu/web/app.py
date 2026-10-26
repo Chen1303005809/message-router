@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -12,7 +14,7 @@ from decimal import Decimal, DecimalException
 from hmac import compare_digest
 from html import escape
 from typing import Any
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -96,10 +98,12 @@ from kefu.persistence.models import (
     PartKind,
     StoredMedia,
     TeamKind,
+    User,
     WaitingOn,
 )
 from kefu.relay.handler import Relay
 from kefu.web.auth import AuthenticationError, WebAuthenticator
+from kefu.wecom.customer_groups import WeComCustomerGroupClient, WeComCustomerGroupError
 from kefu.wecom.transport import InboundImagePart
 
 logger = logging.getLogger(__name__)
@@ -111,8 +115,10 @@ def create_app(
     settings: Settings | None = None,
     authenticator: WebAuthenticator | None = None,
     storage: ObjectStorage | None = None,
+    wecom_customer_groups: WeComCustomerGroupClient | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    wecom_customer_groups = wecom_customer_groups or WeComCustomerGroupClient(settings)
     database_target_fp = "injected-session-factory"
     if session_factory is None:
         engine = create_engine_from_url(settings.database_url)
@@ -165,6 +171,7 @@ def create_app(
         "agent": agent,
         "agent_tools": agent_tools,
         "recipient_resolver": recipient_resolver,
+        "wecom_customer_groups": wecom_customer_groups,
     }
 
     def external_path(path: str) -> str:
@@ -288,6 +295,34 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
 
+    @app.get("/api/wecom/agent-js-sdk-config", include_in_schema=False)
+    async def agent_js_sdk_config(request: Request, url: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        del actor  # Authentication keeps this short-lived signature endpoint private.
+        try:
+            parsed_url = urlsplit(url)
+            configured_url = urlsplit(settings.web_base_url)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="JS-SDK 签名页面地址无效") from error
+        expected_path = external_path("/issues/new")
+        if (
+            parsed_url.scheme != configured_url.scheme
+            or parsed_url.netloc != configured_url.netloc
+            or parsed_url.path != expected_path
+            or parsed_url.fragment
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+        ):
+            raise HTTPException(status_code=400, detail="JS-SDK 签名页面地址无效")
+        try:
+            config = await asyncio.to_thread(
+                wecom_customer_groups.agent_js_sdk_config,
+                url,
+            )
+        except WeComCustomerGroupError as error:
+            raise HTTPException(status_code=503, detail="企微 JS-SDK 暂不可用") from error
+        return JSONResponse(config, headers={"Cache-Control": "no-store, private"})
+
     @app.on_event("shutdown")
     async def close_agent_client() -> None:
         await agent.close()
@@ -383,6 +418,11 @@ def create_app(
             queue_control = f'<input type="hidden" name="consult_queue_id" value="{queues[0].id}">'
         if not dev_teams:
             raise _http_error(Forbidden("当前没有已绑定群聊的初次受理组"))
+        group_context_scripts = (
+            _wecom_group_context_scripts(external_path("/api/wecom/agent-js-sdk-config"))
+            if wecom_customer_groups.is_configured
+            else ""
+        )
         body = f"""
         <main class="create-main intake-page">
           <header class="page-heading intake-heading">
@@ -393,6 +433,7 @@ def create_app(
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
               aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
               placeholder="粘贴问题内容；图片可拖入此处…"></textarea>
+            <input type="hidden" name="source_chat_id" value="">
             <div class="intake-actions">
               {_image_upload_controls(compact=True)}
               {queue_control}
@@ -403,27 +444,37 @@ def create_app(
               <span class="draft-loading-spinner" aria-hidden="true"></span>
               正在整理…
             </p>
+            <p class="muted">从企微外部客户群工具栏打开时，系统会尝试读取群名，作为客户名称的识别线索。</p>
           </form>
           <script>
           (() => {{
             const form = document.querySelector('.intake-page form');
             const button = form?.querySelector('[data-issue-draft-submit="true"]');
             const status = form?.querySelector('[data-issue-draft-status="true"]');
-            if (!form || !button || !status) return;
+            const sourceChatId = form?.querySelector('[name="source_chat_id"]');
+            if (!form || !button || !status || !sourceChatId) return;
             let submitting = false;
-            form.addEventListener('submit', (event) => {{
+            form.addEventListener('submit', async (event) => {{
               if (submitting) {{
                 event.preventDefault();
                 return;
               }}
+              event.preventDefault();
               submitting = true;
               button.disabled = true;
               button.textContent = '正在上传…';
               status.hidden = false;
               form.setAttribute('aria-busy', 'true');
+              try {{
+                sourceChatId.value = await getWeComCustomerGroupId();
+              }} catch (_) {{
+                sourceChatId.value = '';
+              }}
+              HTMLFormElement.prototype.submit.call(form);
             }});
           }})();
           </script>
+          {group_context_scripts}
         </main>
         """
         return HTMLResponse(_page("上传问题材料", body, body_class="issue-intake-page"))
@@ -455,6 +506,32 @@ def create_app(
                 len(pasted_text),
                 len(dev_teams),
             )
+            source_chat_id = _optional_form_text(form, "source_chat_id")
+            if source_chat_id and len(source_chat_id) > 256:
+                source_chat_id = None
+            source_group_name: str | None = None
+            if source_chat_id:
+                with session_factory() as session:
+                    source_user = session.get(User, actor.user_id)
+                    wecom_userid = source_user.wecom_userid if source_user is not None else ""
+                try:
+                    source_group_name = await asyncio.to_thread(
+                        wecom_customer_groups.customer_group_name_for_member,
+                        source_chat_id,
+                        wecom_userid,
+                    )
+                    logger.info(
+                        "issue_draft_customer_group_resolved request_id=%s chatid_fp=%s",
+                        request_id,
+                        opaque_id_fingerprint(source_chat_id),
+                    )
+                except WeComCustomerGroupError as error:
+                    logger.info(
+                        "issue_draft_customer_group_unavailable request_id=%s chatid_fp=%s reason=%s",
+                        request_id,
+                        opaque_id_fingerprint(source_chat_id),
+                        str(error),
+                    )
             draft_processing_task_id = desk.start_issue_draft_processing()
             message_id = uuid4()
             message = message_receiver.receive_workbench(message_id, pasted_text)
@@ -468,6 +545,7 @@ def create_app(
                     pasted_text,
                     [team.name for team in dev_teams],
                     request_id=request_id,
+                    source_group_name=source_group_name,
                 )
             except AgentConfigurationError as error:
                 logger.error(
@@ -615,7 +693,7 @@ def create_app(
             <p class="muted">此处内容会作为机器人发给初次受理组的正文。请对照上方原始材料核对，修正遗漏或不准确之处；图片仍作为附件按原顺序转发。</p>
             <section class="intake-customer-info">
               <h2>客户信息</h2>
-              <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="Agent 根据聊天内容识别；无法确认时请补充"></label>
+              <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="Agent 根据聊天或客户群名称线索识别；无法确认时请补充"></label>
               <div class="form-row">
                 <label>联系人（选填） <input name="customer_contact_name" maxlength="256" value="{escape(fields.customer_contact_name)}"></label>
                 <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" value="{escape(fields.customer_contact_method)}" placeholder="电话、邮箱或其他联系方法"></label>
@@ -2464,6 +2542,101 @@ button.primary { background: var(--blue); }
   .status-change-card p { white-space: normal; }
 }
 """
+
+
+def _wecom_group_context_scripts(config_url: str) -> str:
+    """Return a best-effort WeCom toolbar lookup script for the intake form."""
+    config_url_literal = json.dumps(config_url).replace("<", "\\u003c")
+    return """
+    <script>
+    (() => {
+      const configEndpoint = __CONFIG_URL__;
+      const sdkScripts = [
+        'https://res.wx.qq.com/open/js/jweixin-1.2.0.js',
+        'https://open.work.weixin.qq.com/wwopen/js/jwxwork-1.0.0.js'
+      ];
+      const loadScript = (src) => new Promise((resolve, reject) => {
+        if (document.querySelector(`script[src="${src}"]`)) {
+          if (window.wx) { resolve(); return; }
+        }
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+      const invoke = (method) => new Promise((resolve) => {
+        let finished = false;
+        const timer = window.setTimeout(() => finish(null), 4000);
+        const finish = (value) => {
+          if (finished) return;
+          finished = true;
+          window.clearTimeout(timer);
+          resolve(value);
+        };
+        try {
+          window.wx.invoke(method, {}, (result) => finish(result || null));
+        } catch (_) {
+          finish(null);
+        }
+      });
+      window.getWeComCustomerGroupId = () => {
+        if (!/wxwork/i.test(navigator.userAgent || '')) return Promise.resolve('');
+        const lookup = async () => {
+          try {
+            for (const src of sdkScripts) await loadScript(src);
+            if (!window.wx || typeof window.wx.agentConfig !== 'function') return '';
+            const pageUrl = window.location.href.split('#', 1)[0];
+            const response = await fetch(
+              `${configEndpoint}?url=${encodeURIComponent(pageUrl)}`,
+              { credentials: 'same-origin' }
+            );
+            if (!response.ok) return '';
+            const config = await response.json();
+            const context = await new Promise((resolve) => {
+              let finished = false;
+              const timer = window.setTimeout(() => finish(null), 5000);
+              const finish = (value) => {
+                if (finished) return;
+                finished = true;
+                window.clearTimeout(timer);
+                resolve(value);
+              };
+              try {
+                window.wx.agentConfig({
+                  corpid: config.corpid,
+                  agentid: config.agentid,
+                  timestamp: config.timestamp,
+                  nonceStr: config.nonceStr,
+                  signature: config.signature,
+                  jsApiList: ['getContext', 'getCurExternalChat'],
+                  success: async () => {
+                    const result = await invoke('getContext');
+                    finish(result && result.err_msg === 'getContext:ok' ? result : null);
+                  },
+                  fail: () => finish(null)
+                });
+              } catch (_) {
+                finish(null);
+              }
+            });
+            if (!context || context.entry !== 'group_chat_tools') return '';
+            const group = await invoke('getCurExternalChat');
+            if (!group || group.err_msg !== 'getCurExternalChat:ok') return '';
+            return typeof group.chatId === 'string' ? group.chatId : '';
+          } catch (_) {
+            return '';
+          }
+        };
+        return Promise.race([
+          lookup(),
+          new Promise((resolve) => window.setTimeout(() => resolve(''), 9000))
+        ]);
+      };
+    })();
+    </script>
+    """.replace("__CONFIG_URL__", config_url_literal)
 
 
 def _page(title: str, body: str, *, body_class: str = "") -> str:
