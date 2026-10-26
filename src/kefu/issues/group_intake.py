@@ -713,7 +713,7 @@ class GroupIssueIntakeService:
                 (
                     "问题已派发",
                     f"目标研发群：**{_markdown_value(team_name)}**",
-                    f"问题编号：**{_markdown_value(issue.case_ref)}**",
+                    f"BUG 编号：**{_markdown_value(issue.bug_number or '待生成')}**",
                     f"机器人引用编号：〔KF·{issue.case_ref}〕",
                 )
             )
