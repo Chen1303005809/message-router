@@ -573,6 +573,19 @@ def create_app(
                 sum(bool(value.strip()) for value in generated.values()),
                 selected_team is not None,
             )
+            generated_description = generated.get("issue_description", "")
+            if not isinstance(generated_description, str) or not generated_description.strip():
+                fallback_description = pasted_text.strip()
+                if len(fallback_description) > 20_000:
+                    raise ValidationError(
+                        "Agent 未能生成问题描述，且原始材料超过20000个字符；请缩短材料后重试"
+                    )
+                logger.warning(
+                    "issue_draft_agent_description_fallback request_id=%s text_chars=%s",
+                    request_id,
+                    len(fallback_description),
+                )
+                generated_description = fallback_description
             uploads: list[UploadFile] = []
             for item in form.getlist("images"):
                 if isinstance(item, UploadFile):
@@ -598,7 +611,7 @@ def create_app(
             parts = map_image_placeholders(pasted_text, media_ids)
             fields = IssueFields(
                 issue_title=generated.get("issue_title", ""),
-                issue_description=generated.get("issue_description", ""),
+                issue_description=generated_description,
                 initial_acceptance_team_id=selected_team.id if selected_team else None,
                 suspected_type=generated.get("suspected_type", ""),
                 current_situation=generated.get("current_situation", ""),

@@ -434,6 +434,7 @@ def test_agent_uses_openai_chat_completions_with_text_only(issue_context):
     prompt = payload["messages"][1]["content"]
     assert '"verified_source_group_name": "星河科技客户群"' in prompt
     assert "群名不得覆盖聊天材料明确写出的名称" in prompt
+    assert "issue_description 就必须填写非空内容" in prompt
     assert "项目群" in prompt
     assert result["issue_description"] == "接口超时"
     assert "image bytes" not in request_body
@@ -749,3 +750,69 @@ def test_workbench_upload_continues_without_group_context_when_wecom_lookup_fail
         )
     assert response.status_code == 303, response.text
     assert captured_group_names == [None]
+
+
+def test_external_group_upload_falls_back_when_agent_description_is_empty(
+    issue_context, monkeypatch
+):
+    import kefu.web.app as web_app
+
+    agent_inputs: list[tuple[str, str | None]] = []
+
+    class EmptyDescriptionAgent:
+        async def draft_issue(
+            self,
+            pasted_text: str,
+            acceptance_groups: list[str],
+            *,
+            request_id: str | None = None,
+            source_group_name: str | None = None,
+        ):
+            agent_inputs.append((pasted_text, source_group_name))
+            return {
+                "issue_title": "保存操作异常",
+                "issue_description": "",
+                "initial_acceptance_group": "研发一组",
+                "suspected_type": "盘中",
+                "current_situation": "",
+                "customer_name": "",
+                "customer_contact_name": "",
+                "customer_contact_method": "",
+            }
+
+        async def close(self):
+            return None
+
+    class CustomerGroups:
+        is_configured = True
+
+        def customer_group_name_for_member(self, chat_id: str, wecom_userid: str):
+            return "星河科技客户群"
+
+    monkeypatch.setattr(
+        web_app,
+        "Agent",
+        lambda _settings, _tools: EmptyDescriptionAgent(),
+    )
+    app = web_app.create_app(
+        session_factory=issue_context["factory"],
+        settings=issue_context["settings"],
+        storage=issue_context["storage"],
+        wecom_customer_groups=CustomerGroups(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/issues/draft",
+            headers={"X-WeCom-UserId": "consult-1"},
+            data={
+                "consult_queue_id": str(issue_context["queue_id"]),
+                "pasted_text": "登录后点击保存没有反应",
+                "source_chat_id": "external-group-id",
+            },
+            follow_redirects=False,
+        )
+        assert agent_inputs == [("登录后点击保存没有反应", "星河科技客户群")]
+        assert response.status_code == 303, response.text
+        preview = client.get(response.headers["location"], headers={"X-WeCom-UserId": "consult-1"})
+        assert preview.status_code == 200
+        assert "登录后点击保存没有反应</textarea>" in preview.text
