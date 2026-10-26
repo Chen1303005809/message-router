@@ -68,6 +68,7 @@ from kefu.config import Settings
 from kefu.inspection.service import IssueInspectionService
 from kefu.issues.contracts import IssueFields, IssueIntake
 from kefu.issues.service import IssueManagement, map_image_placeholders
+from kefu.logging_setup import configure_logging
 from kefu.media.storage import (
     MAX_IMAGE_BYTES,
     MediaIngestError,
@@ -106,12 +107,7 @@ from kefu.web.auth import AuthenticationError, WebAuthenticator
 from kefu.wecom.customer_groups import WeComCustomerGroupClient, WeComCustomerGroupError
 from kefu.wecom.transport import InboundImagePart
 
-# Uvicorn's default config does not add a root handler, so application INFO
-# records would otherwise be filtered by Python's default WARNING level.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+configure_logging("WEB")
 # httpx's built-in INFO log prints full request URLs, including access_token query values.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -483,11 +479,11 @@ def create_app(
               try {{
                 sourceChatId.value = await getWeComCustomerGroupId();
                 sourceChatStatus.value = window.wecomCustomerGroupLookupStatus || 'unknown';
-                sourceChatError.value = window.wecomCustomerGroupLookupError || '';
+                sourceChatError.value = window.wecomCustomerGroupLookupError || 'sdk_error_field_empty';
               }} catch (_) {{
                 sourceChatId.value = '';
                 sourceChatStatus.value = 'client_exception';
-                sourceChatError.value = '';
+                sourceChatError.value = 'client_exception';
               }}
               HTMLFormElement.prototype.submit.call(form);
             }});
@@ -550,21 +546,28 @@ def create_app(
             }
             if reported_group_lookup_status not in valid_group_lookup_statuses:
                 reported_group_lookup_status = "unknown"
-            reported_group_lookup_error = _optional_form_text(form, "source_chat_error") or ""
-            reported_group_lookup_error = "".join(
-                char
-                for char in reported_group_lookup_error[:100]
-                if char.isascii() and (char.isalnum() or char in "_.:-")
-            ) or "unavailable"
+            reported_group_lookup_error = _optional_form_text(form, "source_chat_error")
+            browser_error_present = reported_group_lookup_error is not None
+            safe_group_lookup_error = (
+                "".join(
+                    char
+                    for char in reported_group_lookup_error[:100]
+                    if char.isprintable()
+                )
+                if reported_group_lookup_error
+                else "unavailable"
+            )
             logger.info(
                 "issue_draft_customer_group_lookup_received request_id=%s browser_status=%s "
-                "browser_error=%s chat_id_present=%s chat_id_length=%s chatid_fp=%s",
+                "browser_error=%s chat_id_present=%s chat_id_length=%s chatid_fp=%s "
+                "browser_error_present=%s",
                 request_id,
                 reported_group_lookup_status,
-                reported_group_lookup_error,
+                safe_group_lookup_error,
                 bool(source_chat_id),
                 len(source_chat_id) if source_chat_id else 0,
                 opaque_id_fingerprint(source_chat_id) if source_chat_id else "unavailable",
+                browser_error_present,
             )
             if source_chat_id and len(source_chat_id) > 256:
                 logger.warning(
@@ -2677,6 +2680,19 @@ def _wecom_group_context_scripts(config_url: str) -> str:
         const sanitizeSdkError = (value) => typeof value === 'string'
           ? value.replace(/[^A-Za-z0-9_.:-]+/g, '_').slice(0, 100)
           : '';
+        const sdkErrorDetail = (result, method) => {
+          const value = result && (result.err_msg || result.errMsg || result.errmsg);
+          if (typeof value === 'string' && value) return sanitizeSdkError(value);
+          const keys = result && typeof result === 'object'
+            ? Object.keys(result).sort().slice(0, 8).join('_')
+            : 'no_result_object';
+          return `sdk_error_field_empty_keys_${sanitizeSdkError(keys) || 'none'}_${method}`;
+        };
+        const sdkCallSucceeded = (result, method) => Boolean(result && [
+          result.err_msg,
+          result.errMsg,
+          result.errmsg
+        ].includes(`${method}:ok`));
         const reportResult = (result) => {
           window.wecomCustomerGroupLookupStatus = result.status;
           window.wecomCustomerGroupLookupError = result.error || '';
@@ -2741,17 +2757,17 @@ def _wecom_group_context_scripts(config_url: str) -> str:
                   jsApiList: ['getContext', 'getCurExternalChat'],
                   success: async () => {
                     const result = await invoke('getContext');
-                    contextStatus = result && result.err_msg === 'getContext:ok'
+                    contextStatus = sdkCallSucceeded(result, 'getContext')
                       ? 'context_ready'
                       : 'get_context_failed';
                     if (contextStatus === 'get_context_failed') {
-                      contextError = sanitizeSdkError(result && result.err_msg);
+                      contextError = sdkErrorDetail(result, 'getContext');
                     }
-                    finish(result && result.err_msg === 'getContext:ok' ? result : null);
+                    finish(sdkCallSucceeded(result, 'getContext') ? result : null);
                   },
                   fail: (error) => {
                     contextStatus = 'agent_config_failed';
-                    contextError = sanitizeSdkError(error && (error.err_msg || error.errMsg));
+                    contextError = sdkErrorDetail(error, 'agentConfig');
                     finish(null);
                   }
                 });
@@ -2766,10 +2782,10 @@ def _wecom_group_context_scripts(config_url: str) -> str:
             }
             const group = await invoke('getCurExternalChat');
             if (!group) return emptyResult('get_cur_external_chat_timeout');
-            if (group.err_msg !== 'getCurExternalChat:ok') {
+            if (!sdkCallSucceeded(group, 'getCurExternalChat')) {
               return emptyResult(
                 'get_cur_external_chat_failed',
-                sanitizeSdkError(group.err_msg)
+                sdkErrorDetail(group, 'getCurExternalChat')
               );
             }
             if (typeof group.chatId !== 'string' || !group.chatId.trim()) {

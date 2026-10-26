@@ -20,6 +20,7 @@ from kefu.inspection.schedule import INSPECTION_TIMEZONE, next_inspection_at
 from kefu.inspection.service import IssueInspectionService
 from kefu.issues.group_intake import GroupIssueIntakeService
 from kefu.issues.service import IssueManagement
+from kefu.logging_setup import configure_logging
 from kefu.media.storage import (
     MediaIngestor,
     ObjectStorage,
@@ -605,5 +606,5 @@ async def run() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging("BOT-WORKER")
     asyncio.run(run())
