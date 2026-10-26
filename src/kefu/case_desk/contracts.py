@@ -323,6 +323,7 @@ class CaseSummary:
     case_ref: str
     title: str
     customer_name: str
+    bug_number: str | None
     priority: CasePriority
     status: CaseStatus
     lifecycle_status: LifecycleStatus

@@ -1559,6 +1559,38 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
+    @app.post("/issues/{issue_number}/open", include_in_schema=False)
+    async def open_issue_from_list(request: Request, issue_number: str) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            case = issue_management.get(issue_number, actor)
+            if _can_auto_accept_case(case):
+                try:
+                    issue_management.execute(
+                        SetCaseStatus(
+                            case_ref=case.case_ref,
+                            expected_version=case.version,
+                            status=CaseStatus.IN_PROGRESS,
+                        ),
+                        actor,
+                    )
+                except Conflict:
+                    case = issue_management.get(issue_number, actor)
+                    if _can_auto_accept_case(case):
+                        issue_management.execute(
+                            SetCaseStatus(
+                                case_ref=case.case_ref,
+                                expected_version=case.version,
+                                status=CaseStatus.IN_PROGRESS,
+                            ),
+                            actor,
+                        )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
+
     @app.post("/issues/{issue_number}/status", include_in_schema=False)
     async def set_issue_status(request: Request, issue_number: str) -> RedirectResponse:
         actor = page_actor_or_login(request)
@@ -2212,10 +2244,10 @@ h2 { color: #23344f; }
 .case-card:hover { border-color: #b6c9f3; box-shadow: 0 8px 20px #162a4610; transform: translateY(-1px); }
 .case-card-link { display: grid; gap: 8px; color: inherit; text-decoration: none; }
 .case-card-link:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; border-radius: 6px; }
-.case-card-action { justify-self: end; margin: 0; }
-.case-card-action button.status-action-accept { min-height: 36px; padding: 7px 13px; border: 1px solid transparent; border-radius: 9px; color: #fff; background: #285fe8; font-size: 13px; font-weight: 750; cursor: pointer; }
-.case-card-action button.status-action-accept:hover { background: #174bc4; }
-.case-card-action button.status-action-accept:focus-visible { outline: 3px solid #9db8ff; outline-offset: 2px; }
+.case-card-auto-accept { position: relative; }
+.case-card-hitbox { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 14px; color: transparent; background: transparent; cursor: pointer; }
+.case-card-hitbox:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; }
+.case-card-content { display: grid; gap: 8px; pointer-events: none; }
 .case-card-top, .case-card-meta, .case-card-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .case-card-title { font-size: 16px; font-weight: 750; line-height: 1.4; }
 .case-customer { font-size: 13px; color: #41516a; }
@@ -3351,6 +3383,7 @@ def _lifecycle_forms(case: Any, path_for: Callable[[str], str]) -> str:
 def _summary_json(summary: Any) -> dict[str, Any]:
     return {
         "issue_number": summary.issue_number,
+        "bug_number": summary.bug_number,
         "title": summary.title,
         "customer_name": summary.customer_name,
         "priority": summary.priority.value,
@@ -3369,37 +3402,56 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
     case_ref = escape(summary.case_ref)
     title = escape(summary.title)
     customer_name = escape(summary.customer_name or "未录入")
+    human_number = escape(summary.bug_number or "编号待生成")
     updated_at = _format_datetime(summary.updated_at)
     case_path = path_for(f"/issues/{case_ref}")
-    accept_form = ""
-    if (
-        summary.can_accept
-        and summary.lifecycle_status is LifecycleStatus.OPEN
+    can_auto_accept = (
+        summary.lifecycle_status is LifecycleStatus.OPEN
         and summary.status
         in {
             CaseStatus.PENDING_CONFIRMATION,
             CaseStatus.WAITING_CUSTOMER,
             CaseStatus.SUSPENDED,
         }
-    ):
-        accept_action = path_for(f"/issues/{case_ref}/status")
-        accept_form = (
-            f'<form class="case-card-action" method="post" action="{accept_action}">'
-            f'<input type="hidden" name="version" value="{summary.version}">'
-            f'<input type="hidden" name="status" value="{CaseStatus.IN_PROGRESS.value}">'
-            '<button type="submit" class="status-action-accept">受理</button></form>'
-        )
-    return (
-        '<article class="case-card">'
-        f'<a class="case-card-link" href="{case_path}">'
+        and (summary.status is not CaseStatus.PENDING_CONFIRMATION or summary.can_accept)
+    )
+    card_content = (
         f'<div class="case-card-top"><strong class="case-card-title">{title}</strong>'
         f'<div class="case-card-badges">{_priority_badge(summary.priority)}'
         f"{_case_status_badge(summary.status)}{_waiting_badge(summary.waiting_on)}"
         f"{_deadline_badge(summary.deadline_status)}</div></div>"
         f'<div class="case-customer">客户 / 企业：{customer_name}</div>'
-        f'<div class="case-card-meta"><span class="case-ref">〔KF·{case_ref}〕</span>'
+        f'<div class="case-card-meta"><span class="case-ref">{human_number}</span>'
         f"<span>截止 {_format_datetime(summary.deadline)}</span>"
-        f"<span>最近更新 {updated_at}</span></div></a>{accept_form}</article>"
+        f"<span>最近更新 {updated_at}</span></div>"
+    )
+    if can_auto_accept:
+        open_action = path_for(f"/issues/{case_ref}/open")
+        return (
+            f'<form class="case-card case-card-auto-accept" method="post" action="{open_action}">'
+            f'<button type="submit" class="case-card-hitbox" '
+            f'aria-label="受理并打开问题 {human_number}"></button>'
+            f'<div class="case-card-content">{card_content}</div></form>'
+        )
+    return (
+        '<article class="case-card">'
+        f'<a class="case-card-link" href="{case_path}">{card_content}</a></article>'
+    )
+
+
+def _can_auto_accept_case(case: Any) -> bool:
+    return (
+        case.lifecycle_status is LifecycleStatus.OPEN
+        and case.status
+        in {
+            CaseStatus.PENDING_CONFIRMATION,
+            CaseStatus.WAITING_CUSTOMER,
+            CaseStatus.SUSPENDED,
+        }
+        and (
+            case.status is not CaseStatus.PENDING_CONFIRMATION
+            or case.can_accept_pending
+        )
     )
 
 
