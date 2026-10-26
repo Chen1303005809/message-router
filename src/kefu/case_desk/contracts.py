@@ -432,6 +432,8 @@ class IssueStatusUpdateWork:
 class IssueStatusQueueItem:
     id: UUID
     case_ref: str
+    bug_number: str | None
+    customer_name: str
     title: str
     entry_sequence: int
     state: str
@@ -450,6 +452,8 @@ class IssueDraftProcessingQueueItem:
 @dataclass(frozen=True, slots=True)
 class RecentIssueStatusChange:
     case_ref: str
+    bug_number: str | None
+    customer_name: str
     title: str
     field_label: str
     from_status: str

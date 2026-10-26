@@ -1310,6 +1310,8 @@ def create_app(
                     {
                         "id": str(item.id),
                         "issue_number": item.case_ref,
+                        "bug_number": item.bug_number,
+                        "customer_name": item.customer_name,
                         "title": item.title,
                         "entry_sequence": item.entry_sequence,
                         "state": item.state,
@@ -1333,6 +1335,8 @@ def create_app(
                 "recent_status_changes": [
                     {
                         "issue_number": item.case_ref,
+                        "bug_number": item.bug_number,
+                        "customer_name": item.customer_name,
                         "title": item.title,
                         "field": item.field_label,
                         "from_status": item.from_status,
@@ -3226,11 +3230,17 @@ def _status_queue_card(item: Any, path_for: Callable[[str], str]) -> str:
     return (
         '<article class="queue-card">'
         f'<div class="queue-card-heading"><a href="{issue_path}">'
-        f'〔KF·{case_ref}〕{escape(item.title)}</a>'
+        f'{_status_queue_issue_label(item)} · {escape(item.title)}</a>'
         f'<span class="queue-state {state_class}">{state_label}</span></div>'
         f'<p>触发沟通序号 {item.entry_sequence} · 入队 {_format_datetime(item.created_at)}'
         f'{attempts}{retry_at}</p>{retry}</article>'
     )
+
+
+def _status_queue_issue_label(item: Any) -> str:
+    bug_number = escape(item.bug_number or "待生成")
+    customer_name = escape(item.customer_name or "未录入")
+    return f"BUG 编号 {bug_number} · 客户 {customer_name}"
 
 
 def _issue_draft_queue_card(item: Any) -> str:
@@ -3256,7 +3266,7 @@ def _recent_status_change_card(item: Any, path_for: Callable[[str], str]) -> str
             pass
     return (
         '<article class="status-change-card">'
-        f'<div><a href="{issue_path}">〔KF·{case_ref}〕{escape(item.title)}</a>'
+        f'<div><a href="{issue_path}">{_status_queue_issue_label(item)} · {escape(item.title)}</a>'
         f'<span class="status-change-field">{escape(item.field_label)}</span></div>'
         f'<p>{escape(previous)} <span aria-hidden="true">→</span> {escape(updated)}</p>'
         f'<small>{escape(item.actor_name)} · {_format_datetime(item.created_at)}</small>'

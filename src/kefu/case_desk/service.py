@@ -655,6 +655,8 @@ class CaseDesk:
                 IssueStatusQueueItem(
                     id=job.id,
                     case_ref=case.case_ref,
+                    bug_number=case.bug_number,
+                    customer_name=case.customer_name,
                     title=case.title,
                     entry_sequence=job.entry_sequence,
                     state=job.state.value,
@@ -758,6 +760,8 @@ class CaseDesk:
                         results.append(
                             RecentIssueStatusChange(
                                 case_ref=case.case_ref,
+                                bug_number=case.bug_number,
+                                customer_name=case.customer_name,
                                 title=case.title,
                                 field_label="协作流程状态",
                                 from_status=from_status,
@@ -783,6 +787,8 @@ class CaseDesk:
                         results.append(
                             RecentIssueStatusChange(
                                 case_ref=case.case_ref,
+                                bug_number=case.bug_number,
+                                customer_name=case.customer_name,
                                 title=case.title,
                                 field_label="问题结论状态",
                                 from_status=from_status,
