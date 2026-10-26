@@ -102,6 +102,13 @@ class AdjustCaseDeadline:
 
 
 @dataclass(frozen=True, slots=True)
+class SetCaseDeadline:
+    case_ref: str
+    expected_version: int
+    deadline: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ExtendCaseDeadline:
     case_ref: str
     expected_version: int
@@ -208,6 +215,7 @@ class DeliveryItemFailed:
 type Command = (
     CreateCase
     | AdjustCaseDeadline
+    | SetCaseDeadline
     | ExtendCaseDeadline
     | SetCaseApproachingWindow
     | PostFormalMessage
@@ -273,6 +281,7 @@ class CaseView:
     case_ref: str
     title: str
     customer_name: str
+    customer_group_name: str
     customer_contact_name: str | None
     customer_contact_method: str | None
     priority: CasePriority

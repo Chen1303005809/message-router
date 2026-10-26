@@ -273,6 +273,7 @@ class IssueManagement:
                 customer_name=fields.customer_name.strip() or None,
                 customer_contact_name=fields.customer_contact_name.strip() or None,
                 customer_contact_method=fields.customer_contact_method.strip() or None,
+                issue_metadata={"customer_group_name": source_group_name},
                 parts=forwarded_parts,
                 source_msgid=f"issue-intake:{draft_id}",
             ),

@@ -50,6 +50,7 @@ from kefu.case_desk.contracts import (
     RecentIssueStatusChange,
     ReopenCase,
     SetCaseApproachingWindow,
+    SetCaseDeadline,
     SetCaseStatus,
     SetIssueCurrentStatus,
     SystemActor,
@@ -132,6 +133,12 @@ def _original_speaker_name(entry: CaseEntry) -> str:
     return entry.actor_name_snapshot
 
 
+def _case_customer_group_name(case: Case) -> str:
+    metadata = case.issue_metadata_json or {}
+    value = metadata.get("customer_group_name") or metadata.get("source_group_name")
+    return value if isinstance(value, str) else ""
+
+
 def _case_deadline_status(case: Case, now: datetime | None = None) -> DeadlineStatus | None:
     if case.lifecycle_status is LifecycleStatus.CLOSED:
         return None
@@ -208,6 +215,8 @@ class CaseDesk:
                 return self._create_case(session, command, actor)
             if isinstance(command, (AdjustCaseDeadline, ExtendCaseDeadline)):
                 return self._adjust_case_deadline(session, command, actor)
+            if isinstance(command, SetCaseDeadline):
+                return self._set_case_deadline(session, command, actor)
             if isinstance(command, SetCaseApproachingWindow):
                 return self._set_case_approaching_window(session, command, actor)
             if isinstance(command, PostFormalMessage):
@@ -1287,6 +1296,43 @@ class CaseDesk:
         )
         return self._result(case, entry.id)
 
+    def _set_case_deadline(
+        self, session: Session, command: SetCaseDeadline, actor: Actor
+    ) -> CommandResult:
+        case = self._load_case(session, command.case_ref, lock=True)
+        self._assert_expected_version(case, command.expected_version)
+        if case.lifecycle_status is not LifecycleStatus.OPEN:
+            raise ValidationError("已关闭问题不能调整期限")
+        self._assert_consult_deadline_access(session, actor.user_id, case)
+        if command.deadline.tzinfo is None or command.deadline.utcoffset() is None:
+            raise ValidationError("截止时间必须包含时区")
+
+        old_deadline = _as_utc(case.deadline)
+        new_deadline = _as_utc(command.deadline)
+        if old_deadline == new_deadline:
+            return self._result(case)
+
+        actor_user = self._directory.get_user(session, actor.user_id)
+        case.deadline = new_deadline
+        case.version += 1
+        entry = self._append_entry(
+            session,
+            case=case,
+            kind=CaseEntryKind.CASE_METADATA_UPDATED,
+            side=EntrySide.SYSTEM,
+            actor_user=actor_user,
+            metadata={
+                "action": "set_deadline",
+                "changes": {
+                    "deadline": {
+                        "from": old_deadline.isoformat(),
+                        "to": new_deadline.isoformat(),
+                    }
+                },
+            },
+        )
+        return self._result(case, entry.id)
+
     def _set_case_approaching_window(
         self, session: Session, command: SetCaseApproachingWindow, actor: Actor
     ) -> CommandResult:
@@ -2319,6 +2365,7 @@ class CaseDesk:
             case_ref=case.case_ref,
             title=case.title,
             customer_name=case.customer_name,
+            customer_group_name=_case_customer_group_name(case),
             customer_contact_name=case.customer_contact_name,
             customer_contact_method=case.customer_contact_method,
             priority=case.priority,

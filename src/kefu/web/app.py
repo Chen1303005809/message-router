@@ -48,6 +48,7 @@ from kefu.case_desk.contracts import (
     PostFormalMessage,
     ReopenCase,
     SetCaseApproachingWindow,
+    SetCaseDeadline,
     SetCaseStatus,
     SetIssueCurrentStatus,
     TextPart,
@@ -1529,6 +1530,7 @@ def create_app(
             show_side=can_use_side_selector,
         )
         lifecycle_forms = _lifecycle_forms(case, external_path)
+        top_close_control = _top_close_control(case, external_path)
         action_panel = (
             f'<section class="action-panel panel">{message_form}{lifecycle_forms}</section>'
             if message_form or lifecycle_forms
@@ -1537,9 +1539,9 @@ def create_app(
         body = f"""
         <main class="case-main">
           <a class="back-link" href="{events_path}">← 返回问题工作台</a>
+          {top_close_control}
           <header class="case-titlebar">
-            <div><div class="eyebrow">问题编号 〔KF·{escape(case.case_ref)}〕</div>
-              <h1>{escape(case.title)}</h1></div>
+            <div><h1>{escape(case.title)}</h1></div>
             <div class="case-state-badges">
               {_case_status_badge(case.status)}
               {_waiting_badge(case.waiting_on)}
@@ -1556,10 +1558,8 @@ def create_app(
               <div class="issue-field"><span>现状说明</span><p>{escape(case.current_situation or "未填写")}</p></div>
               <div class="issue-field"><span>问题状态</span>{_issue_current_status_control(case, external_path)}</div>
               <div class="issue-field"><span>问题初次过期时间</span><strong>{_format_datetime(case.initial_expires_at or case.deadline)}</strong></div>
-              <div class="issue-field"><span>问题编号</span><strong>{escape(case.issue_number)}</strong></div>
               <div class="issue-field"><span>BUG 编号</span><strong>{escape(case.bug_number or "不适用")}</strong></div>
               <div class="issue-field"><span>首次记录人</span><strong>{escape(case.first_recorder_name)}</strong></div>
-              <div class="issue-field"><span>问题来源</span><strong>{escape(case.issue_source or "未填写")}</strong></div>
             </div>
           </section>
           <section class="case-overview panel">
@@ -1567,8 +1567,7 @@ def create_app(
               <div class="updated-at">最近更新 {_format_datetime(case.updated_at)}</div></div>
             <div class="case-meta-grid">
               <div><span>客户 / 企业</span><strong>{escape(case.customer_name or "未录入")}</strong></div>
-              <div><span>联系人</span><strong>{escape(case.customer_contact_name or "未填写")}</strong></div>
-              <div><span>联系方式</span><strong>{escape(case.customer_contact_method or "未填写")}</strong></div>
+              <div><span>客户群聊名称</span><strong>{escape(case.customer_group_name or "未获取")}</strong></div>
               <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
               <div><span>咨询经办显示名</span><strong>{escape(case.consult_handler_name)}</strong></div>
               <div><span>当前咨询账号负责人</span><strong>{escape(case.current_consultant_name or "未指定")}</strong></div>
@@ -1579,9 +1578,9 @@ def create_app(
               <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
             </div>
           </section>
+          {_metadata_form(case, external_path)}
           {_transfer_controls(case, external_path)}
           {_deadline_controls(case, external_path)}
-          {_metadata_form(case, external_path)}
           {_case_status_controls(case, external_path)}
           <section class="timeline-section">
             <div class="section-heading"><h2>问题时间线</h2><span>{len(case.entries)} 条记录</span></div>
@@ -1675,25 +1674,42 @@ def create_app(
             return actor
         form = await _urlencoded_form(request)
         try:
-            adjustment_field = (
-                "adjustment_hours" if "adjustment_hours" in form else "extension_hours"
-            )
-            adjustment_minutes = _half_hour_hours_to_minutes(
-                _required(form, adjustment_field), "调整时长"
-            )
-            direction = form.get("direction", "delay")
-            if direction == "advance":
-                adjustment_minutes = -adjustment_minutes
-            elif direction != "delay":
-                raise ValidationError("期限调整方向无效")
-            issue_management.execute(
-                AdjustCaseDeadline(
-                    case_ref=issue_number,
-                    expected_version=int(_required(form, "version")),
-                    adjustment_minutes=adjustment_minutes,
-                ),
-                actor,
-            )
+            if "deadline_date" in form or "deadline_time" in form:
+                deadline_value = (
+                    f"{_required(form, 'deadline_date')}T"
+                    f"{_required(form, 'deadline_time')}"
+                )
+                deadline = _parse_local_deadline(deadline_value)
+                if deadline is None:
+                    raise ValidationError("请填写截止日期和时间")
+                issue_management.execute(
+                    SetCaseDeadline(
+                        case_ref=issue_number,
+                        expected_version=int(_required(form, "version")),
+                        deadline=deadline,
+                    ),
+                    actor,
+                )
+            else:
+                adjustment_field = (
+                    "adjustment_hours" if "adjustment_hours" in form else "extension_hours"
+                )
+                adjustment_minutes = _half_hour_hours_to_minutes(
+                    _required(form, adjustment_field), "调整时长"
+                )
+                direction = form.get("direction", "delay")
+                if direction == "advance":
+                    adjustment_minutes = -adjustment_minutes
+                elif direction != "delay":
+                    raise ValidationError("期限调整方向无效")
+                issue_management.execute(
+                    AdjustCaseDeadline(
+                        case_ref=issue_number,
+                        expected_version=int(_required(form, "version")),
+                        adjustment_minutes=adjustment_minutes,
+                    ),
+                    actor,
+                )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
@@ -2437,8 +2453,11 @@ h2 { color: #23344f; }
 .page-heading { margin-bottom: 18px; }
 .page-heading h1 { margin: 4px 0; }
 .case-titlebar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 2px 0 18px; }
-.case-titlebar h1 { margin: 5px 0 0; font-size: 27px; line-height: 1.25; }
+.case-titlebar h1 { margin: 0; font-size: 27px; line-height: 1.25; }
 .case-state-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.top-close-control { margin: 0 0 12px; }
+.top-close-control button.status-action-close { min-height: 40px; padding: 8px 15px; border: 1px solid transparent; border-radius: 9px; color: #fff; background: #b42318; font-size: 13px; font-weight: 750; }
+.top-close-control button.status-action-close:hover:not(:disabled) { background: #8f1c13; }
 .case-overview { padding: 18px 20px; }
 .case-overview-heading, .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .case-overview-heading h2, .section-heading h2 { margin-bottom: 13px; font-size: 17px; }
@@ -3114,6 +3133,18 @@ def _datetime_local_value(value: datetime) -> str:
     return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%dT%H:%M")
 
 
+def _date_local_value(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo("UTC"))
+    return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+
+
+def _time_local_value(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo("UTC"))
+    return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
+
+
 def _parse_local_deadline(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -3573,6 +3604,8 @@ def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     adjust_action = path_for(f"/issues/{escape(case.case_ref)}/deadline/adjust")
     approaching_action = path_for(f"/issues/{escape(case.case_ref)}/deadline/approaching-window")
     approaching_hours = _hours_value(case.approaching_window_minutes)
+    deadline_date = _date_local_value(case.deadline)
+    deadline_time = _time_local_value(case.deadline)
     return f"""
     <section class="deadline-controls panel" aria-label="期限管理">
       <h2>期限管理</h2>
@@ -3580,18 +3613,17 @@ def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
       <div class="deadline-control-grid">
         <div class="deadline-control-card">
           <h3>调整当前截止时间</h3>
-          <p>提前或延后本问题的截止时间，不会修改临近期限提醒。</p>
+          <p>选择新的截止日期和时间，不会修改临近期限提醒。</p>
           <form method="post" action="{adjust_action}" aria-label="调整截止时间">
             <input type="hidden" name="version" value="{case.version}">
-            <label>调整方向
-              <select name="direction"><option value="delay">延后</option><option value="advance">提前</option></select>
+            <label>截止日期
+              <input type="date" name="deadline_date" value="{deadline_date}" required>
             </label>
-            <label>调整时长（小时）
-              <input type="number" name="adjustment_hours" min="0.5" step="0.5" value="0.5" required>
+            <label>截止时间（24小时制）
+              <input type="time" name="deadline_time" step="60" value="{deadline_time}" required>
             </label>
-            <p class="muted">相对当前截止时间提前或延后，按至少 30 分钟递增。</p>
             <p class="muted">此操作只改变截止时间，不会改变临近期限提醒设置。</p>
-            <button class="primary" type="submit">应用截止时间调整</button>
+            <button class="primary" type="submit">保存截止时间</button>
           </form>
         </div>
         <div class="deadline-control-card">
@@ -3612,6 +3644,21 @@ def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
     """
 
 
+def _top_close_control(case: Any, path_for: Callable[[str], str]) -> str:
+    if (
+        case.lifecycle_status is LifecycleStatus.CLOSED
+        or not case.can_change_consult_status
+    ):
+        return ""
+    close_action = path_for(f"/issues/{escape(case.case_ref)}/close")
+    return f"""
+    <form class="top-close-control" method="post" action="{close_action}">
+      <input type="hidden" name="version" value="{case.version}">
+      <button type="submit" class="status-action-close">关闭问题</button>
+    </form>
+    """
+
+
 def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
     current_status = _case_status_badge(case.status)
     if case.lifecycle_status is LifecycleStatus.CLOSED:
@@ -3628,7 +3675,6 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
         """
 
     status_action = path_for(f"/issues/{escape(case.case_ref)}/status")
-    close_action = path_for(f"/issues/{escape(case.case_ref)}/close")
     buttons: list[str] = []
 
     def status_button(status: CaseStatus, label: str, extra_class: str = "") -> str:
@@ -3639,18 +3685,9 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
             f'<button type="submit" class="{extra_class}">{label}</button></form>'
         )
 
-    def close_button() -> str:
-        return (
-            f'<form method="post" action="{close_action}">'
-            f'<input type="hidden" name="version" value="{case.version}">'
-            '<button type="submit" class="status-action-close">关闭</button></form>'
-        )
-
     if case.status is CaseStatus.PENDING_CONFIRMATION:
         if case.can_accept_pending:
             buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
-        if case.can_change_consult_status:
-            buttons.append(close_button())
         help_text = "待确定是初始状态，仅研发人员可通过“受理”进入处理中。"
     elif case.status is CaseStatus.IN_PROGRESS:
         if case.can_change_consult_status:
@@ -3661,18 +3698,13 @@ def _case_status_controls(case: Any, path_for: Callable[[str], str]) -> str:
                     "status-action-feedback",
                 )
             )
-            buttons.append(close_button())
         buttons.append(status_button(CaseStatus.SUSPENDED, "挂起", "status-action-suspend"))
         help_text = "处理中可由咨询人员设为待客户反馈或关闭；暂时无法推进时可挂起。"
     elif case.status is CaseStatus.WAITING_CUSTOMER:
         buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
-        if case.can_change_consult_status:
-            buttons.append(close_button())
         help_text = "收到客户反馈后点击“受理”继续处理；关闭仅咨询侧可操作。"
     else:
         buttons.append(status_button(CaseStatus.IN_PROGRESS, "受理", "status-action-accept"))
-        if case.can_change_consult_status:
-            buttons.append(close_button())
         help_text = "暂时无法推进时挂起，恢复处理后点击“受理”；关闭仅咨询侧可操作。"
 
     return f"""
@@ -3830,6 +3862,7 @@ def _case_json(case: Any) -> dict[str, Any]:
             case.initial_expires_at.isoformat() if case.initial_expires_at else None
         ),
         "customer_name": case.customer_name,
+        "customer_group_name": case.customer_group_name,
         "customer_contact_name": case.customer_contact_name,
         "customer_contact_method": case.customer_contact_method,
         "priority": case.priority.value,
