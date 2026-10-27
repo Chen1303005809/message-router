@@ -432,12 +432,23 @@ def create_app(
             if wecom_customer_groups.is_configured
             else ""
         )
+        inspection_control = (
+            f'<button class="primary" type="button" data-inspection-run="true" '
+            f'data-endpoint="{external_path("/api/issues/inspection/run")}">立刻巡检</button>'
+            if administration.is_global_admin(actor)
+            else ""
+        )
         body = f"""
         <main class="create-main intake-page">
           <header class="page-heading intake-heading">
             <h1>新建问题</h1>
-            <a class="intake-back-link" href="{external_path("/issues")}">返回问题列表</a>
+            <div class="intake-heading-actions">
+              {inspection_control}
+              <a class="intake-back-link" href="{external_path("/issues")}">返回问题列表</a>
+            </div>
           </header>
+          <p class="muted inspection-run-status" data-inspection-status="true" role="status"
+            aria-live="polite" hidden></p>
           <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
               aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
@@ -458,6 +469,35 @@ def create_app(
           </form>
           <script>
           (() => {{
+            const inspectionButton = document.querySelector('[data-inspection-run="true"]');
+            const inspectionStatus = document.querySelector('[data-inspection-status="true"]');
+            if (inspectionButton && inspectionStatus) {{
+              inspectionButton.addEventListener('click', async () => {{
+                if (inspectionButton.disabled) return;
+                inspectionButton.disabled = true;
+                inspectionStatus.hidden = false;
+                inspectionStatus.textContent = '正在执行巡检…';
+                try {{
+                  const response = await fetch(inspectionButton.dataset.endpoint, {{
+                    method: 'POST',
+                    headers: {{ 'Accept': 'application/json' }}
+                  }});
+                  const result = await response.json().catch(() => ({{}}));
+                  if (!response.ok) {{
+                    throw new Error(result.detail || '巡检失败，请稍后重试。');
+                  }}
+                  inspectionStatus.textContent =
+                    `巡检完成：扫描 ${{result.scanned_issues}} 个未关闭问题，` +
+                    `已加入推送队列 ${{result.summary_messages}} 条，` +
+                    `${{result.unresolved_targets}} 个群聊路由未解析。`;
+                }} catch (error) {{
+                  inspectionStatus.textContent = error.message || '巡检失败，请稍后重试。';
+                }} finally {{
+                  inspectionButton.disabled = false;
+                }}
+              }});
+            }}
+
             const form = document.querySelector('.intake-page form');
             const button = form?.querySelector('[data-issue-draft-submit="true"]');
             const status = form?.querySelector('[data-issue-draft-status="true"]');
@@ -494,6 +534,21 @@ def create_app(
         </main>
         """
         return HTMLResponse(_page("上传问题材料", body, body_class="issue-intake-page"))
+
+    @app.post("/api/issues/inspection/run")
+    async def run_issue_inspection(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            result = await asyncio.to_thread(inspection.inspect, actor=actor)
+            return JSONResponse(
+                {
+                    "scanned_issues": result.scanned_issues,
+                    "summary_messages": result.summary_messages,
+                    "unresolved_targets": result.unresolved_targets,
+                }
+            )
+        except CaseDeskError as error:
+            raise _http_error(error) from error
 
     @app.post("/issues/draft", include_in_schema=False)
     async def create_issue_draft(request: Request) -> RedirectResponse:
@@ -2516,6 +2571,8 @@ h2 { color: #23344f; }
 .issue-intake-page .intake-page { width: 100%; }
 .intake-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
 .intake-heading h1 { margin: 0; font-size: 22px; }
+.intake-heading-actions { display: flex; align-items: center; gap: 8px; }
+.intake-heading-actions button { margin: 0; white-space: nowrap; }
 .intake-back-link { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; color: #52627b; background: #fff; font-size: 13px; font-weight: 650; }
 .intake-back-link:hover { border-color: #b6c9f3; color: var(--blue); background: var(--blue-soft); }
 .intake-form { padding: 14px; margin: 0; }

@@ -209,7 +209,7 @@ def test_confirm_intake_writes_issue_timeline_and_initial_delivery_idempotently(
         assert repeated.result.idempotent is True
 
 
-def test_manual_inspection_sends_one_summary_per_current_dev_team(issue_context):
+def test_manual_inspection_sends_summaries_to_dev_and_consult_teams(issue_context):
     actor = issue_context["actor"]
     deadline = datetime.now(UTC) + timedelta(hours=18)
     draft = issue_context["management"].create_intake_draft(
@@ -237,14 +237,17 @@ def test_manual_inspection_sends_one_summary_per_current_dev_team(issue_context)
     repeated = issue_context["inspection"].inspect(now=created_at + timedelta(hours=12))
 
     assert first.scanned_issues == 1
-    assert first.summary_messages == 1
-    assert repeated.summary_messages == 1
+    assert first.summary_messages == 2
+    assert repeated.summary_messages == 2
     with issue_context["factory"]() as session:
         messages = session.scalars(select(MessageOutbox)).all()
-        assert len(messages) == 2
-        assert {message.destination_address for message in messages} == {"chat-dev"}
+        assert len(messages) == 4
+        assert {message.destination_address for message in messages} == {
+            "chat-consult",
+            "chat-dev",
+        }
         assert {message.content for message in messages} == {
-            f"{issue.bug_number}｜客户甲"
+            f"{issue.bug_number}｜客户甲（研发一组）"
         }
         closed_issue = session.get(Case, issue.id)
         assert closed_issue is not None
@@ -254,7 +257,186 @@ def test_manual_inspection_sends_one_summary_per_current_dev_team(issue_context)
 
     closed = issue_context["inspection"].inspect(now=created_at + timedelta(hours=24))
     assert closed.scanned_issues == 0
-    assert closed.summary_messages == 0
+    assert closed.summary_messages == 1
+    with issue_context["factory"]() as session:
+        message = session.scalar(
+            select(MessageOutbox)
+            .where(MessageOutbox.destination_address == "chat-consult")
+            .order_by(MessageOutbox.created_at.desc())
+        )
+        assert message is not None
+        assert message.content == "暂无未关闭问题"
+
+
+def test_scheduled_inspection_sends_to_all_active_consult_queues_and_falls_back_to_current_team(
+    issue_context,
+):
+    actor = issue_context["actor"]
+    queue_with_issue_id = uuid4()
+    queue_without_issue_id = uuid4()
+    queue_without_channel_id = uuid4()
+    current_dev_team_id = uuid4()
+    now = datetime.now(UTC)
+    with issue_context["factory"]() as session, session.begin():
+        session.add_all(
+            [
+                Team(
+                    id=current_dev_team_id,
+                    kind=TeamKind.DEV,
+                    name="研发二组",
+                ),
+                Team(
+                    id=queue_with_issue_id,
+                    kind=TeamKind.CONSULT_QUEUE,
+                    name="华南咨询队列",
+                ),
+                Team(
+                    id=queue_without_issue_id,
+                    kind=TeamKind.CONSULT_QUEUE,
+                    name="空队列",
+                ),
+                Team(
+                    id=queue_without_channel_id,
+                    kind=TeamKind.CONSULT_QUEUE,
+                    name="未绑定队列",
+                ),
+                TeamMembership(
+                    team_id=queue_with_issue_id,
+                    user_id=actor.user_id,
+                    role=MembershipRole.MEMBER,
+                    valid_from=now,
+                ),
+                WeComChannel(
+                    team_id=current_dev_team_id,
+                    chatid="chat-dev-current",
+                    initialized_at=now,
+                ),
+                WeComChannel(
+                    team_id=queue_with_issue_id,
+                    chatid="chat-consult-south",
+                    initialized_at=now,
+                ),
+                WeComChannel(
+                    team_id=queue_without_issue_id,
+                    chatid="chat-consult-empty",
+                    initialized_at=now,
+                ),
+            ]
+        )
+
+    def create_issue(customer_name: str, raw_text: str) -> str:
+        draft = issue_context["management"].create_intake_draft(
+            IssueIntake(
+                consult_queue_id=queue_with_issue_id,
+                raw_text=raw_text,
+                parts=(TextPart(raw_text),),
+                fields=IssueFields(
+                    issue_description=raw_text,
+                    customer_name=customer_name,
+                    initial_acceptance_team_id=issue_context["acceptance_id"],
+                    suspected_type="日常使用",
+                    deadline=datetime.now(UTC) + timedelta(hours=18),
+                ),
+            ),
+            actor,
+        )
+        confirmed = issue_context["management"].confirm_intake(draft.id, draft.fields, actor)
+        assert confirmed.issue_number is not None
+        return confirmed.issue_number
+
+    initial_team_issue_number = create_issue("客户乙", "初次受理组保留原值")
+    fallback_team_issue_number = create_issue("客户丙", "旧记录缺少初次受理组")
+    with issue_context["factory"]() as session, session.begin():
+        initial_team_issue = session.scalar(
+            select(Case).where(Case.case_ref == initial_team_issue_number)
+        )
+        fallback_team_issue = session.scalar(
+            select(Case).where(Case.case_ref == fallback_team_issue_number)
+        )
+        assert initial_team_issue is not None
+        assert fallback_team_issue is not None
+        initial_team_issue.current_dev_team_id = current_dev_team_id
+        fallback_team_issue.current_dev_team_id = current_dev_team_id
+        fallback_team_issue.initial_acceptance_team_id = None
+
+    scheduled_at = datetime(2026, 10, 27, 0, 55, tzinfo=UTC)
+    first = issue_context["inspection"].inspect_scheduled(now=scheduled_at)
+    repeated = issue_context["inspection"].inspect_scheduled(now=scheduled_at)
+
+    assert first.scanned_issues == 2
+    assert first.summary_messages == 4
+    assert first.unresolved_targets == 1
+    assert repeated.summary_messages == 0
+    assert repeated.unresolved_targets == 1
+    with issue_context["factory"]() as session:
+        messages = session.scalars(select(MessageOutbox)).all()
+        by_address = {message.destination_address: message.content for message in messages}
+        initial_line = (
+            f"{initial_team_issue.bug_number}｜客户乙（研发一组）"
+        )
+        fallback_line = (
+            f"{fallback_team_issue.bug_number}｜客户丙（研发二组）"
+        )
+        summary = "\n".join(
+            sorted(
+                (initial_line, fallback_line),
+                key=lambda line: line.split("｜", maxsplit=1)[0],
+            )
+        )
+        assert by_address == {
+            "chat-dev-current": summary,
+            "chat-consult": "暂无未关闭问题",
+            "chat-consult-south": summary,
+            "chat-consult-empty": "暂无未关闭问题",
+        }
+
+
+def test_new_issue_page_exposes_admin_inspection_action(issue_context):
+    import kefu.web.app as web_app
+
+    app = web_app.create_app(
+        session_factory=issue_context["factory"],
+        settings=issue_context["settings"],
+        storage=issue_context["storage"],
+    )
+    headers = {"X-WeCom-UserId": "consult-1"}
+    with TestClient(app) as client:
+        regular_page = client.get("/issues/new", headers=headers)
+        assert regular_page.status_code == 200
+        assert (
+            '<button class="primary" type="button" data-inspection-run="true"'
+            not in regular_page.text
+        )
+        denied = client.post("/api/issues/inspection/run", headers=headers)
+        assert denied.status_code == 403
+
+        with issue_context["factory"]() as session, session.begin():
+            user = session.get(User, issue_context["actor"].user_id)
+            assert user is not None
+            user.is_global_admin = True
+
+        admin_page = client.get("/issues/new", headers=headers)
+        assert admin_page.status_code == 200
+        button_index = admin_page.text.index(
+            '<button class="primary" type="button" data-inspection-run="true"'
+        )
+        form_index = admin_page.text.index('<form class="panel create-form intake-form"')
+        assert button_index < form_index
+        assert "fetch(inspectionButton.dataset.endpoint" in admin_page.text
+
+        response = client.post("/api/issues/inspection/run", headers=headers)
+        assert response.status_code == 200
+        assert response.json() == {
+            "scanned_issues": 0,
+            "summary_messages": 1,
+            "unresolved_targets": 0,
+        }
+
+    with issue_context["factory"]() as session:
+        message = session.scalar(select(MessageOutbox))
+        assert message is not None
+        assert message.destination_address == "chat-consult"
+        assert message.content == "暂无未关闭问题"
 
 
 def test_person_target_push_is_idempotent_and_retries_transient_failure(issue_context):
@@ -565,7 +747,7 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
         draft_path = draft_response.headers["location"]
         preview = client.get(draft_path, headers=headers)
         assert preview.status_code == 200
-        assert "问题状态" in preview.text
+        assert 'name="issue_current_status"' in preview.text
         assert "盘中" in preview.text
         assert "[图片]" in preview.text
         assert "<img class=\"intake-image\"" in preview.text

@@ -20,7 +20,7 @@ from kefu.messages.recipients import (
     RecipientReference,
     RecipientResolver,
 )
-from kefu.persistence.models import Case, LifecycleStatus, User, utc_now
+from kefu.persistence.models import Case, LifecycleStatus, Team, TeamKind, User, utc_now
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,11 +34,13 @@ class InspectionResult:
 class _IssueSummaryRow:
     bug_number: str
     customer_name: str
+    acceptance_team_name: str
     current_dev_team_id: UUID
+    consult_queue_id: UUID
 
 
 class IssueInspectionService:
-    """Queue one open-issue summary per current development team."""
+    """Queue open-issue summaries for development and consultation teams."""
 
     def __init__(
         self,
@@ -90,53 +92,110 @@ class IssueInspectionService:
                 .order_by(Case.created_at.asc())
                 .with_for_update()
             ).all()
+            referenced_team_ids = {
+                team_id
+                for issue in issues
+                for team_id in (issue.initial_acceptance_team_id, issue.current_dev_team_id)
+                if team_id is not None
+            }
+            team_names = (
+                dict(
+                    session.execute(
+                        select(Team.id, Team.name).where(Team.id.in_(referenced_team_ids))
+                    ).all()
+                )
+                if referenced_team_ids
+                else {}
+            )
+            active_consult_queue_ids = session.scalars(
+                select(Team.id).where(
+                    Team.kind == TeamKind.CONSULT_QUEUE,
+                    Team.active.is_(True),
+                )
+            ).all()
             rows: list[_IssueSummaryRow] = []
             for issue in issues:
                 if not issue.bug_number:
                     issue.bug_number = next_bug_number(session, _as_utc(issue.created_at))
                 assert issue.bug_number is not None
+                acceptance_team_name = (
+                    team_names.get(issue.initial_acceptance_team_id)
+                    if issue.initial_acceptance_team_id is not None
+                    else None
+                ) or team_names.get(issue.current_dev_team_id) or "未记录"
                 rows.append(
                     _IssueSummaryRow(
                         bug_number=issue.bug_number,
                         customer_name=_single_line(issue.customer_name or "未录入") or "未录入",
+                        acceptance_team_name=_single_line(acceptance_team_name) or "未记录",
                         current_dev_team_id=issue.current_dev_team_id,
+                        consult_queue_id=issue.consult_queue_id,
                     )
                 )
 
-        grouped: dict[UUID, list[_IssueSummaryRow]] = defaultdict(list)
+        dev_grouped: dict[UUID, list[_IssueSummaryRow]] = defaultdict(list)
+        consult_grouped: dict[UUID, list[_IssueSummaryRow]] = {
+            queue_id: [] for queue_id in active_consult_queue_ids
+        }
         for row in rows:
-            grouped[row.current_dev_team_id].append(row)
+            dev_grouped[row.current_dev_team_id].append(row)
+            consult_grouped.setdefault(row.consult_queue_id, []).append(row)
 
         summary_messages = unresolved = 0
-        for team_id, team_rows in grouped.items():
-            try:
-                target = self._recipients.resolve(
-                    RecipientReference(RecipientKind.TEAM, team_id)
-                )
-            except CaseDeskError:
-                unresolved += 1
-                continue
+        for team_id, team_rows in dev_grouped.items():
+            queued, failed = self._send_to_recipient(
+                RecipientReference(RecipientKind.TEAM, team_id),
+                team_rows,
+                idempotency_key=f"{idempotency_prefix}:team:{team_id}",
+            )
+            summary_messages += queued
+            unresolved += failed
 
-            team_rows.sort(key=lambda row: row.bug_number)
-            content = "\n".join(
-                f"{_single_line(row.bug_number)}｜{_single_line(row.customer_name)}"
-                for row in team_rows
+        for queue_id, queue_rows in consult_grouped.items():
+            queued, failed = self._send_to_recipient(
+                RecipientReference(RecipientKind.CONSULT_QUEUE, queue_id),
+                queue_rows,
+                idempotency_key=f"{idempotency_prefix}:consult_queue:{queue_id}",
+                empty_summary="暂无未关闭问题",
             )
-            key = f"{idempotency_prefix}:team:{team_id}"
-            result = self._receiver.receive_inspection(
-                message_id=key,
-                target=target,
-                text=content,
-                idempotency_key=key,
-            )
-            if not result.queued.idempotent:
-                summary_messages += 1
+            summary_messages += queued
+            unresolved += failed
 
         return InspectionResult(
             scanned_issues=len(rows),
             summary_messages=summary_messages,
             unresolved_targets=unresolved,
         )
+
+    def _send_to_recipient(
+        self,
+        recipient: RecipientReference,
+        rows: list[_IssueSummaryRow],
+        *,
+        idempotency_key: str,
+        empty_summary: str | None = None,
+    ) -> tuple[int, int]:
+        try:
+            target = self._recipients.resolve(recipient)
+        except CaseDeskError:
+            return 0, 1
+
+        rows.sort(key=lambda row: row.bug_number)
+        content = "\n".join(
+            f"{_single_line(row.bug_number)}｜{_single_line(row.customer_name)}"
+            f"（{_single_line(row.acceptance_team_name)}）"
+            for row in rows
+        ) or empty_summary
+        if content is None:
+            return 0, 0
+
+        result = self._receiver.receive_inspection(
+            message_id=idempotency_key,
+            target=target,
+            text=content,
+            idempotency_key=idempotency_key,
+        )
+        return (0 if result.queued.idempotent else 1), 0
 
 
 def _single_line(value: str) -> str:

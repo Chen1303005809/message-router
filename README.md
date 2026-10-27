@@ -11,11 +11,11 @@
 - 已绑定咨询群中的新问题受理：`@机器人` 后由 Agent 整理图文消息中的文字，多轮引用提案补充或修改问题、研发群和必填模块；收到“确认派发”后才创建正式问题并通过持久化投递队列派发，原图按顺序作为附件保留；
 - 问题管理、问题巡检、消息接收、消息推送和 Agent 五个可由 Python 程序直接调用的模块；Agent 通过 OpenAI Chat Completions function tools 调用相同接口；
 - 服务端渲染 H5：进入 `/` 直接上传问题材料，Agent 生成可编辑草稿，确认后事务化创建问题和首条投递；问题沟通保留群聊引用、详情、跟进、关闭/重开和交接 API；
-- 每天 08:55、11:30、21:30（上海时区）按当前研发责任团队汇总未关闭问题；每个有问题的团队群只收到一条仅含 BUG 编号和客户企业的消息，投递具有幂等键和失败重试；
+- 每天 08:55、11:30、21:30（上海时区）按当前研发责任团队和所属咨询队列汇总未关闭问题；每个有效绑定的咨询群都会收到消息，空队列发送无未关闭问题提示。问题行显示 BUG 编号、客户名称和初次受理组（旧记录回退到当前研发责任组）；投递具有幂等键和失败重试；
 - H5 组织与授权管理中心：总管理员初始化、成员与咨询/研发团队管理、团队角色维护、研发负责人展示名及团队群聊绑定；
 - PostgreSQL、MinIO、web、bot-worker 的 Docker Compose 本地运行形态。
 
-Agent 草稿需要在环境变量中配置 `AGENT_BASE_URL`、`AGENT_API_KEY` 和 `AGENT_MODEL`。`AGENT_BASE_URL` 使用 OpenAI 兼容接口的 API 基础地址，例如 `https://api.openai.com/v1`。图片只会保存为附件，不会发送给 Agent。初次过期时间默认为 3 小时，临期窗口默认为提前 24 小时，分别通过 `ISSUE_DEFAULT_EXPIRY_HOURS` 和 `ISSUE_APPROACHING_WINDOW_HOURS` 配置。未关闭问题汇总的三个推送时点固定为上海时间 08:55、11:30 和 21:30；没有未关闭问题的团队不发送消息。
+Agent 草稿需要在环境变量中配置 `AGENT_BASE_URL`、`AGENT_API_KEY` 和 `AGENT_MODEL`。`AGENT_BASE_URL` 使用 OpenAI 兼容接口的 API 基础地址，例如 `https://api.openai.com/v1`。图片只会保存为附件，不会发送给 Agent。初次过期时间默认为 3 小时，临期窗口默认为提前 24 小时，分别通过 `ISSUE_DEFAULT_EXPIRY_HOURS` 和 `ISSUE_APPROACHING_WINDOW_HOURS` 配置。未关闭问题汇总的三个推送时点固定为上海时间 08:55、11:30 和 21:30；没有未关闭问题的研发团队不发送消息。总管理员也可在新建问题页独立触发巡检，不会提交未完成的建单材料。
 
 面向咨询人员、研发人员和各级管理员的产品使用说明见[操作手册](USER_GUIDE.md)。
 产品的业务背景、协作矛盾、核心问题和解决方案见[功能说明](PRODUCT_FUNCTION_DESCRIPTION.md)。
