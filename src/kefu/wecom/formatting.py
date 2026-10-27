@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from kefu.case_desk.markers import format_case_marker
-from kefu.persistence.models import EntrySide, PartKind
+from kefu.persistence.models import PartKind
 
 _ANGLE_MENTION_RE = re.compile(r"<\s*[@＠][\w.-]+\s*>")
 _AT_MENTION_RE = re.compile(r"(?<![\w.+-])[@＠][\w.-]+")
@@ -33,10 +33,7 @@ def build_formal_bundle(
     bug_number: str,
     case_title: str,
     speaker_name: str,
-    assignee_name: str | None = None,
-    dev_team_name: str | None = None,
     parts: Iterable[SourcePart],
-    side: EntrySide,
 ) -> tuple[RenderedDeliveryItem, ...]:
     """Render a decorated, quoteable message and its image attachments.
 
@@ -52,20 +49,13 @@ def build_formal_bundle(
     if not text_parts or not any(part.strip() for part in text_parts):
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
-    speaker_label = "转发人" if side is EntrySide.CONSULT else "发送人"
-    routing_detail = None
-    if side is EntrySide.CONSULT and dev_team_name:
-        routing_detail = f"研发处理团队：{dev_team_name}"
-    elif side is EntrySide.DEV and assignee_name:
-        routing_detail = f"指定经办人：{assignee_name}"
     content = format_case_message(
         case_title=case_title,
         body=message_text,
-        details_before=(routing_detail,) if routing_detail else (),
         details_after=(
-            f"{speaker_label}：{speaker_name}",
-            f"BUG 编号：{bug_number}",
-            f"机器人引用编号：{marker}",
+            speaker_name,
+            bug_number,
+            marker,
         ),
     )
     rendered: list[RenderedDeliveryItem] = [

@@ -1160,7 +1160,6 @@ class CaseDesk:
             destination_type=DeliveryDestination.CHAT,
             destination_address=channel.chatid,
             waiting_on_after_delivery=WaitingOn.DEV,
-            dev_team_name=dev_team.name,
         )
         return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
@@ -1968,7 +1967,6 @@ class CaseDesk:
         destination_type: DeliveryDestination,
         destination_address: str,
         waiting_on_after_delivery: WaitingOn | None,
-        dev_team_name: str | None = None,
         delivery_status: DeliveryStatus = DeliveryStatus.PENDING,
         item_status: DeliveryItemStatus = DeliveryItemStatus.PENDING,
         item_platform_result: Mapping[str, object] | None = None,
@@ -1983,10 +1981,7 @@ class CaseDesk:
                 bug_number=self._ensure_bug_number(session, case),
                 case_title=case.title,
                 speaker_name=_original_speaker_name(entry),
-                assignee_name=(case.consult_handler_name if entry.side is EntrySide.DEV else None),
-                dev_team_name=dev_team_name,
                 parts=entry_parts,
-                side=entry.side,
             )
         except ValueError as error:
             raise ValidationError("去除 @ 提及后，正式消息必须保留文字内容") from error
