@@ -2452,6 +2452,12 @@ h2 { color: #23344f; }
 .case-status-feedback { color: #155eef; background: #eaf1ff; }
 .case-status-suspended { color: #6941c6; background: #f2edff; }
 .issue-current-status { color: #344054; background: #eef2f6; }
+.issue-status-no-reply { color: #175cd3; background: #eff8ff; }
+.issue-status-resolved { color: #067647; background: #ecfdf3; }
+.issue-status-pending-info { color: #b42318; background: #fef3f2; }
+.issue-status-upgrade-follow-up { color: #6941c6; background: #f4f3ff; }
+.issue-status-request-pending { color: #0e7490; background: #ecfeff; }
+.issue-status-unresolvable { color: #b54708; background: #fff4ed; }
 .deadline-approaching { color: #9a5b00; background: #fff2cc; }
 .deadline-overdue { color: #b42318; background: #fee4e2; }
 .priority-normal { color: #58667b; background: #edf0f4; }
@@ -3738,7 +3744,16 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
 
 def _case_list_status_badge(summary: Any) -> str:
     status = escape(summary.issue_current_status or "问题未回复")
-    return f'<span class="status-badge issue-current-status">{status}</span>'
+    status_class = {
+        IssueCurrentStatus.NO_REPLY.value: "issue-status-no-reply",
+        IssueCurrentStatus.RESOLVED.value: "issue-status-resolved",
+        IssueCurrentStatus.DATA_PENDING.value: "issue-status-pending-info",
+        IssueCurrentStatus.FOLLOW_UP_ON_UPGRADE.value: "issue-status-upgrade-follow-up",
+        IssueCurrentStatus.REQUEST_PENDING.value: "issue-status-request-pending",
+        IssueCurrentStatus.CURRENTLY_UNRESOLVABLE.value: "issue-status-unresolvable",
+    }.get(summary.issue_current_status or IssueCurrentStatus.NO_REPLY.value, "")
+    classes = f"status-badge issue-current-status {status_class}".strip()
+    return f'<span class="{classes}">{status}</span>'
 
 
 def _can_auto_accept_case(case: Any) -> bool:
