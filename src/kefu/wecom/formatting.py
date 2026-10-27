@@ -32,6 +32,7 @@ def build_formal_bundle(
     case_ref: str,
     bug_number: str,
     case_title: str,
+    customer_name: str,
     speaker_name: str,
     parts: Iterable[SourcePart],
 ) -> tuple[RenderedDeliveryItem, ...]:
@@ -53,6 +54,7 @@ def build_formal_bundle(
         case_title=case_title,
         body=message_text,
         details_after=(
+            customer_name,
             speaker_name,
             bug_number,
             marker,

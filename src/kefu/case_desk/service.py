@@ -1980,6 +1980,7 @@ class CaseDesk:
                 case_ref=case.case_ref,
                 bug_number=self._ensure_bug_number(session, case),
                 case_title=case.title,
+                customer_name=case.customer_name,
                 speaker_name=_original_speaker_name(entry),
                 parts=entry_parts,
             )
