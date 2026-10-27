@@ -112,7 +112,7 @@ def build_notice_bundle(
     content: str,
     history_url: str,
 ) -> tuple[RenderedDeliveryItem, ...]:
-    """Decorate a system notice and provide the same internal history action."""
+    """Decorate a system notice and provide the internal history action."""
     marker = format_case_marker(case_ref)
     return (
         RenderedDeliveryItem(
@@ -123,9 +123,9 @@ def build_notice_bundle(
                         case_title=case_title,
                         body=content,
                         details_after=(
-                            f"BUG 编号：{bug_number}",
+                            bug_number,
                             f"操作人：{operator_name}",
-                            f"机器人引用编号：{marker}",
+                            marker,
                         ),
                     )
                 )
@@ -157,7 +157,7 @@ def _history_card(
                     "desc": f"{actor_label}：{actor_name}"[:30],
                 },
                 "sub_title_text": (
-                    f"BUG 编号：{bug_number} · {marker} · 点击查看完整问题时间线"
+                    f"{bug_number} · {marker} · 点击查看完整问题时间线"
                 ),
                 "jump_list": [action],
                 "card_action": {"type": 1, "url": history_url},
