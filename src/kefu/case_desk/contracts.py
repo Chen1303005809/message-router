@@ -321,6 +321,8 @@ class CaseView:
     can_extend_deadline: bool
     can_transfer: bool
     transferable_consultants: tuple[UserOption, ...]
+    can_transfer_dev_team: bool
+    transferable_dev_teams: tuple[TeamOption, ...]
     entries: tuple[EntryView, ...]
     deliveries: tuple[DeliveryView, ...]
 

@@ -1623,6 +1623,7 @@ def create_app(
             <div class="issue-fields-grid">
               <div class="issue-field issue-field-wide"><span>问题描述</span><p>{escape(case.issue_description or case.title)}</p></div>
               <div class="issue-field"><span>初次受理组</span><strong>{escape(case.initial_acceptance_team_name or case.current_dev_team_name)}</strong></div>
+              <div class="issue-field"><span>研发归属团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
               <div class="issue-field"><span>怀疑类型（问题所属模块）</span><strong>{escape(case.suspected_type or "未填写")}</strong></div>
               <div class="issue-field"><span>现状说明</span><p>{escape(case.current_situation or "未填写")}</p></div>
               <div class="issue-field"><span>问题状态</span>{_issue_current_status_control(case, external_path)}</div>
@@ -1917,6 +1918,25 @@ def create_app(
         except (CaseDeskError, ValueError, KeyError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
         return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.post("/issues/{issue_number}/transfer-dev-team", include_in_schema=False)
+    async def transfer_dev_team_page(request: Request, issue_number: str) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        form = await _urlencoded_form(request)
+        try:
+            issue_management.execute(
+                TransferDevTeam(
+                    case_ref=issue_number,
+                    expected_version=int(_required(form, "version")),
+                    new_dev_team_id=UUID(_required(form, "new_dev_team_id")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
 
     @app.post("/api/issues/{issue_number}/transfer-dev-team")
     async def transfer_dev_team(request: Request, issue_number: str) -> JSONResponse:
@@ -3565,28 +3585,70 @@ def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
 
 
 def _transfer_controls(case: Any, path_for: Callable[[str], str]) -> str:
-    if not case.can_transfer:
-        return ""
-    consultant_action = path_for(f"/issues/{escape(case.case_ref)}/transfer-consultant")
-    consultant_control = _transfer_person_control(
-        case=case,
-        action=consultant_action,
-        field_name="new_consultant_id",
-        heading="转交咨询处理人",
-        team_name=case.consult_queue_name,
-        current_id=case.current_consultant_id,
-        people=case.transferable_consultants,
-        button_label="转交咨询处理人",
+    sections: list[str] = []
+    if case.can_transfer:
+        consultant_action = path_for(f"/issues/{escape(case.case_ref)}/transfer-consultant")
+        consultant_control = _transfer_person_control(
+            case=case,
+            action=consultant_action,
+            field_name="new_consultant_id",
+            heading="转交咨询处理人",
+            team_name=case.consult_queue_name,
+            current_id=case.current_consultant_id,
+            people=case.transferable_consultants,
+            button_label="转交咨询处理人",
+        )
+        sections.append(f"""
+        <section class="transfer-controls panel" aria-label="咨询经办人转交">
+          <h2>咨询经办人转交</h2>
+          <p class="transfer-controls-intro">当前咨询经办人、咨询队列管理员或研发团队管理员可以转交；
+            接收人必须是当前咨询队列中的在岗成员。</p>
+          <div class="transfer-control-grid">{consultant_control}</div>
+        </section>
+        """)
+    if case.can_transfer_dev_team:
+        dev_team_action = path_for(f"/issues/{escape(case.case_ref)}/transfer-dev-team")
+        dev_team_control = _transfer_dev_team_control(
+            case=case,
+            action=dev_team_action,
+            teams=case.transferable_dev_teams,
+        )
+        sections.append(f"""
+        <section class="transfer-controls panel" aria-label="研发归属团队变更">
+          <h2>研发归属团队变更</h2>
+          <p class="transfer-controls-intro">当前研发团队成员、当前咨询经办人、咨询队列管理员或总管理员可以变更；提交后会记录在时间线，并通知新旧研发群。</p>
+          <div class="transfer-control-grid">{dev_team_control}</div>
+        </section>
+        """)
+    return "".join(sections)
+
+
+def _transfer_dev_team_control(*, case: Any, action: str, teams: tuple[Any, ...]) -> str:
+    if not teams:
+        return """
+        <div class="transfer-control-card">
+          <h3>更改研发归属团队</h3>
+          <p class="transfer-control-empty">当前没有其他已绑定研发群的启用团队可选。</p>
+        </div>
+        """
+    options = "".join(
+        f'<option value="{escape(str(team.id))}">{escape(team.name)}</option>'
+        for team in teams
     )
     return f"""
-    <section class="transfer-controls panel" aria-label="咨询经办人转交">
-      <h2>咨询经办人转交</h2>
-      <p class="transfer-controls-intro">当前咨询经办人、咨询队列管理员或研发团队管理员可以转交；
-        接收人必须是当前咨询队列中的在岗成员。</p>
-      <div class="transfer-control-grid">
-        {consultant_control}
-      </div>
-    </section>
+    <div class="transfer-control-card">
+      <h3>更改研发归属团队</h3>
+      <p>当前归属：{escape(case.current_dev_team_name)}；仅显示已启用并绑定研发群的团队。</p>
+      <form method="post" action="{action}" aria-label="更改研发归属团队">
+        <input type="hidden" name="version" value="{case.version}">
+        <label>新的研发归属团队
+          <select name="new_dev_team_id" required>
+            <option value="" selected disabled>请选择研发团队</option>{options}
+          </select>
+        </label>
+        <button class="primary" type="submit">更改研发归属团队</button>
+      </form>
+    </div>
     """
 
 
@@ -3869,8 +3931,13 @@ def _case_json(case: Any) -> dict[str, Any]:
         "consult_queue_name": case.consult_queue_name,
         "consult_handler_name": case.consult_handler_name,
         "current_consultant_name": case.current_consultant_name,
+        "current_dev_team_id": str(case.current_dev_team_id),
         "current_dev_team_name": case.current_dev_team_name,
         "current_dev_team_lead_display_name": case.current_dev_team_lead_display_name,
+        "can_transfer_dev_team": case.can_transfer_dev_team,
+        "transferable_dev_teams": [
+            {"id": str(team.id), "name": team.name} for team in case.transferable_dev_teams
+        ],
         "can_edit_metadata": case.can_edit_metadata,
         "can_change_consult_status": case.can_change_consult_status,
         "can_accept_pending": case.can_accept_pending,

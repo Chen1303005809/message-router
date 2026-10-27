@@ -273,6 +273,22 @@ class CaseDesk:
                 if can_transfer
                 else ()
             )
+            can_transfer_dev_team = self._directory.can_transfer_dev_team(
+                session, viewer.user_id, case
+            )
+            transferable_dev_teams = (
+                tuple(
+                    TeamOption(
+                        id=team.id,
+                        name=team.name,
+                        lead_display_name=team.lead_display_name,
+                    )
+                    for team in self._directory.active_dev_teams(session)
+                    if team.id != case.current_dev_team_id
+                )
+                if can_transfer_dev_team
+                else ()
+            )
             return self._case_view(
                 session,
                 case,
@@ -282,6 +298,8 @@ class CaseDesk:
                 can_extend_deadline=can_extend_deadline,
                 can_transfer=can_transfer,
                 transferable_consultants=transferable_consultants,
+                can_transfer_dev_team=can_transfer_dev_team,
+                transferable_dev_teams=transferable_dev_teams,
             )
 
     def list_cases(self, case_filter: CaseFilter, viewer: Actor) -> Page:
@@ -1549,7 +1567,7 @@ class CaseDesk:
     ) -> CommandResult:
         case = self._load_case(session, command.case_ref, lock=True)
         self._assert_expected_version(case, command.expected_version)
-        self._directory.assert_case_transfer_authorized(session, actor.user_id, case)
+        self._directory.assert_dev_team_transfer_authorized(session, actor.user_id, case)
         actor_user = self._directory.get_user(session, actor.user_id)
         if case.current_dev_team_id == command.new_dev_team_id:
             raise ValidationError("目标研发责任团队与当前团队相同")
@@ -2356,6 +2374,8 @@ class CaseDesk:
         can_extend_deadline: bool = False,
         can_transfer: bool = False,
         transferable_consultants: tuple[UserOption, ...] = (),
+        can_transfer_dev_team: bool = False,
+        transferable_dev_teams: tuple[TeamOption, ...] = (),
     ) -> CaseView:
         entries = session.scalars(
             select(CaseEntry).where(CaseEntry.case_id == case.id).order_by(CaseEntry.sequence.asc())
@@ -2446,6 +2466,8 @@ class CaseDesk:
             can_extend_deadline=can_extend_deadline,
             can_transfer=can_transfer,
             transferable_consultants=transferable_consultants,
+            can_transfer_dev_team=can_transfer_dev_team,
+            transferable_dev_teams=transferable_dev_teams,
             entries=tuple(entry_views),
             deliveries=tuple(
                 DeliveryView(
