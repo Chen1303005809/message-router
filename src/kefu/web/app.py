@@ -2451,6 +2451,7 @@ h2 { color: #23344f; }
 .case-status-progress { color: #087a54; background: #e5f7ef; }
 .case-status-feedback { color: #155eef; background: #eaf1ff; }
 .case-status-suspended { color: #6941c6; background: #f2edff; }
+.issue-current-status { color: #344054; background: #eef2f6; }
 .deadline-approaching { color: #9a5b00; background: #fff2cc; }
 .deadline-overdue { color: #b42318; background: #fee4e2; }
 .priority-normal { color: #58667b; background: #edf0f4; }
@@ -3185,17 +3186,6 @@ def _case_status_label(status: CaseStatus) -> str:
     }[status]
 
 
-def _case_status_badge(status: CaseStatus) -> str:
-    color = {
-        CaseStatus.PENDING_CONFIRMATION: "case-status-pending",
-        CaseStatus.IN_PROGRESS: "case-status-progress",
-        CaseStatus.WAITING_CUSTOMER: "case-status-feedback",
-        CaseStatus.CLOSED: "status-closed",
-        CaseStatus.SUSPENDED: "case-status-suspended",
-    }[status]
-    return f'<span class="status-badge {color}">{_case_status_label(status)}</span>'
-
-
 def _status_queue_card(item: Any, path_for: Callable[[str], str]) -> str:
     case_ref = escape(item.case_ref)
     issue_path = path_for(f"/issues/{case_ref}")
@@ -3747,14 +3737,8 @@ def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
 
 
 def _case_list_status_badge(summary: Any) -> str:
-    if summary.lifecycle_status is LifecycleStatus.CLOSED:
-        return ""
-    status = (
-        CaseStatus.PENDING_CONFIRMATION
-        if summary.status is CaseStatus.PENDING_CONFIRMATION
-        else CaseStatus.IN_PROGRESS
-    )
-    return _case_status_badge(status)
+    status = escape(summary.issue_current_status or "问题未回复")
+    return f'<span class="status-badge issue-current-status">{status}</span>'
 
 
 def _can_auto_accept_case(case: Any) -> bool:
