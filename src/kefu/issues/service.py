@@ -271,6 +271,7 @@ class IssueManagement:
                 issue_current_status=fields.issue_current_status.strip() or "问题未回复",
                 issue_source=fields.issue_source.strip() or "工作台",
                 customer_name=fields.customer_name.strip() or None,
+                customer_group_name=source_group_name.strip() or None,
                 customer_contact_name=fields.customer_contact_name.strip() or None,
                 customer_contact_method=fields.customer_contact_method.strip() or None,
                 issue_metadata={"customer_group_name": source_group_name},

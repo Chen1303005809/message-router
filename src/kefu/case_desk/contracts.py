@@ -72,6 +72,7 @@ class CreateCase:
     dev_team_id: UUID
     consult_handler_name: str | None = None
     customer_name: str | None = None
+    customer_group_name: str | None = None
     customer_contact_name: str | None = None
     customer_contact_method: str | None = None
     priority: CasePriority = CasePriority.NORMAL
@@ -142,6 +143,7 @@ class UpdateCaseMetadata:
     customer_contact_name: str | None
     customer_contact_method: str | None
     priority: CasePriority
+    customer_group_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

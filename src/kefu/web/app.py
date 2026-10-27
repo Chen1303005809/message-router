@@ -1376,6 +1376,7 @@ def create_app(
             </div>
             {_image_upload_controls()}
             <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
+            <label>客户群聊名称（选填） <input name="customer_group_name" maxlength="256" placeholder="客户所在企业微信群聊名称"></label>
             <div class="form-row">
               <label>联系人（选填） <input name="customer_contact_name" maxlength="256"></label>
               <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" placeholder="电话、邮箱或其他联系方法"></label>
@@ -1415,6 +1416,7 @@ def create_app(
             title = _required_form_text(form, "title")
             description = _required_form_text(form, "description")
             customer_name = _required_form_text(form, "customer_name")
+            customer_group_name = _optional_form_text(form, "customer_group_name")
             consult_handler_name = _required_form_text(form, "consult_handler_name")
             customer_contact_name = _optional_form_text(form, "customer_contact_name")
             customer_contact_method = _optional_form_text(form, "customer_contact_method")
@@ -1430,6 +1432,8 @@ def create_app(
                 raise ValidationError("问题描述不能超过 20000 个字符")
             if len(customer_name) > 256:
                 raise ValidationError("客户 / 企业名称不能超过 256 个字符")
+            if customer_group_name and len(customer_group_name) > 256:
+                raise ValidationError("客户群聊名称不能超过 256 个字符")
             if len(consult_handler_name) > 256:
                 raise ValidationError("咨询经办人不能超过 256 个字符")
             if customer_contact_name and len(customer_contact_name) > 256:
@@ -1473,6 +1477,7 @@ def create_app(
                     dev_team_id=dev_team_id,
                     consult_handler_name=consult_handler_name,
                     customer_name=customer_name,
+                    customer_group_name=customer_group_name,
                     customer_contact_name=customer_contact_name,
                     customer_contact_method=customer_contact_method,
                     priority=priority,
@@ -1639,6 +1644,7 @@ def create_app(
                     case_ref=issue_number,
                     expected_version=int(_required(form, "version")),
                     customer_name=_required(form, "customer_name"),
+                    customer_group_name=form.get("customer_group_name"),
                     customer_contact_name=form.get("customer_contact_name"),
                     customer_contact_method=form.get("customer_contact_method"),
                     priority=CasePriority(_required(form, "priority")),
@@ -3485,6 +3491,9 @@ def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
         <div class="form-row">
           <label>客户 / 企业名称
             <input name="customer_name" required maxlength="256" value="{escape(case.customer_name or "")}">
+          </label>
+          <label>客户群聊名称（选填）
+            <input name="customer_group_name" maxlength="256" value="{escape(case.customer_group_name or "")}">
           </label>
           <label>联系人（选填）
             <input name="customer_contact_name" maxlength="256" value="{escape(case.customer_contact_name or "")}">

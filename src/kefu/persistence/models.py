@@ -265,6 +265,7 @@ class Case(Base):
     customer_name: Mapped[str] = mapped_column(
         String(256), default="未录入", server_default="未录入"
     )
+    customer_group_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     customer_contact_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     customer_contact_method: Mapped[str | None] = mapped_column(String(256), nullable=True)
     priority: Mapped[CasePriority] = mapped_column(

@@ -134,9 +134,7 @@ def _original_speaker_name(entry: CaseEntry) -> str:
 
 
 def _case_customer_group_name(case: Case) -> str:
-    metadata = case.issue_metadata_json or {}
-    value = metadata.get("customer_group_name") or metadata.get("source_group_name")
-    return value if isinstance(value, str) else ""
+    return case.customer_group_name.strip() if case.customer_group_name else ""
 
 
 def _case_deadline_status(case: Case, now: datetime | None = None) -> DeadlineStatus | None:
@@ -1061,6 +1059,7 @@ class CaseDesk:
         self._directory.active_consult_channel(session, command.consult_queue_id)
         title = self._validated_title(command.title, parts)
         customer_name = self._validated_customer_name(command.customer_name)
+        customer_group_name = self._validated_customer_group_name(command.customer_group_name)
         consult_handler_name = self._validated_handler_name(handler_name)
         related_case_id = self._validated_related_case(session, command.related_case_id)
         created_at = utc_now()
@@ -1111,6 +1110,7 @@ class CaseDesk:
             case_ref=issue_number,
             title=title,
             customer_name=customer_name,
+            customer_group_name=customer_group_name,
             customer_contact_name=_clean_optional_text(command.customer_contact_name),
             customer_contact_method=_clean_optional_text(command.customer_contact_method),
             priority=command.priority,
@@ -1172,16 +1172,24 @@ class CaseDesk:
         actor_user = self._directory.get_user(session, actor.user_id)
 
         new_customer_name = self._validated_customer_name(command.customer_name)
+        current_customer_group_name = _case_customer_group_name(case)
+        new_customer_group_name = (
+            current_customer_group_name
+            if command.customer_group_name is None
+            else self._validated_customer_group_name(command.customer_group_name)
+        )
         new_contact_name = _clean_optional_text(command.customer_contact_name)
         new_contact_method = _clean_optional_text(command.customer_contact_method)
         new_values = {
             "customer_name": new_customer_name,
+            "customer_group_name": new_customer_group_name,
             "customer_contact_name": new_contact_name,
             "customer_contact_method": new_contact_method,
             "priority": command.priority.value,
         }
         old_values = {
             "customer_name": case.customer_name,
+            "customer_group_name": current_customer_group_name,
             "customer_contact_name": case.customer_contact_name,
             "customer_contact_method": case.customer_contact_method,
             "priority": case.priority.value,
@@ -1195,6 +1203,7 @@ class CaseDesk:
             return self._result(case)
 
         case.customer_name = new_customer_name
+        case.customer_group_name = new_customer_group_name
         case.customer_contact_name = new_contact_name
         case.customer_contact_method = new_contact_method
         case.priority = command.priority
@@ -1883,6 +1892,16 @@ class CaseDesk:
 
     def _validated_customer_name(self, name: str | None) -> str:
         return (name or "").strip() or "未录入"
+
+    def _validated_customer_group_name(self, name: str | None) -> str | None:
+        if name is None:
+            return None
+        if not isinstance(name, str):
+            raise ValidationError("客户群聊名称必须是文本")
+        normalized = name.strip()
+        if len(normalized) > 256:
+            raise ValidationError("客户群聊名称不能超过 256 个字符")
+        return normalized or None
 
     def _validated_handler_name(self, name: str) -> str:
         if not isinstance(name, str):
