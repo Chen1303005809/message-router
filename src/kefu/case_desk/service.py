@@ -318,6 +318,20 @@ class CaseDesk:
                 statement = statement.where(Case.waiting_on == case_filter.waiting_on)
             if case_filter.priority is not None:
                 statement = statement.where(Case.priority == case_filter.priority)
+            search_query = case_filter.query.strip()
+            if search_query:
+                escaped_query = (
+                    search_query.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                search_pattern = f"%{escaped_query}%"
+                statement = statement.where(
+                    or_(
+                        Case.bug_number.ilike(search_pattern, escape="\\"),
+                        Case.customer_name.ilike(search_pattern, escape="\\"),
+                    )
+                )
             if case_filter.waiting_for_me and team_ids is not None:
                 statement = statement.where(
                     or_(

@@ -372,6 +372,7 @@ class CaseFilter:
     assigned_to_me: bool = False
     page_size: int = 50
     offset: int = 0
+    query: str = ""
 
 
 @dataclass(frozen=True, slots=True)

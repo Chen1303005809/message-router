@@ -184,7 +184,7 @@ class IssueInspectionService:
 
         rows.sort(key=lambda row: row.bug_number)
         content = "\n".join(
-            f"{_single_line(row.bug_number)}｜{_single_line(row.customer_name)}"
+            f"**{_single_line(row.customer_name)}** ｜ {_single_line(row.bug_number)}"
             + (
                 f"（{_single_line(row.acceptance_team_name)}）"
                 if include_acceptance_team

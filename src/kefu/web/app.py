@@ -1239,25 +1239,44 @@ def create_app(
         request: Request,
         state: str = "open",
         priority: str = "",
+        q: str = "",
         notice: str | None = None,
     ) -> Response:
         if state not in {"mine", "dev", "open", "closed"}:
             state = "open"
+        query = q.strip()
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         try:
             overview = issue_management.overview(actor)
-            cases = issue_management.list(_case_filter_for_state(state, priority), actor)
+            cases = issue_management.list(
+                _case_filter_for_state(state, priority, query), actor
+            )
             consult_queues = issue_management.list_consult_queues(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         cards = "".join(_case_card(summary, external_path) for summary in cases.items)
         cards = cards or '<p class="empty">当前筛选下没有问题。</p>'
         events_path = external_path("/issues")
+        clear_search_link = (
+            f'<a class="button-link" href="{_event_filter_url(events_path, state, priority)}">清除</a>'
+            if query
+            else ""
+        )
+        search_form = (
+            f'<form class="issue-search-form" method="get" action="{events_path}">'
+            f'<input type="hidden" name="state" value="{escape(state)}">'
+            f'<input type="hidden" name="priority" value="{escape(priority)}">'
+            f'<label class="sr-only" for="issue-search">搜索问题</label>'
+            f'<input id="issue-search" type="search" name="q" value="{escape(query)}" '
+            'placeholder="搜索 BUG 编号或客户名称">'
+            '<button type="submit">搜索</button>'
+            f"{clear_search_link}</form>"
+        )
         tabs = " ".join(
             f'<a class="{"active" if state == value else ""}" '
-            f'href="{_event_filter_url(events_path, value, priority)}">{label}</a>'
+            f'href="{_event_filter_url(events_path, value, priority, query)}">{label}</a>'
             for value, label in (
                 ("open", "问题列表"),
                 ("closed", "已关闭"),
@@ -1266,7 +1285,7 @@ def create_app(
         selected_priority = CasePriority(priority) if priority else None
         priority_filters = " ".join(
             f'<a class="{"active" if selected_priority is level else ""}" '
-            f'href="{_event_filter_url(events_path, state, level.value if level else "")}">{label}</a>'
+            f'href="{_event_filter_url(events_path, state, level.value if level else "", query)}">{label}</a>'
             for level, label in (
                 (None, "全部等级"),
                 (CasePriority.NORMAL, "普通"),
@@ -1293,7 +1312,8 @@ def create_app(
                 f"{notice_markup}"
                 f'<header class="topbar"><div><div class="eyebrow"></div>'
                 f"<nav>{tabs}{queue_link}{admin_link}{create_link}</nav></header>"
-                f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
+                f'<section class="filter-panel">{search_form}'
+                f'<div class="filter-label">紧急程度</div>'
                 f'<nav class="priority-filters">{priority_filters}</nav></section>'
                 f'<main class="event-list">{cards}</main>',
                 body_class="event-page",
@@ -1301,10 +1321,17 @@ def create_app(
         )
 
     @app.get("/api/issues")
-    async def issues_api(request: Request, state: str = "open", priority: str = "") -> JSONResponse:
+    async def issues_api(
+        request: Request,
+        state: str = "open",
+        priority: str = "",
+        q: str = "",
+    ) -> JSONResponse:
         actor = actor_or_error(request)
         try:
-            page = issue_management.list(_case_filter_for_state(state, priority), actor)
+            page = issue_management.list(
+                _case_filter_for_state(state, priority, q), actor
+            )
         except CaseDeskError as error:
             raise _http_error(error) from error
         return JSONResponse(
@@ -2352,7 +2379,7 @@ def _storage_from_settings(settings: Settings) -> ObjectStorage:
     return object_storage_from_settings(settings)
 
 
-def _case_filter_for_state(state: str, priority: str = "") -> CaseFilter:
+def _case_filter_for_state(state: str, priority: str = "", query: str = "") -> CaseFilter:
     base = {
         "mine": CaseFilter(
             lifecycle_status=LifecycleStatus.OPEN,
@@ -2374,13 +2401,16 @@ def _case_filter_for_state(state: str, priority: str = "") -> CaseFilter:
         page_size=base.page_size,
         offset=base.offset,
         priority=selected_priority,
+        query=query.strip(),
     )
 
 
-def _event_filter_url(path: str, state: str, priority: str) -> str:
+def _event_filter_url(path: str, state: str, priority: str, query: str = "") -> str:
     values = {"state": state if state in {"mine", "dev", "open", "closed"} else "open"}
     if priority:
         values["priority"] = CasePriority(priority).value
+    if query.strip():
+        values["q"] = query.strip()
     return f"{path}?{urlencode(values)}"
 
 
@@ -2534,6 +2564,10 @@ h2 { color: #23344f; }
   box-shadow: 0 5px 18px #162a4608;
 }
 .filter-panel { padding: 13px 16px; margin-bottom: 16px; }
+.issue-search-form { display: flex; align-items: center; gap: 8px; margin-bottom: 13px; }
+.issue-search-form input { flex: 1; min-width: 0; margin: 0; }
+.issue-search-form button, .issue-search-form .button-link { flex: 0 0 auto; margin: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .filter-label { color: var(--muted); font-size: 12px; font-weight: 700; margin-bottom: 6px; }
 .priority-filters { display: flex; gap: 6px; margin: 0; }
 .priority-filters a { padding: 5px 9px; border-radius: 8px; color: #58667b; font-size: 13px; }
