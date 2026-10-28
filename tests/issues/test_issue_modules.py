@@ -246,8 +246,12 @@ def test_manual_inspection_sends_summaries_to_dev_and_consult_teams(issue_contex
             "chat-consult",
             "chat-dev",
         }
-        assert {message.content for message in messages} == {
-            f"{issue.bug_number}｜客户甲（研发一组）"
+        content_by_address = {
+            message.destination_address: message.content for message in messages
+        }
+        assert content_by_address == {
+            "chat-consult": f"{issue.bug_number}｜客户甲（研发一组）",
+            "chat-dev": f"{issue.bug_number}｜客户甲",
         }
         closed_issue = session.get(Case, issue.id)
         assert closed_issue is not None
@@ -371,22 +375,28 @@ def test_scheduled_inspection_sends_to_all_active_consult_queues_and_falls_back_
     with issue_context["factory"]() as session:
         messages = session.scalars(select(MessageOutbox)).all()
         by_address = {message.destination_address: message.content for message in messages}
-        initial_line = (
-            f"{initial_team_issue.bug_number}｜客户乙（研发一组）"
-        )
-        fallback_line = (
-            f"{fallback_team_issue.bug_number}｜客户丙（研发二组）"
-        )
-        summary = "\n".join(
+        dev_summary = "\n".join(
             sorted(
-                (initial_line, fallback_line),
+                (
+                    f"{initial_team_issue.bug_number}｜客户乙",
+                    f"{fallback_team_issue.bug_number}｜客户丙",
+                ),
+                key=lambda line: line.split("｜", maxsplit=1)[0],
+            )
+        )
+        consult_summary = "\n".join(
+            sorted(
+                (
+                    f"{initial_team_issue.bug_number}｜客户乙（研发一组）",
+                    f"{fallback_team_issue.bug_number}｜客户丙（研发二组）",
+                ),
                 key=lambda line: line.split("｜", maxsplit=1)[0],
             )
         )
         assert by_address == {
-            "chat-dev-current": summary,
+            "chat-dev-current": dev_summary,
             "chat-consult": "暂无未关闭问题",
-            "chat-consult-south": summary,
+            "chat-consult-south": consult_summary,
             "chat-consult-empty": "暂无未关闭问题",
         }
 

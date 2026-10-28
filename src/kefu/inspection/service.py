@@ -157,6 +157,7 @@ class IssueInspectionService:
                 queue_rows,
                 idempotency_key=f"{idempotency_prefix}:consult_queue:{queue_id}",
                 empty_summary="暂无未关闭问题",
+                include_acceptance_team=True,
             )
             summary_messages += queued
             unresolved += failed
@@ -174,6 +175,7 @@ class IssueInspectionService:
         *,
         idempotency_key: str,
         empty_summary: str | None = None,
+        include_acceptance_team: bool = False,
     ) -> tuple[int, int]:
         try:
             target = self._recipients.resolve(recipient)
@@ -183,7 +185,11 @@ class IssueInspectionService:
         rows.sort(key=lambda row: row.bug_number)
         content = "\n".join(
             f"{_single_line(row.bug_number)}｜{_single_line(row.customer_name)}"
-            f"（{_single_line(row.acceptance_team_name)}）"
+            + (
+                f"（{_single_line(row.acceptance_team_name)}）"
+                if include_acceptance_team
+                else ""
+            )
             for row in rows
         ) or empty_summary
         if content is None:
