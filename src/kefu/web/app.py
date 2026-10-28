@@ -14,11 +14,12 @@ from decimal import Decimal, DecimalException
 from hmac import compare_digest
 from html import escape
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler as default_http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
@@ -187,6 +188,28 @@ def create_app(
         if not mount_path or path == mount_path or path.startswith(f"{mount_path}/"):
             return path
         return f"{mount_path}{path}"
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_exception(request: Request, error: HTTPException) -> Response:
+        if error.status_code != 403:
+            return await default_http_exception_handler(request, error)
+
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "")
+        accept = request.headers.get("accept", "").lower()
+        if route_path.startswith("/api/") or "text/html" not in accept:
+            return await default_http_exception_handler(request, error)
+
+        detail = error.detail
+        if not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False)
+        return _browser_forbidden_response(
+            request,
+            detail or "当前身份无权执行此操作。",
+            fallback_path=external_path("/issues"),
+            mount_path=settings.web_mount_path,
+            headers=error.headers,
+        )
 
     @app.middleware("http")
     async def legacy_event_routes(request: Request, call_next):
@@ -2510,6 +2533,124 @@ def _http_error(error: CaseDeskError) -> HTTPException:
     return HTTPException(status_code=status, detail=detail)
 
 
+_FORBIDDEN_RETURN_MARKER = "_kefu_forbidden_return"
+
+
+def _browser_forbidden_response(
+    request: Request,
+    detail: str,
+    *,
+    fallback_path: str,
+    mount_path: str,
+    headers: Mapping[str, str] | None = None,
+) -> HTMLResponse:
+    target = _same_origin_referer_path(request, mount_path=mount_path)
+    current_path = _unmount_path(request.url.path, mount_path=mount_path)
+    if target is None:
+        target = fallback_path
+
+    target_path = urlsplit(target).path
+    should_return = (
+        request.query_params.get(_FORBIDDEN_RETURN_MARKER) != "1"
+        and _unmount_path(target_path, mount_path=mount_path) != current_path
+    )
+    if should_return:
+        target = _add_forbidden_return_marker(target)
+
+    message = escape(detail)
+    issue_list_path = escape(fallback_path, quote=True)
+    if should_return:
+        safe_target = escape(target, quote=True)
+        action_links = f'<a href="{safe_target}">返回上一页</a>'
+        script = (
+            f"window.alert({_script_json(detail)});"
+            f"window.location.replace({_script_json(target)});"
+        )
+    else:
+        action_links = (
+            '<button type="button" onclick="window.history.back()">返回上一页</button>'
+            f'<a href="{issue_list_path}">打开问题列表</a>'
+        )
+        script = f"window.alert({_script_json(detail)});"
+
+    response_headers = {"Cache-Control": "no-store"}
+    response_headers.update(headers or {})
+    return HTMLResponse(
+        content=(
+            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            "<title>权限不足</title><style>"
+            "body{font:16px -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;"
+            "max-width:600px;margin:10vh auto;padding:24px;color:#172033;background:#f5f7fb}"
+            ".card{padding:24px;border:1px solid #e2e8f0;border-radius:14px;background:#fff}"
+            "p{line-height:1.6;color:#475467;white-space:pre-wrap}"
+            "a,button{display:inline-block;margin:8px 12px 0 0;color:#155eef;font:inherit}"
+            "</style></head><body><main class=\"card\"><h1>权限不足</h1>"
+            f"<p>{message}</p><nav>{action_links}</nav></main>"
+            f"<script>{script}</script></body></html>"
+        ),
+        status_code=403,
+        headers=response_headers,
+    )
+
+
+def _same_origin_referer_path(request: Request, *, mount_path: str) -> str | None:
+    referer = request.headers.get("referer")
+    if not referer:
+        return None
+    try:
+        candidate = urlsplit(referer)
+        current = urlsplit(str(request.url))
+    except ValueError:
+        return None
+    if (
+        candidate.scheme.lower() not in {"http", "https"}
+        or candidate.scheme.lower() != current.scheme.lower()
+        or candidate.netloc.lower() != current.netloc.lower()
+        or candidate.username is not None
+        or candidate.password is not None
+        or not candidate.path.startswith("/")
+        or candidate.path.startswith("//")
+        or "\\" in candidate.path
+    ):
+        return None
+
+    candidate_path = _unmount_path(candidate.path, mount_path=mount_path)
+    current_path = _unmount_path(request.url.path, mount_path=mount_path)
+    if candidate_path == current_path:
+        return None
+    return urlunsplit(("", "", candidate.path, candidate.query, ""))
+
+
+def _unmount_path(path: str, *, mount_path: str) -> str:
+    normalized_mount = mount_path.rstrip("/")
+    if normalized_mount and (path == normalized_mount or path.startswith(f"{normalized_mount}/")):
+        return path[len(normalized_mount) :] or "/"
+    return path or "/"
+
+
+def _add_forbidden_return_marker(path: str) -> str:
+    parsed = urlsplit(path)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != _FORBIDDEN_RETURN_MARKER
+    ]
+    query.append((_FORBIDDEN_RETURN_MARKER, "1"))
+    return urlunsplit(("", "", parsed.path, urlencode(query), ""))
+
+
+def _script_json(value: str) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 _WORKBENCH_CSS = """
 :root {
   color-scheme: light;
@@ -3112,7 +3253,45 @@ button.primary:hover{{background:#004eeb}}
 @media (max-width:520px){{.topbar{{flex-direction:column}}.topbar nav{{justify-content:flex-start;margin-top:0}}.hero-banner{{padding:14px}}.form-grid,.edit-form{{grid-template-columns:1fr}}.form-grid label:first-child,.form-grid .primary,.form-grid button{{grid-column:auto}}.edit-form button{{justify-self:start}}.member-row{{align-items:flex-start;flex-direction:column}}.member-actions{{width:100%;justify-content:flex-end}}.add-member-form{{grid-template-columns:1fr 1fr}}.add-member-form button{{grid-column:1/-1;justify-self:start}}.permission-note{{flex-direction:column;gap:3px}}}}
 body.setup-page{{background:#eef4ff}}
 {_WORKBENCH_CSS}
-</style></head><body class="{escape(body_class)}">{body}</body></html>"""
+</style></head><body class="{escape(body_class)}">
+<script>
+(() => {{
+  const recoveryParameter = {_FORBIDDEN_RETURN_MARKER!r};
+  try {{
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.searchParams.has(recoveryParameter)) {{
+      currentUrl.searchParams.delete(recoveryParameter);
+      window.history.replaceState(null, '', currentUrl.pathname + currentUrl.search + currentUrl.hash);
+    }}
+  }} catch (_) {{}}
+
+  if (window.__kefuForbiddenFetchInstalled || typeof window.fetch !== 'function') return;
+  window.__kefuForbiddenFetchInstalled = true;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = async (...args) => {{
+    const response = await originalFetch(...args);
+    if (response.status === 403) {{
+      const input = args[0];
+      let sameOrigin = false;
+      try {{
+        const requestUrl = typeof Request !== 'undefined' && input instanceof Request
+          ? input.url
+          : String(input);
+        sameOrigin = new URL(requestUrl, window.location.href).origin === window.location.origin;
+      }} catch (_) {{}}
+      if (sameOrigin) {{
+        const payload = await response.clone().json().catch(() => null);
+        const detail = typeof payload?.detail === 'string' && payload.detail.trim()
+          ? payload.detail
+          : '当前身份无权执行此操作。';
+        window.alert(detail);
+      }}
+    }}
+    return response;
+  }};
+}})();
+</script>
+{body}</body></html>"""
 
 
 def _image_upload_controls(*, compact: bool = False) -> str:
