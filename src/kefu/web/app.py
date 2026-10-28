@@ -407,7 +407,10 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
         if not queues:
-            raise _http_error(Forbidden("你没有可用的咨询队列权限，或咨询队列尚未绑定企微群聊"))
+            return RedirectResponse(
+                f"{external_path('/issues')}?{urlencode({'notice': 'missing_consult_queue'})}",
+                status_code=302,
+            )
         queue_options = "".join(
             f'<option value="{queue.id}" '
             f"{'selected' if len(queues) == 1 else ''}>{escape(queue.name)}</option>"
@@ -426,7 +429,10 @@ def create_app(
         else:
             queue_control = f'<input type="hidden" name="consult_queue_id" value="{queues[0].id}">'
         if not dev_teams:
-            raise _http_error(Forbidden("当前没有已绑定群聊的初次受理组"))
+            return RedirectResponse(
+                f"{external_path('/issues')}?{urlencode({'notice': 'missing_dev_team'})}",
+                status_code=302,
+            )
         group_context_scripts = (
             _wecom_group_context_scripts(external_path("/api/wecom/agent-js-sdk-config"))
             if wecom_customer_groups.is_configured
@@ -1229,7 +1235,12 @@ def create_app(
         return RedirectResponse(external_path("/admin"), status_code=303)
 
     @app.get("/issues", response_class=HTMLResponse)
-    async def events_page(request: Request, state: str = "open", priority: str = "") -> Response:
+    async def events_page(
+        request: Request,
+        state: str = "open",
+        priority: str = "",
+        notice: str | None = None,
+    ) -> Response:
         if state not in {"mine", "dev", "open", "closed"}:
             state = "open"
         actor = page_actor_or_login(request)
@@ -1274,10 +1285,12 @@ def create_app(
             if consult_queues
             else ""
         )
-        
+        notice_markup = _issue_access_notice(notice)
+
         return HTMLResponse(
             _page(
                 "问题中心",
+                f"{notice_markup}"
                 f'<header class="topbar"><div><div class="eyebrow"></div>'
                 f"<nav>{tabs}{queue_link}{admin_link}{create_link}</nav></header>"
                 f'<section class="filter-panel"><div class="filter-label">紧急程度</div>'
@@ -2371,6 +2384,38 @@ def _event_filter_url(path: str, state: str, priority: str) -> str:
     return f"{path}?{urlencode(values)}"
 
 
+def _issue_access_notice(notice: str | None) -> str:
+    messages = {
+        "missing_consult_queue": (
+            "当前账号没有可用的咨询队列，或咨询队列尚未绑定企业微信群聊，暂时无法新建问题。"
+            "已为你打开问题列表。"
+        ),
+        "missing_dev_team": "当前没有已绑定群聊的研发受理组，暂时无法新建问题。已为你打开问题列表。",
+    }
+    message = messages.get(notice or "")
+    if message is None:
+        return ""
+    return f"""
+    <aside class="flash-notice" data-flash-notice="true" role="status" aria-live="polite">
+      <span>{escape(message)}</span>
+      <button type="button" data-flash-notice-close="true" aria-label="关闭提醒">×</button>
+    </aside>
+    <script>
+    (() => {{
+      const notice = document.querySelector('[data-flash-notice="true"]');
+      if (!notice) return;
+      const url = new URL(window.location.href);
+      url.searchParams.delete('notice');
+      window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+      notice.querySelector('[data-flash-notice-close="true"]')?.addEventListener(
+        'click', () => notice.remove(), {{ once: true }}
+      );
+      window.setTimeout(() => notice.remove(), 5000);
+    }})();
+    </script>
+    """
+
+
 async def _urlencoded_form(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
     parsed = parse_qs(body, keep_blank_values=True)
@@ -2939,6 +2984,9 @@ button.primary,.primary{{border-color:#155eef;background:#155eef;color:#fff}}
 button.primary:hover{{background:#004eeb}}
 .empty{{color:#667085}}
 .notice{{padding:12px 14px;border-radius:9px;background:#fff7e8;color:#8a4b08;border:1px solid #f6d28b;margin:16px 0}}
+.flash-notice{{position:fixed;top:16px;right:16px;z-index:1000;display:flex;align-items:flex-start;gap:12px;max-width:min(480px,calc(100vw - 32px));padding:13px 15px;border:1px solid #f6d28b;border-radius:10px;background:#fff7e8;color:#8a4b08;box-shadow:0 8px 24px #17203320;line-height:1.5}}
+.flash-notice button{{flex:0 0 auto;margin:0;padding:0 4px;border:0;background:transparent;color:inherit;font-size:20px;line-height:1.2}}
+.flash-notice button:hover{{border:0;background:transparent}}
 .setup-card{{max-width:540px;margin:10vh auto;background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:28px;box-shadow:0 12px 30px #17203312}}
 .setup-card .muted{{line-height:1.65}}
 .event-list{{max-width:680px}}
