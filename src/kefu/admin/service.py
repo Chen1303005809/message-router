@@ -19,8 +19,13 @@ from sqlalchemy.orm import Session
 
 from kefu.case_desk.contracts import Actor
 from kefu.case_desk.errors import Conflict, Forbidden, NotFound, ValidationError
+from kefu.inspection.schedule import (
+    DEFAULT_INSPECTION_TIMES,
+    normalize_inspection_times,
+)
 from kefu.observability import opaque_id_fingerprint
 from kefu.persistence.models import (
+    InspectionSchedule,
     MembershipRole,
     Team,
     TeamKind,
@@ -78,7 +83,15 @@ class ManagedTeam:
     active: bool
     channel_chatid: str | None
     channel_initialized: bool
+    inspection_age_hours: int | None
+    inspection_own_only: bool
     members: tuple[ManagedTeamMember, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedInspectionSchedule:
+    times: tuple[str, ...]
+    timezone: str = "Asia/Shanghai"
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +185,56 @@ class Administration:
             self._assert_admin(session, actor)
             teams = session.scalars(select(Team).order_by(Team.kind.asc(), Team.name.asc())).all()
             return tuple(self._team_view(session, team) for team in teams)
+
+    def inspection_schedule(self, actor: Actor) -> ManagedInspectionSchedule:
+        with self._session_factory() as session, session.begin():
+            self._assert_admin(session, actor)
+            schedule = session.get(InspectionSchedule, 1)
+            if schedule is None:
+                return ManagedInspectionSchedule(times=DEFAULT_INSPECTION_TIMES)
+            times = normalize_inspection_times(schedule.times)
+            return ManagedInspectionSchedule(times=times)
+
+    def update_inspection_schedule(
+        self, actor: Actor, *, times: object
+    ) -> ManagedInspectionSchedule:
+        normalized_times = normalize_inspection_times(times)
+        with self._session_factory() as session, session.begin():
+            self._assert_admin(session, actor)
+            schedule = session.get(InspectionSchedule, 1)
+            if schedule is None:
+                schedule = InspectionSchedule(id=1, times=list(normalized_times))
+                session.add(schedule)
+            else:
+                schedule.times = list(normalized_times)
+            session.flush()
+            return ManagedInspectionSchedule(times=normalized_times)
+
+    def update_team_inspection_rule(
+        self,
+        actor: Actor,
+        *,
+        team_id: UUID,
+        age_hours: int | None,
+        own_only: bool,
+    ) -> ManagedTeam:
+        if age_hours is not None and (
+            not isinstance(age_hours, int) or isinstance(age_hours, bool) or age_hours <= 0
+        ):
+            raise ValidationError("巡检小时数必须是正整数")
+        if age_hours is not None and age_hours > 2_147_483_647:
+            raise ValidationError("巡检小时数不能超过 2147483647")
+        if not isinstance(own_only, bool):
+            raise ValidationError("问题归属条件必须是布尔值")
+        with self._session_factory() as session, session.begin():
+            self._assert_admin(session, actor)
+            team = session.get(Team, team_id)
+            if team is None:
+                raise NotFound("团队不存在")
+            team.inspection_age_hours = age_hours
+            team.inspection_own_only = own_only
+            session.flush()
+            return self._team_view(session, team)
 
     def create_user(
         self,
@@ -489,6 +552,8 @@ class Administration:
             active=team.active,
             channel_chatid=channel.chatid if channel is not None else None,
             channel_initialized=channel is not None and channel.initialized_at is not None,
+            inspection_age_hours=team.inspection_age_hours,
+            inspection_own_only=team.inspection_own_only,
             members=members,
         )
 

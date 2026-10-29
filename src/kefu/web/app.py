@@ -27,6 +27,7 @@ from starlette.datastructures import UploadFile
 from kefu.admin.service import (
     Administration,
     AdminOverview,
+    ManagedInspectionSchedule,
     ManagedMembership,
     ManagedTeam,
     ManagedTeamMember,
@@ -461,23 +462,20 @@ def create_app(
             if wecom_customer_groups.is_configured
             else ""
         )
-        inspection_control = (
-            f'<button class="primary" type="button" data-inspection-run="true" '
-            f'data-endpoint="{external_path("/api/issues/inspection/run")}">立刻巡检</button>'
-            if administration.is_global_admin(actor)
-            else ""
+        is_global_admin = administration.is_global_admin(actor)
+        inspection_button, inspection_dialog = (
+            _inspection_control_parts(external_path) if is_global_admin else ("", "")
         )
         body = f"""
         <main class="create-main intake-page">
           <header class="page-heading intake-heading">
             <h1>新建问题</h1>
             <div class="intake-heading-actions">
-              {inspection_control}
+              {inspection_button}
               <a class="intake-back-link" href="{external_path("/issues")}">返回问题列表</a>
             </div>
           </header>
-          <p class="muted inspection-run-status" data-inspection-status="true" role="status"
-            aria-live="polite" hidden></p>
+          {inspection_dialog}
           <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
               aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
@@ -498,35 +496,6 @@ def create_app(
           </form>
           <script>
           (() => {{
-            const inspectionButton = document.querySelector('[data-inspection-run="true"]');
-            const inspectionStatus = document.querySelector('[data-inspection-status="true"]');
-            if (inspectionButton && inspectionStatus) {{
-              inspectionButton.addEventListener('click', async () => {{
-                if (inspectionButton.disabled) return;
-                inspectionButton.disabled = true;
-                inspectionStatus.hidden = false;
-                inspectionStatus.textContent = '正在执行巡检…';
-                try {{
-                  const response = await fetch(inspectionButton.dataset.endpoint, {{
-                    method: 'POST',
-                    headers: {{ 'Accept': 'application/json' }}
-                  }});
-                  const result = await response.json().catch(() => ({{}}));
-                  if (!response.ok) {{
-                    throw new Error(result.detail || '巡检失败，请稍后重试。');
-                  }}
-                  inspectionStatus.textContent =
-                    `巡检完成：扫描 ${{result.scanned_issues}} 个未关闭问题，` +
-                    `已加入推送队列 ${{result.summary_messages}} 条，` +
-                    `${{result.unresolved_targets}} 个群聊路由未解析。`;
-                }} catch (error) {{
-                  inspectionStatus.textContent = error.message || '巡检失败，请稍后重试。';
-                }} finally {{
-                  inspectionButton.disabled = false;
-                }}
-              }});
-            }}
-
             const form = document.querySelector('.intake-page form');
             const button = form?.querySelector('[data-issue-draft-submit="true"]');
             const status = form?.querySelector('[data-issue-draft-status="true"]');
@@ -568,7 +537,14 @@ def create_app(
     async def run_issue_inspection(request: Request) -> JSONResponse:
         actor = actor_or_error(request)
         try:
-            result = await asyncio.to_thread(inspection.inspect, actor=actor)
+            raw_body = await request.body()
+            payload = await _json_object(request) if raw_body.strip() else {}
+            team_kinds = payload.get("team_kinds")
+            result = await asyncio.to_thread(
+                inspection.inspect,
+                actor=actor,
+                team_kinds=team_kinds,
+            )
             return JSONResponse(
                 {
                     "scanned_issues": result.scanned_issues,
@@ -980,6 +956,7 @@ def create_app(
             users = administration.list_users(actor, query=q)
             all_users = users if not q.strip() else administration.list_users(actor)
             teams = administration.list_teams(actor)
+            schedule = administration.inspection_schedule(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
         body = _admin_dashboard(
@@ -988,6 +965,7 @@ def create_app(
             users=users,
             member_options=all_users,
             teams=teams,
+            schedule=schedule,
             query=q,
             path_for=external_path,
         )
@@ -998,6 +976,28 @@ def create_app(
         actor = actor_or_error(request)
         try:
             return JSONResponse(_admin_overview_json(administration.overview(actor)))
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+
+    @app.get("/api/admin/inspection/schedule")
+    async def admin_inspection_schedule_api(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            return JSONResponse(_inspection_schedule_json(administration.inspection_schedule(actor)))
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+
+    @app.patch("/api/admin/inspection/schedule")
+    @app.put("/api/admin/inspection/schedule")
+    async def admin_update_inspection_schedule_api(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            schedule = administration.update_inspection_schedule(
+                actor,
+                times=payload.get("times"),
+            )
+            return JSONResponse(_inspection_schedule_json(schedule))
         except CaseDeskError as error:
             raise _http_error(error) from error
 
@@ -1090,6 +1090,26 @@ def create_app(
                     else None
                 ),
                 active=_payload_bool(payload, "active") if "active" in payload else None,
+            )
+            return JSONResponse(_managed_team_json(team))
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+
+    @app.patch("/api/admin/teams/{team_id}/inspection-rule")
+    async def admin_update_team_inspection_rule_api(
+        request: Request, team_id: UUID
+    ) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            age_hours = payload.get("age_hours")
+            if age_hours is not None and not isinstance(age_hours, int):
+                raise ValidationError("巡检小时数必须是正整数")
+            team = administration.update_team_inspection_rule(
+                actor,
+                team_id=team_id,
+                age_hours=age_hours,
+                own_only=_payload_bool(payload, "own_only"),
             )
             return JSONResponse(_managed_team_json(team))
         except (CaseDeskError, ValueError, KeyError) as error:
@@ -1257,6 +1277,47 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path("/admin"), status_code=303)
 
+    @app.post("/admin/inspection/schedule", include_in_schema=False)
+    async def admin_update_inspection_schedule_form(request: Request) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            form = await _urlencoded_form(request)
+            administration.update_inspection_schedule(actor, times=form.get("times", ""))
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return RedirectResponse(external_path("/admin"), status_code=303)
+
+    @app.post("/admin/teams/{team_id}/inspection-rule", include_in_schema=False)
+    async def admin_update_team_inspection_rule_form(
+        request: Request, team_id: UUID
+    ) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            form = await _urlencoded_form(request)
+            age_hours = (
+                int(_required(form, "inspection_age_hours"))
+                if form.get("inspection_age_limited") == "on"
+                else None
+            )
+            own_only_text = form.get("inspection_own_only")
+            if own_only_text not in {"true", "false"}:
+                raise ValidationError("问题归属条件无效")
+            administration.update_team_inspection_rule(
+                actor,
+                team_id=team_id,
+                age_hours=age_hours,
+                own_only=own_only_text == "true",
+            )
+        except ValueError as error:
+            raise _http_error(ValidationError("巡检小时数必须是正整数")) from error
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return RedirectResponse(external_path("/admin"), status_code=303)
+
     @app.get("/issues", response_class=HTMLResponse)
     async def events_page(
         request: Request,
@@ -1272,7 +1333,6 @@ def create_app(
         if isinstance(actor, RedirectResponse):
             return actor
         try:
-            overview = issue_management.overview(actor)
             cases = issue_management.list(
                 _case_filter_for_state(state, priority, query), actor
             )
@@ -1316,9 +1376,10 @@ def create_app(
                 (CasePriority.SEVERE, "严重"),
             )
         )
+        is_global_admin = administration.is_global_admin(actor)
         admin_link = (
             f'<a class="nav-admin" href="{external_path("/admin")}">组织与授权</a>'
-            if administration.is_global_admin(actor)
+            if is_global_admin
             else ""
         )
         queue_link = f'<a href="{external_path("/status-queue")}">异步任务队列</a>'
@@ -1327,6 +1388,9 @@ def create_app(
             if consult_queues
             else ""
         )
+        inspection_button, inspection_dialog = (
+            _inspection_control_parts(external_path) if is_global_admin else ("", "")
+        )
         notice_markup = _issue_access_notice(notice)
 
         return HTMLResponse(
@@ -1334,7 +1398,8 @@ def create_app(
                 "问题中心",
                 f"{notice_markup}"
                 f'<header class="topbar"><div><div class="eyebrow"></div>'
-                f"<nav>{tabs}{queue_link}{admin_link}{create_link}</nav></header>"
+                f"<nav>{tabs}{queue_link}{admin_link}{create_link}{inspection_button}</nav></header>"
+                f"{inspection_dialog}"
                 f'<section class="filter-panel">{search_form}'
                 f'<div class="filter-label">紧急程度</div>'
                 f'<nav class="priority-filters">{priority_filters}</nav></section>'
@@ -2129,8 +2194,14 @@ def _managed_team_json(team: ManagedTeam) -> dict[str, object]:
         "active": team.active,
         "channel_chatid": team.channel_chatid,
         "channel_initialized": team.channel_initialized,
+        "inspection_age_hours": team.inspection_age_hours,
+        "inspection_own_only": team.inspection_own_only,
         "members": [_managed_team_member_json(member) for member in team.members],
     }
+
+
+def _inspection_schedule_json(schedule: ManagedInspectionSchedule) -> dict[str, object]:
+    return {"times": list(schedule.times), "timezone": schedule.timezone}
 
 
 def _admin_dashboard(
@@ -2140,6 +2211,7 @@ def _admin_dashboard(
     users: tuple[ManagedUser, ...],
     member_options: tuple[ManagedUser, ...],
     teams: tuple[ManagedTeam, ...],
+    schedule: ManagedInspectionSchedule,
     query: str,
     path_for: Callable[[str], str],
 ) -> str:
@@ -2161,6 +2233,7 @@ def _admin_dashboard(
         "".join(_admin_team_card(team, users=visible_users, path_for=path_for) for team in teams)
         or '<p class="empty">还没有团队，请先创建咨询团队或研发团队。</p>'
     )
+    schedule_value = escape(", ".join(schedule.times))
     return f"""
     <header class="topbar admin-topbar">
       <div>
@@ -2183,6 +2256,15 @@ def _admin_dashboard(
         <div class="stat-card"><span>咨询团队</span><strong>{overview.consult_queue_count}</strong><small>按团队隔离可见范围</small></div>
         <div class="stat-card"><span>研发团队</span><strong>{overview.dev_team_count}</strong><small>{escape(initialized_label)}</small></div>
         <div class="stat-card"><span>总管理员</span><strong>{overview.global_admin_count}</strong><small>至少保留 1 名在岗管理员</small></div>
+      </section>
+
+      <section class="panel inspection-settings" id="inspection-settings">
+        <div class="panel-heading"><div><div class="eyebrow">巡检推送</div><h2>每日时间点</h2></div><span class="count-pill">上海时间</span></div>
+        <p class="panel-intro">定时巡检使用上海时区。输入一个或多个 HH:mm 时间点，以逗号分隔；至少保留一个且不能重复。</p>
+        <form method="post" action="{path_for("/admin/inspection/schedule")}" class="inspection-schedule-form">
+          <label>每日巡检时间<input name="times" required value="{schedule_value}" placeholder="08:55, 11:30, 21:30"></label>
+          <button class="primary" type="submit">保存时间表</button>
+        </form>
       </section>
 
       <section class="admin-grid">
@@ -2220,6 +2302,7 @@ def _admin_dashboard(
             {_team_create_form_script()}
           </details>
           <div class="managed-list">{team_cards}</div>
+          {_team_inspection_rule_script()}
         </div>
       </section>
 
@@ -2320,6 +2403,10 @@ def _admin_team_card(
         if team.kind is TeamKind.DEV
         else ""
     )
+    age_checked = " checked" if team.inspection_age_hours is not None else ""
+    age_value = escape(str(team.inspection_age_hours or ""))
+    own_all_selected = " selected" if not team.inspection_own_only else ""
+    own_only_selected = " selected" if team.inspection_own_only else ""
     channel = ""
     if team.kind in (TeamKind.DEV, TeamKind.CONSULT_QUEUE):
         chat_label = "研发群" if team.kind is TeamKind.DEV else "咨询群"
@@ -2347,6 +2434,13 @@ def _admin_team_card(
         <button class="subtle-button" type="submit">保存</button>
       </form>
       {channel}
+      <form method="post" action="{path_for(f"/admin/teams/{team_id}/inspection-rule")}" class="team-inspection-form" data-inspection-rule-form="true">
+        <strong>巡检筛选规则</strong>
+        <label class="inspection-age-toggle"><input type="checkbox" name="inspection_age_limited"{age_checked} data-inspection-age-toggle="true"> 创建超过</label>
+        <label class="inspection-hours-label"><input type="number" name="inspection_age_hours" min="1" step="1" value="{age_value}" placeholder="小时" data-inspection-hours="true">小时且仍未关闭</label>
+        <label>问题归属<select name="inspection_own_only"><option value="true"{own_only_selected}>仅本团队归属的问题</option><option value="false"{own_all_selected}>全部团队的问题</option></select></label>
+        <button class="subtle-button" type="submit">保存巡检规则</button>
+      </form>
       <div class="member-heading"><strong>授权成员</strong><span>{sum(1 for member in team.members if member.active)} 人在岗</span></div>
       <div class="member-list">{member_rows}</div>
       <form method="post" action="{path_for(f"/admin/teams/{team_id}/members")}" class="add-member-form">
@@ -2355,6 +2449,26 @@ def _admin_team_card(
         <button type="submit">授权加入</button>
       </form>
     </article>
+    """
+
+
+def _team_inspection_rule_script() -> str:
+    return """
+    <script>
+    (() => {
+      document.querySelectorAll('[data-inspection-rule-form="true"]').forEach((form) => {
+        const toggle = form.querySelector('[data-inspection-age-toggle="true"]');
+        const hours = form.querySelector('[data-inspection-hours="true"]');
+        if (!toggle || !hours) return;
+        const update = () => {
+          hours.disabled = !toggle.checked;
+          hours.required = toggle.checked;
+        };
+        toggle.addEventListener('change', update);
+        update();
+      });
+    })();
+    </script>
     """
 
 
@@ -2387,7 +2501,85 @@ def _admin_team_member_row(
 
 
 def _team_kind_label(kind: TeamKind) -> str:
-    return "咨询团队" if kind is TeamKind.CONSULT_QUEUE else "研发团队"
+    labels = {
+        TeamKind.CONSULT_QUEUE: "咨询团队",
+        TeamKind.DEV: "研发团队",
+    }
+    return labels.get(kind, kind.value)
+
+
+def _inspection_control_parts(
+    path_for: Callable[[str], str],
+) -> tuple[str, str]:
+    options = "".join(
+        f'<label class="inspection-kind-option"><input type="checkbox" name="team_kinds" '
+        f'value="{escape(kind.value)}" checked> {escape(_team_kind_label(kind))}</label>'
+        for kind in TeamKind
+    )
+    button = (
+        '<button class="primary inspection-run-button" type="button" '
+        'data-inspection-open="true">立刻巡检</button>'
+    )
+    dialog = f"""
+    <dialog class="inspection-dialog" data-inspection-dialog="true" aria-labelledby="inspection-dialog-title">
+      <h2 id="inspection-dialog-title">选择巡检群聊类型</h2>
+      <p>每个群仍按该团队设置的巡检规则筛选问题。</p>
+      <fieldset><legend tabindex="-1">群聊类型（至少选择一种）</legend>{options}</fieldset>
+      <p class="inspection-choice-error" data-inspection-choice-error="true" role="alert" hidden>请至少选择一种群聊类型。</p>
+      <div class="inspection-dialog-actions">
+        <button type="button" data-inspection-cancel="true">取消</button>
+        <button class="primary" type="button" data-inspection-submit="true">开始巡检</button>
+      </div>
+    </dialog>
+    <p class="muted inspection-run-status" data-inspection-status="true" role="status" aria-live="polite" hidden></p>
+    <script>
+    (() => {{
+      const openButton = document.querySelector('[data-inspection-open="true"]');
+      const dialog = document.querySelector('[data-inspection-dialog="true"]');
+      const cancelButton = dialog?.querySelector('[data-inspection-cancel="true"]');
+      const submitButton = dialog?.querySelector('[data-inspection-submit="true"]');
+      const status = document.querySelector('[data-inspection-status="true"]');
+      const choiceError = dialog?.querySelector('[data-inspection-choice-error="true"]');
+      if (!openButton || !dialog || !submitButton || !status) return;
+      openButton.addEventListener('click', () => dialog.showModal());
+      cancelButton?.addEventListener('click', () => dialog.close());
+      submitButton.addEventListener('click', async () => {{
+        const teamKinds = Array.from(
+          dialog.querySelectorAll('input[name="team_kinds"]:checked'),
+          (input) => input.value
+        );
+        if (!teamKinds.length) {{
+          if (choiceError) choiceError.hidden = false;
+          dialog.querySelector('legend')?.focus();
+          return;
+        }}
+        if (choiceError) choiceError.hidden = true;
+        submitButton.disabled = true;
+        status.hidden = false;
+        status.textContent = '正在执行巡检…';
+        try {{
+          const response = await fetch({path_for("/api/issues/inspection/run")!r}, {{
+            method: 'POST',
+            headers: {{ 'Accept': 'application/json', 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ team_kinds: teamKinds }})
+          }});
+          const result = await response.json().catch(() => ({{}}));
+          if (!response.ok) throw new Error(result.detail || '巡检失败，请稍后重试。');
+          status.textContent =
+            `巡检完成：扫描 ${{result.scanned_issues}} 个未关闭问题，` +
+            `已加入推送队列 ${{result.summary_messages}} 条，` +
+            `${{result.unresolved_targets}} 个群聊路由未解析。`;
+          dialog.close();
+        }} catch (error) {{
+          status.textContent = error.message || '巡检失败，请稍后重试。';
+        }} finally {{
+          submitButton.disabled = false;
+        }}
+      }});
+    }})();
+    </script>
+    """
+    return button, dialog
 
 
 def _role_label(role: MembershipRole) -> str:
@@ -3136,6 +3328,18 @@ h3{{font-size:17px;margin:3px 0 0}}
 .topbar nav{{margin:10px 0 0;justify-content:flex-end}}
 .topbar nav a{{padding:7px 10px;border-radius:8px;color:#667085}}
 .topbar nav a.active,.topbar nav a:hover{{background:#eaf1ff;color:#155eef}}
+.inspection-run-button{{margin:0 0 0 4px;padding:7px 10px;white-space:nowrap}}
+.inspection-dialog{{width:min(420px,calc(100vw - 32px));padding:22px;border:1px solid #d0d5dd;border-radius:14px;box-shadow:0 18px 48px #10182833}}
+.inspection-dialog::backdrop{{background:#10182866}}
+.inspection-dialog h2{{margin:0 0 8px;font-size:20px}}
+.inspection-dialog p{{color:#667085;font-size:13px;line-height:1.5}}
+.inspection-dialog fieldset{{border:1px solid #eaecf0;border-radius:9px;padding:10px 12px}}
+.inspection-dialog legend{{padding:0 5px;color:#667085;font-size:12px}}
+.inspection-kind-option{{display:flex;align-items:center;gap:8px;margin:9px 0;font-weight:500}}
+.inspection-kind-option input{{width:auto;margin:0}}
+.inspection-dialog-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:16px}}
+.inspection-dialog-actions button{{margin:0}}
+.inspection-run-status{{max-width:680px;padding:0 4px;line-height:1.5}}
 .eyebrow{{font-size:11px;line-height:1.2;letter-spacing:.12em;text-transform:uppercase;color:#667085;font-weight:700}}
 .case-card{{display:block;border:1px solid #dbe3ef;border-radius:10px;padding:14px;margin:10px 0;color:inherit;background:#fff;box-shadow:0 2px 7px #1720330a}}
 .case-card small,.muted{{display:block;color:#667085;margin-top:4px}}
@@ -3188,6 +3392,10 @@ button.primary:hover{{background:#004eeb}}
 .stat-card strong{{display:block;margin:8px 0 4px;font-size:28px;letter-spacing:-.03em}}
 .admin-grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}}
 .panel{{padding:20px}}
+.inspection-settings{{margin-bottom:18px}}
+.inspection-schedule-form{{display:flex;align-items:flex-end;gap:10px}}
+.inspection-schedule-form label{{flex:1;margin:0}}
+.inspection-schedule-form button{{margin:0;white-space:nowrap}}
 .panel-heading,.team-header,.member-heading{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}
 .panel-intro{{color:#667085;font-size:13px;line-height:1.6;margin:12px 0 16px}}
 .search-form{{display:flex;gap:8px;margin-bottom:13px}}
@@ -3232,6 +3440,13 @@ button.primary:hover{{background:#004eeb}}
 .inline-form{{display:flex;gap:6px;align-items:center;margin-top:8px}}
 .inline-form input{{margin:0;min-width:0;flex:1}}
 .inline-form button{{margin:0}}
+.team-inspection-form{{display:grid;grid-template-columns:auto 1fr minmax(150px,1fr) auto;align-items:end;gap:8px;margin:12px 0;padding:11px;border-radius:9px;background:#f8fafc}}
+.team-inspection-form>strong{{grid-column:1/-1;font-size:12px;color:#475467}}
+.team-inspection-form label{{margin:0;font-size:12px}}
+.team-inspection-form label input,.team-inspection-form label select{{margin-top:4px}}
+.team-inspection-form .inspection-age-toggle{{display:flex;align-items:center;gap:6px;white-space:nowrap}}
+.team-inspection-form .inspection-age-toggle input{{width:auto;margin:0}}
+.team-inspection-form button{{margin:0;white-space:nowrap}}
 .member-heading{{margin-top:13px;padding-bottom:7px;border-bottom:1px solid #eef0f3;font-size:13px}}
 .member-heading span{{color:#98a2b3;font-size:12px}}
 .member-list{{margin-bottom:8px}}
@@ -3249,8 +3464,8 @@ button.primary:hover{{background:#004eeb}}
 .add-member-form button{{margin:0;padding:8px 10px;font-size:12px}}
 .permission-note{{display:flex;gap:12px;align-items:flex-start;margin-top:18px;padding:14px 17px;color:#667085;font-size:13px;line-height:1.6}}
 .permission-note strong{{color:#344054;white-space:nowrap}}
-@media (max-width:800px){{body{{padding:14px}}.admin-grid{{grid-template-columns:1fr}}.stats-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
-@media (max-width:520px){{.topbar{{flex-direction:column}}.topbar nav{{justify-content:flex-start;margin-top:0}}.hero-banner{{padding:14px}}.form-grid,.edit-form{{grid-template-columns:1fr}}.form-grid label:first-child,.form-grid .primary,.form-grid button{{grid-column:auto}}.edit-form button{{justify-self:start}}.member-row{{align-items:flex-start;flex-direction:column}}.member-actions{{width:100%;justify-content:flex-end}}.add-member-form{{grid-template-columns:1fr 1fr}}.add-member-form button{{grid-column:1/-1;justify-self:start}}.permission-note{{flex-direction:column;gap:3px}}}}
+@media (max-width:800px){{body{{padding:14px}}.admin-grid{{grid-template-columns:1fr}}.stats-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.team-inspection-form{{grid-template-columns:1fr 1fr}}.team-inspection-form>strong{{grid-column:1/-1}}}}
+@media (max-width:520px){{.topbar{{flex-direction:column}}.topbar nav{{justify-content:flex-start;margin-top:0}}.hero-banner{{padding:14px}}.form-grid,.edit-form{{grid-template-columns:1fr}}.form-grid label:first-child,.form-grid .primary,.form-grid button{{grid-column:auto}}.edit-form button{{justify-self:start}}.member-row{{align-items:flex-start;flex-direction:column}}.member-actions{{width:100%;justify-content:flex-end}}.add-member-form{{grid-template-columns:1fr 1fr}}.add-member-form button{{grid-column:1/-1;justify-self:start}}.permission-note{{flex-direction:column;gap:3px}}.inspection-schedule-form{{align-items:stretch;flex-direction:column}}.team-inspection-form{{grid-template-columns:1fr}}.team-inspection-form>strong{{grid-column:auto}}.topbar nav{{flex-wrap:wrap}}}}
 body.setup-page{{background:#eef4ff}}
 {_WORKBENCH_CSS}
 </style></head><body class="{escape(body_class)}">

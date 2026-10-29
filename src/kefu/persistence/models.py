@@ -197,6 +197,12 @@ class User(Base):
 
 class Team(Base):
     __tablename__ = "teams"
+    __table_args__ = (
+        CheckConstraint(
+            "inspection_age_hours IS NULL OR inspection_age_hours > 0",
+            name="ck_teams_inspection_age_hours_positive",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     kind: Mapped[TeamKind] = mapped_column(enum_column(TeamKind))
@@ -204,8 +210,28 @@ class Team(Base):
     # A development-team lead is informational text only. It intentionally
     # does not reference a User or participate in case assignment/authorization.
     lead_display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Inspection rules belong to the logical team, so a replacement channel
+    # inherits the same settings automatically.
+    inspection_age_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inspection_own_only: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class InspectionSchedule(Base):
+    __tablename__ = "inspection_schedules"
+
+    # This is a single-row configuration table. Keeping it in the database
+    # lets web and worker processes observe schedule updates without restart.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    times: Mapped[list[str]] = mapped_column(
+        JSON, default=lambda: ["08:55", "11:30", "21:30"]
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )

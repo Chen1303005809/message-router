@@ -16,7 +16,7 @@ from kefu.case_desk.errors import CaseDeskError
 from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
 from kefu.config import Settings
-from kefu.inspection.schedule import INSPECTION_TIMEZONE, next_inspection_at
+from kefu.inspection.schedule import next_inspection_at, scheduled_slot
 from kefu.inspection.service import IssueInspectionService
 from kefu.issues.group_intake import GroupIssueIntakeService
 from kefu.issues.service import IssueManagement
@@ -111,40 +111,34 @@ async def _issue_status_update_loop(worker: IssueStatusUpdateWorker) -> None:
 
 
 async def _inspection_loop(inspection: IssueInspectionService) -> None:
+    completed_slot: str | None = None
     while True:
         now = datetime.now(UTC)
-        next_run = next_inspection_at(now)
-        delay = max(
-            0.0,
-            (next_run - now.astimezone(INSPECTION_TIMEZONE)).total_seconds(),
-        )
-        await asyncio.sleep(delay)
-        while True:
-            current = datetime.now(UTC)
-            local_current = current.astimezone(INSPECTION_TIMEZONE)
-            if (
-                local_current.date() != next_run.date()
-                or local_current.hour != next_run.hour
-                or local_current.minute != next_run.minute
-            ):
-                break
-            try:
-                result = await asyncio.to_thread(
-                    inspection.inspect_scheduled,
-                    now=current,
-                )
-            except Exception:
-                logger.exception("issue_inspection_failed")
+        try:
+            times = await asyncio.to_thread(inspection.daily_times)
+            slot = scheduled_slot(now, times)
+            if slot is not None and slot != completed_slot:
+                result = await asyncio.to_thread(inspection.inspect_scheduled, now=now)
+                completed_slot = slot
+                if result.summary_messages or result.unresolved_targets:
+                    logger.info(
+                        "issue_inspection slot=%s scanned=%s summaries=%s unresolved=%s",
+                        slot,
+                        result.scanned_issues,
+                        result.summary_messages,
+                        result.unresolved_targets,
+                    )
+            if slot is not None:
                 await asyncio.sleep(1)
                 continue
-            if result.summary_messages or result.unresolved_targets:
-                logger.info(
-                    "issue_inspection scanned=%s summaries=%s unresolved=%s",
-                    result.scanned_issues,
-                    result.summary_messages,
-                    result.unresolved_targets,
-                )
-            break
+            next_run = next_inspection_at(now, times)
+            delay = max(0.1, (next_run - now).total_seconds())
+            # Reload the schedule periodically so admin changes take effect
+            # while this worker remains running.
+            await asyncio.sleep(min(delay, 5.0))
+        except Exception:
+            logger.exception("issue_inspection_failed")
+            await asyncio.sleep(1)
 
 
 async def _group_issue_intake_cleanup_loop(intake: GroupIssueIntakeService) -> None:
