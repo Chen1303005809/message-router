@@ -51,10 +51,9 @@ def build_formal_bundle(
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
     content = format_case_message(
-        case_title=case_title,
+        case_title=f"{case_title} ｜ {customer_name}",
         body=message_text,
         details_after=(
-            customer_name,
             speaker_name,
             bug_number,
             marker,
