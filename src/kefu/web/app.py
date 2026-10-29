@@ -38,6 +38,7 @@ from kefu.agent.service import (
     Agent,
     AgentConfigurationError,
     build_tool_registry,
+    format_customer_issue_title,
 )
 from kefu.case_desk.contracts import (
     Actor,
@@ -107,6 +108,7 @@ from kefu.persistence.models import (
 )
 from kefu.relay.handler import Relay
 from kefu.web.auth import AuthenticationError, WebAuthenticator
+from kefu.wecom.customer_group_mapping import customer_name_for_group
 from kefu.wecom.customer_groups import WeComCustomerGroupClient, WeComCustomerGroupError
 from kefu.wecom.transport import InboundImagePart
 
@@ -669,6 +671,7 @@ def create_app(
                         str(error),
                     )
             draft_processing_task_id = desk.start_issue_draft_processing()
+            customer_name = customer_name_for_group(source_group_name)
             message_id = uuid4()
             message = message_receiver.receive_workbench(message_id, pasted_text)
             logger.info(
@@ -681,7 +684,6 @@ def create_app(
                     pasted_text,
                     [team.name for team in dev_teams],
                     request_id=request_id,
-                    source_group_name=source_group_name,
                 )
             except AgentConfigurationError as error:
                 logger.error(
@@ -710,10 +712,11 @@ def create_app(
                 selected_team is not None,
             )
             logger.info(
-                "issue_draft_customer_name_result request_id=%s group_name_present=%s customer_name=%r",
+                "issue_draft_customer_name_result request_id=%s group_name_present=%s mapping_match=%s customer_name=%r",
                 request_id,
                 bool(source_group_name),
-                generated.get("customer_name", ""),
+                bool(customer_name),
+                customer_name,
             )
             generated_description = generated.get("issue_description", "")
             if not isinstance(generated_description, str) or not generated_description.strip():
@@ -752,7 +755,9 @@ def create_app(
             )
             parts = map_image_placeholders(pasted_text, media_ids)
             fields = IssueFields(
-                issue_title=generated.get("issue_title", ""),
+                issue_title=format_customer_issue_title(
+                    generated.get("issue_title", ""), customer_name
+                ),
                 issue_description=generated_description,
                 initial_acceptance_team_id=selected_team.id if selected_team else None,
                 suspected_type=generated.get("suspected_type", ""),
@@ -761,7 +766,7 @@ def create_app(
                 issue_source="工作台",
                 deadline=datetime.now(ZoneInfo("Asia/Shanghai"))
                 + timedelta(hours=settings.issue_default_expiry_hours),
-                customer_name=generated.get("customer_name", ""),
+                customer_name=customer_name,
                 customer_contact_name=generated.get("customer_contact_name", ""),
                 customer_contact_method=generated.get("customer_contact_method", ""),
             )
@@ -844,7 +849,7 @@ def create_app(
             <label>转发正文 <textarea name="issue_description" required maxlength="20000" rows="8">{escape(fields.issue_description)}</textarea></label>
             <p class="muted intake-review-hint">标题和正文会转发给初次受理组，图片按原顺序作为附件转发。</p>
             <div class="intake-key-fields">
-              <label>客户名称 <input name="customer_name" required maxlength="256" value="{escape(fields.customer_name)}" placeholder="请输入客户名称"></label>
+              <label>客户名称 <input name="customer_name" maxlength="256" value="{escape(fields.customer_name)}" placeholder="请输入客户名称"></label>
               <div class="intake-readonly-field"><span>客户群聊名称</span><strong>{escape(draft.source_group_name or "未获取")}</strong></div>
               <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
               <label>怀疑类型 <select name="suspected_type" required>{module_options}</select></label>
@@ -892,7 +897,7 @@ def create_app(
             fields = IssueFields(
                 issue_title=_required_form_text(form, "issue_title"),
                 issue_description=_required_form_text(form, "issue_description"),
-                customer_name=_required_form_text(form, "customer_name"),
+                customer_name=_optional_form_text(form, "customer_name") or "",
                 customer_contact_name=_optional_form_text(form, "customer_contact_name") or "",
                 customer_contact_method=_optional_form_text(form, "customer_contact_method") or "",
                 initial_acceptance_team_id=UUID(
