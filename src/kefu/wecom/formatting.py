@@ -50,8 +50,15 @@ def build_formal_bundle(
     if not text_parts or not any(part.strip() for part in text_parts):
         raise ValueError("正式消息至少要包含一段文字，才能生成普通消息")
     message_text = "\n".join(text_parts)
+    normalized_customer_name = customer_name.strip()
+    title_customer_prefix = f"{normalized_customer_name} ｜ "
+    display_title = (
+        case_title
+        if not normalized_customer_name or case_title.startswith(title_customer_prefix)
+        else f"{case_title} ｜ {normalized_customer_name}"
+    )
     content = format_case_message(
-        case_title=f"{case_title} ｜ {customer_name}",
+        case_title=display_title,
         body=message_text,
         details_after=(
             speaker_name,

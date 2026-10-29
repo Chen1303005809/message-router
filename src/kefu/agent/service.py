@@ -52,6 +52,29 @@ from kefu.tools import LoggedHttpClient
 logger = logging.getLogger(__name__)
 
 _AGENT_TIMEOUT_SECONDS = 60.0
+_CUSTOMER_TITLE_SEPARATOR = " ｜ "
+
+
+def _format_customer_issue_title(
+    issue_title: str,
+    customer_name: str,
+    *,
+    previous_customer_name: str = "",
+) -> str:
+    """Prefix a recognized customer name once, keeping later drafts idempotent."""
+    title = issue_title.strip()
+    previous_customer = previous_customer_name.strip()
+    if previous_customer:
+        previous_prefix = f"{previous_customer}{_CUSTOMER_TITLE_SEPARATOR}"
+        if title.startswith(previous_prefix):
+            title = title[len(previous_prefix) :].lstrip()
+
+    customer = customer_name.strip()
+    if not title or not customer:
+        return title
+    prefix = f"{customer}{_CUSTOMER_TITLE_SEPARATOR}"
+    formatted = title if title.startswith(prefix) else f"{prefix}{title}"
+    return formatted[:512]
 
 
 class AgentConfigurationError(RuntimeError):
@@ -201,6 +224,9 @@ class Agent:
             key: result[key].strip() if isinstance(result.get(key), str) else ""
             for key in allowed
         }
+        normalized["issue_title"] = _format_customer_issue_title(
+            normalized["issue_title"], normalized["customer_name"]
+        )
         if normalized["suspected_type"] not in {module.value for module in IssueModule}:
             normalized["suspected_type"] = ""
         return normalized
@@ -285,6 +311,15 @@ class Agent:
             key: result[key].strip() if isinstance(result.get(key), str) else ""
             for key in keys
         }
+        normalized["issue_title"] = _format_customer_issue_title(
+            normalized["issue_title"],
+            normalized["customer_name"],
+            previous_customer_name=(
+                current_fields.get("customer_name", "")
+                if isinstance(current_fields.get("customer_name", ""), str)
+                else ""
+            ),
+        )
         if normalized["acceptance_team_id"] not in allowed_team_ids:
             normalized["acceptance_team_id"] = ""
         if normalized["suspected_type"] not in set(modules):
