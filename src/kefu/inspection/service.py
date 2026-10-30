@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from kefu.case_desk.contracts import Actor
@@ -26,8 +26,10 @@ from kefu.persistence.models import (
     Case,
     InspectionSchedule,
     LifecycleStatus,
+    MembershipRole,
     Team,
     TeamKind,
+    TeamMembership,
     User,
     WeComChannel,
     utc_now,
@@ -39,6 +41,16 @@ class InspectionResult:
     scanned_issues: int
     summary_messages: int
     unresolved_targets: int
+
+
+@dataclass(frozen=True, slots=True)
+class InspectionAccess:
+    is_global_admin: bool
+    team_ids: tuple[UUID, ...]
+
+    @property
+    def can_inspect(self) -> bool:
+        return self.is_global_admin or bool(self.team_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +98,34 @@ class IssueInspectionService:
 
             return normalize_inspection_times(schedule.times)
 
+    def access_for_actor(self, actor: Actor) -> InspectionAccess:
+        """Return the inspection scope for an active global or team admin."""
+        now = utc_now()
+        with self._session_factory() as session:
+            user = session.get(User, actor.user_id)
+            if user is None or not user.active:
+                return InspectionAccess(is_global_admin=False, team_ids=())
+            if user.is_global_admin:
+                return InspectionAccess(is_global_admin=True, team_ids=())
+            team_ids = tuple(
+                session.scalars(
+                    select(TeamMembership.team_id)
+                    .join(Team, Team.id == TeamMembership.team_id)
+                    .where(
+                        TeamMembership.user_id == actor.user_id,
+                        TeamMembership.role == MembershipRole.ADMIN,
+                        TeamMembership.valid_from <= now,
+                        or_(
+                            TeamMembership.valid_until.is_(None),
+                            TeamMembership.valid_until > now,
+                        ),
+                        Team.active.is_(True),
+                    )
+                    .order_by(TeamMembership.team_id.asc())
+                ).all()
+            )
+            return InspectionAccess(is_global_admin=False, team_ids=team_ids)
+
     def inspect(
         self,
         *,
@@ -93,19 +133,27 @@ class IssueInspectionService:
         actor: Actor | None = None,
         team_kinds: Iterable[TeamKind | str] | None = None,
     ) -> InspectionResult:
-        """Send immediately to selected team types (all current types by default)."""
+        """Send to selected types for global admins or only an admin's own teams."""
         current = _as_utc(now or utc_now())
-        if actor is not None:
-            with self._session_factory() as session:
-                user = session.get(User, actor.user_id)
-                if user is None or not user.active or not user.is_global_admin:
-                    raise Forbidden("只有总管理员可以手动运行问题巡检")
-
-        selected_kinds = _normalize_team_kinds(team_kinds)
+        team_ids: tuple[UUID, ...] | None = None
+        if actor is None:
+            selected_kinds: tuple[TeamKind, ...] | None = _normalize_team_kinds(team_kinds)
+        else:
+            access = self.access_for_actor(actor)
+            if not access.can_inspect:
+                raise Forbidden("只有总管理员或团队管理员可以手动运行问题巡检")
+            if access.is_global_admin:
+                selected_kinds = _normalize_team_kinds(team_kinds)
+            else:
+                if team_kinds is not None:
+                    raise Forbidden("只有总管理员可以选择巡检群聊类型")
+                selected_kinds = None
+                team_ids = access.team_ids
         return self._send_summary(
             idempotency_prefix=f"inspection:manual:{uuid4()}",
             now=current,
             team_kinds=selected_kinds,
+            team_ids=team_ids,
         )
 
     def inspect_scheduled(self, *, now: datetime | None = None) -> InspectionResult:
@@ -122,6 +170,7 @@ class IssueInspectionService:
             idempotency_prefix=f"inspection:summary:{slot}",
             now=current,
             team_kinds=tuple(TeamKind),
+            team_ids=None,
         )
 
     def _send_summary(
@@ -129,7 +178,8 @@ class IssueInspectionService:
         *,
         idempotency_prefix: str,
         now: datetime,
-        team_kinds: tuple[TeamKind, ...],
+        team_kinds: tuple[TeamKind, ...] | None,
+        team_ids: tuple[UUID, ...] | None,
     ) -> InspectionResult:
         with self._session_factory() as session, session.begin():
             issues = session.scalars(
@@ -153,10 +203,14 @@ class IssueInspectionService:
                 if referenced_team_ids
                 else {}
             )
+            team_statement = select(Team).where(Team.active.is_(True))
+            if team_ids is not None:
+                team_statement = team_statement.where(Team.id.in_(team_ids))
+            else:
+                assert team_kinds is not None
+                team_statement = team_statement.where(Team.kind.in_(team_kinds))
             teams = session.scalars(
-                select(Team)
-                .where(Team.kind.in_(team_kinds), Team.active.is_(True))
-                .order_by(Team.kind.asc(), Team.name.asc())
+                team_statement.order_by(Team.kind.asc(), Team.name.asc())
             ).all()
             active_channels = session.scalars(
                 select(WeComChannel).where(

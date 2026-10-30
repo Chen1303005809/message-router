@@ -464,9 +464,14 @@ def create_app(
             if wecom_customer_groups.is_configured
             else ""
         )
-        is_global_admin = administration.is_global_admin(actor)
+        inspection_access = inspection.access_for_actor(actor)
         inspection_button, inspection_dialog = (
-            _inspection_control_parts(external_path) if is_global_admin else ("", "")
+            _inspection_control_parts(
+                external_path,
+                selectable=inspection_access.is_global_admin,
+            )
+            if inspection_access.can_inspect
+            else ("", "")
         )
         body = f"""
         <main class="create-main intake-page">
@@ -1381,7 +1386,8 @@ def create_app(
                 (CasePriority.SEVERE, "严重"),
             )
         )
-        is_global_admin = administration.is_global_admin(actor)
+        inspection_access = inspection.access_for_actor(actor)
+        is_global_admin = inspection_access.is_global_admin
         admin_link = (
             f'<a class="nav-admin" href="{external_path("/admin")}">组织与授权</a>'
             if is_global_admin
@@ -1394,7 +1400,12 @@ def create_app(
             else ""
         )
         inspection_button, inspection_dialog = (
-            _inspection_control_parts(external_path) if is_global_admin else ("", "")
+            _inspection_control_parts(
+                external_path,
+                selectable=inspection_access.is_global_admin,
+            )
+            if inspection_access.can_inspect
+            else ("", "")
         )
         notice_markup = _issue_access_notice(notice)
 
@@ -2515,7 +2526,47 @@ def _team_kind_label(kind: TeamKind) -> str:
 
 def _inspection_control_parts(
     path_for: Callable[[str], str],
+    *,
+    selectable: bool = True,
 ) -> tuple[str, str]:
+    if not selectable:
+        button = (
+            '<button class="primary inspection-run-button" type="button" '
+            'data-inspection-team-run="true">立刻巡检</button>'
+        )
+        status_and_script = f"""
+        <p class="muted inspection-run-status" data-inspection-status="true" role="status" aria-live="polite" hidden></p>
+        <script>
+        (() => {{
+          const button = document.querySelector('[data-inspection-team-run="true"]');
+          const status = document.querySelector('[data-inspection-status="true"]');
+          if (!button || !status) return;
+          button.addEventListener('click', async () => {{
+            if (button.disabled) return;
+            button.disabled = true;
+            status.hidden = false;
+            status.textContent = '正在巡检所管理的团队群聊…';
+            try {{
+              const response = await fetch({path_for("/api/issues/inspection/run")!r}, {{
+                method: 'POST',
+                headers: {{ 'Accept': 'application/json' }}
+              }});
+              const result = await response.json().catch(() => ({{}}));
+              if (!response.ok) throw new Error(result.detail || '巡检失败，请稍后重试。');
+              status.textContent =
+                `巡检完成：扫描 ${{result.scanned_issues}} 个未关闭问题，` +
+                `已加入推送队列 ${{result.summary_messages}} 条。`;
+            }} catch (error) {{
+              status.textContent = error.message || '巡检失败，请稍后重试。';
+            }} finally {{
+              button.disabled = false;
+            }}
+          }});
+        }})();
+        </script>
+        """
+        return button, status_and_script
+
     options = "".join(
         f'<label class="inspection-kind-option"><input type="checkbox" name="team_kinds" '
         f'value="{escape(kind.value)}" checked> {escape(_team_kind_label(kind))}</label>'
