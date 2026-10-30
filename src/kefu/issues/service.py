@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -22,7 +23,7 @@ from kefu.case_desk.contracts import (
     MediaAccess,
     TextPart,
 )
-from kefu.case_desk.errors import Conflict, NotFound, ValidationError
+from kefu.case_desk.errors import Conflict, Forbidden, NotFound, ValidationError
 from kefu.case_desk.markers import new_case_ref
 from kefu.case_desk.service import CaseDesk, utc_now
 from kefu.config import Settings
@@ -36,15 +37,18 @@ from kefu.issues.contracts import (
     IssueOverview,
     IssuePage,
     IssueView,
+    PrivateIntakeHandoffView,
 )
 from kefu.persistence.models import (
     Case,
     CaseEntryPart,
     CasePriority,
+    GroupIssueIntakeSession,
     IssueCurrentStatus,
     IssueIntakeDraft,
     IssueModule,
     PartKind,
+    PrivateIntakeHandoff,
     StoredMedia,
     TeamKind,
 )
@@ -100,7 +104,13 @@ class IssueManagement:
         self._storage = storage
         self._directory = DatabaseRoutingDirectory()
 
-    def create_intake_draft(self, intake: IssueIntake, actor: Actor) -> IssueIntakeDraftView:
+    def create_intake_draft(
+        self,
+        intake: IssueIntake,
+        actor: Actor,
+        *,
+        private_handoff_token: str | None = None,
+    ) -> IssueIntakeDraftView:
         self.cleanup_expired_drafts()
         if not intake.raw_text.strip():
             raise ValidationError("请粘贴咨询消息内容")
@@ -116,6 +126,27 @@ class IssueManagement:
             raise ValidationError("问题初次过期时间必须晚于当前时间")
         normalized_number: str | None = None
         with self._session_factory() as session, session.begin():
+            handoff: PrivateIntakeHandoff | None = None
+            if private_handoff_token:
+                handoff = session.scalar(
+                    select(PrivateIntakeHandoff)
+                    .where(PrivateIntakeHandoff.token == private_handoff_token)
+                    .with_for_update()
+                )
+                if handoff is None or handoff.actor_id != actor.user_id:
+                    raise NotFound("私聊交接链接不存在或不属于当前账号")
+                if handoff.consumed_at is not None:
+                    existing_draft = session.scalar(
+                        select(IssueIntakeDraft).where(
+                            IssueIntakeDraft.private_handoff_id == handoff.id
+                        )
+                    )
+                    if existing_draft is None:
+                        raise Conflict("该私聊交接链接已经使用，请重新发送私聊消息")
+                    actor_user = self._directory.get_user(session, actor.user_id)
+                    return _draft_view(existing_draft, actor_user.display_name)
+                if _as_utc(handoff.expires_at) <= now:
+                    raise NotFound("私聊交接链接已过期，请重新发送私聊消息")
             self._directory.assert_consultant_in_queue(
                 session,
                 consultant_id=actor.user_id,
@@ -160,10 +191,13 @@ class IssueManagement:
                 raw_text=intake.raw_text,
                 fields_json=fields_json,
                 parts_json=[_part_to_json(part) for part in intake.parts],
+                private_handoff_id=handoff.id if handoff is not None else None,
                 expires_at=expires_at,
             )
             session.add(record)
             session.flush()
+            if handoff is not None:
+                handoff.consumed_at = now
             return IssueIntakeDraftView(
                 id=record.id,
                 issue_number=record.issue_number,
@@ -178,6 +212,116 @@ class IssueManagement:
                 confirmed_issue_id=None,
                 source_group_name=intake.source_group_name,
             )
+
+    def create_private_intake_handoff(
+        self,
+        *,
+        msgid: str,
+        actor_id: UUID,
+        raw_text: str,
+        parts: Sequence[TextPart | ImagePart],
+    ) -> str:
+        """Persist an idempotent, two-hour handoff and return its bearer token."""
+        normalized_msgid = msgid.strip()
+        if not normalized_msgid or len(normalized_msgid) > 256:
+            raise ValidationError("私聊消息标识无效")
+        if not raw_text.strip() or len(raw_text) > 50_000:
+            raise ValidationError("私聊新问题请附上文字描述，且不超过50000个字符")
+        now = utc_now()
+        with self._session_factory() as session, session.begin():
+            self._directory.get_user(session, actor_id)
+            existing = session.scalar(
+                select(PrivateIntakeHandoff).where(
+                    PrivateIntakeHandoff.msgid == normalized_msgid
+                )
+            )
+            if existing is not None:
+                if existing.actor_id != actor_id:
+                    raise Conflict("该私聊消息已归属其他登记成员")
+                if _as_utc(existing.expires_at) <= now:
+                    raise Conflict("该私聊消息的 H5 交接链接已过期，请重新发送")
+                return existing.token
+            token = secrets.token_urlsafe(32)
+            session.add(
+                PrivateIntakeHandoff(
+                    id=uuid4(),
+                    token=token,
+                    actor_id=actor_id,
+                    msgid=normalized_msgid,
+                    raw_text=raw_text,
+                    parts_json=[_part_to_json(part) for part in parts],
+                    expires_at=now + timedelta(hours=2),
+                    consumed_at=None,
+                    created_at=now,
+                )
+            )
+            return token
+
+    def get_private_intake_handoff(
+        self, token: str, actor: Actor
+    ) -> PrivateIntakeHandoffView:
+        with self._session_factory() as session:
+            handoff = self._private_handoff(session, token, actor)
+            if handoff.consumed_at is not None:
+                raise Conflict("这条私聊内容已经进入问题草稿")
+            return PrivateIntakeHandoffView(
+                id=handoff.id,
+                actor_id=handoff.actor_id,
+                raw_text=handoff.raw_text,
+                parts=tuple(_part_from_json(item) for item in handoff.parts_json),
+                expires_at=handoff.expires_at,
+            )
+
+    def get_existing_private_intake_draft(
+        self, token: str, actor: Actor
+    ) -> UUID | None:
+        with self._session_factory() as session:
+            handoff = self._private_handoff(session, token, actor, allow_expired=True)
+            if handoff.consumed_at is None:
+                return None
+            record = session.scalar(
+                select(IssueIntakeDraft).where(
+                    IssueIntakeDraft.private_handoff_id == handoff.id
+                )
+            )
+            return record.id if record is not None else None
+
+    def get_private_intake_media_access(
+        self, token: str, media_id: UUID, actor: Actor
+    ) -> MediaAccess:
+        with self._session_factory() as session:
+            handoff = self._private_handoff(session, token, actor)
+            media_ids = {
+                part.media_id
+                for part in (_part_from_json(item) for item in handoff.parts_json)
+                if isinstance(part, ImagePart)
+            }
+            if media_id not in media_ids:
+                raise NotFound("私聊图片不存在")
+            media = session.get(StoredMedia, media_id)
+            if media is None:
+                raise NotFound("私聊图片不存在")
+            return MediaAccess(id=media.id, object_key=media.object_key, mime_type=media.mime_type)
+
+    def _private_handoff(
+        self,
+        session: Session,
+        token: str,
+        actor: Actor,
+        *,
+        allow_expired: bool = False,
+    ) -> PrivateIntakeHandoff:
+        handoff = session.scalar(
+            select(PrivateIntakeHandoff).where(PrivateIntakeHandoff.token == token)
+        )
+        if handoff is None:
+            raise NotFound("私聊交接链接不存在或已过期")
+        if handoff.actor_id != actor.user_id:
+            raise Forbidden("该私聊交接链接只允许原发送人使用")
+        self._directory.get_user(session, actor.user_id)
+        if not allow_expired and _as_utc(handoff.expires_at) <= utc_now():
+            raise NotFound("私聊交接链接已过期，请重新发送私聊消息")
+        return handoff
 
     def get_intake_draft(self, draft_id: UUID, actor: Actor) -> IssueIntakeDraftView:
         with self._session_factory() as session:
@@ -307,29 +451,65 @@ class IssueManagement:
                     IssueIntakeDraft.confirmed_issue_id.is_(None),
                 )
             ).all()
-            media_ids = {
+            handoffs = session.scalars(
+                select(PrivateIntakeHandoff).where(PrivateIntakeHandoff.expires_at <= current)
+            ).all()
+            candidates = {
                 UUID(part["media_id"])
                 for draft in drafts
                 for part in draft.parts_json
                 if part.get("kind") == PartKind.IMAGE.value
             }
+            candidates.update(
+                UUID(part["media_id"])
+                for handoff in handoffs
+                for part in handoff.parts_json
+                if part.get("kind") == PartKind.IMAGE.value
+            )
+            protected: set[UUID] = set(
+                session.scalars(
+                    select(CaseEntryPart.media_id).where(CaseEntryPart.media_id.is_not(None))
+                ).all()
+            )
+            deleted_draft_ids = {draft.id for draft in drafts}
+            for draft in session.scalars(select(IssueIntakeDraft)).all():
+                if draft.id not in deleted_draft_ids:
+                    protected.update(
+                        UUID(part["media_id"])
+                        for part in draft.parts_json
+                        if part.get("kind") == PartKind.IMAGE.value
+                    )
+            for group_session in session.scalars(
+                select(GroupIssueIntakeSession).where(
+                    GroupIssueIntakeSession.expires_at > current
+                )
+            ).all():
+                protected.update(
+                    UUID(part["media_id"])
+                    for part in group_session.parts_json
+                    if part.get("kind") == PartKind.IMAGE.value
+                )
+            expired_handoff_ids = {handoff.id for handoff in handoffs}
+            for handoff in session.scalars(select(PrivateIntakeHandoff)).all():
+                if handoff.id not in expired_handoff_ids:
+                    protected.update(
+                        UUID(part["media_id"])
+                        for part in handoff.parts_json
+                        if part.get("kind") == PartKind.IMAGE.value
+                    )
+            removable = candidates - protected
             media = (
                 session.scalars(
-                    select(StoredMedia).where(
-                        StoredMedia.id.in_(media_ids),
-                        StoredMedia.id.not_in(
-                            select(CaseEntryPart.media_id).where(
-                                CaseEntryPart.media_id.is_not(None)
-                            )
-                        ),
-                    )
+                    select(StoredMedia).where(StoredMedia.id.in_(removable))
                 ).all()
-                if media_ids
+                if removable
                 else []
             )
             object_keys = [item.object_key for item in media]
             for draft in drafts:
                 session.delete(draft)
+            for handoff in handoffs:
+                session.delete(handoff)
             for item in media:
                 session.delete(item)
         if self._storage is not None:
@@ -338,7 +518,7 @@ class IssueManagement:
                     self._storage.delete_prefix(object_key)
                 except Exception:
                     logger.warning("expired_intake_object_cleanup_failed object_key=%s", object_key)
-        return len(drafts)
+        return len(drafts) + len(handoffs)
 
     def _owned_draft(
         self,

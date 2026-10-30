@@ -68,6 +68,29 @@ class DatabaseRoutingDirectory:
             raise RoutingUnavailable("企业微信用户已停用")
         return user
 
+    def active_user_by_exact_wecom_userid(
+        self, session: Session, wecom_userid: str | None
+    ) -> User | None:
+        """Match only an exact, registered plain userid; never infer ID format."""
+        if not isinstance(wecom_userid, str) or not wecom_userid:
+            return None
+        user = session.scalar(
+            select(User).where(User.wecom_userid == wecom_userid, User.active.is_(True))
+        )
+        return user
+
+    def active_member_by_exact_wecom_userid(
+        self, session: Session, *, wecom_userid: str | None, team_id: UUID
+    ) -> User | None:
+        """Resolve a sender only when the active plain userid belongs to this team."""
+        user = self.active_user_by_exact_wecom_userid(session, wecom_userid)
+        if user is None or not self.is_member(session, user_id=user.id, team_id=team_id):
+            return None
+        team = session.get(Team, team_id)
+        if team is None or not team.active:
+            return None
+        return user
+
     def get_team(self, session: Session, team_id: UUID, *, kind: TeamKind | None = None) -> Team:
         team = session.get(Team, team_id)
         if team is None:

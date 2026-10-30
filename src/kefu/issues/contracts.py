@@ -69,6 +69,15 @@ class IssueIntakeDraftView:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivateIntakeHandoffView:
+    id: UUID
+    actor_id: UUID
+    raw_text: str
+    parts: tuple[ContentPart, ...]
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmedIssue:
     issue_number: str
     result: IssueCommandResult

@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from kefu.case_desk.contracts import (
+    Actor,
     ContentPart,
     GroupActor,
     ImagePart,
@@ -105,9 +106,7 @@ class Relay:
         origin_side_resolved: bool = False,
     ) -> RelayDecision:
         """Classify a callback exactly once and return a transport-neutral decision."""
-        if event.chattype != "group":
-            # Ignore private messages before inspecting payload errors or
-            # executing any legacy single-chat behavior.
+        if event.chattype not in {"group", "single"}:
             return RelayDecision(RelayDisposition.IGNORED)
         msgid = event.msgid.strip()
         if not msgid or len(msgid) > 256:
@@ -122,6 +121,8 @@ class Relay:
             decode_error = event.metadata.get("decode_error")
             if isinstance(decode_error, str) and decode_error:
                 decision = RelayDecision(RelayDisposition.REJECTED, reply_text=decode_error)
+            elif event.chattype == "single":
+                decision = self._handle_private_followup(event)
             else:
                 decision = self._handle_group(
                     event,
@@ -138,6 +139,56 @@ class Relay:
             )
             decision = RelayDecision(RelayDisposition.REJECTED, reply_text=str(error))
         return self._remember_decision(msgid, decision)
+
+    def _handle_private_followup(self, event: InboundEvent) -> RelayDecision:
+        if not event.quote_content or not event.quote_content.strip():
+            return RelayDecision(
+                RelayDisposition.REJECTED,
+                reply_text=(
+                    "私聊新问题请通过机器人卡片进入 H5；跟进已有问题时请引用"
+                    "含唯一问题编号的机器人消息。"
+                ),
+            )
+        if not event.sender_userid:
+            return RelayDecision(
+                RelayDisposition.REJECTED,
+                reply_text="无法识别私聊发送人，请联系管理员按企微明文 userid 登记成员后重试。",
+            )
+        with self._session_factory() as session:
+            user = self._directory.active_user_by_exact_wecom_userid(
+                session, event.sender_userid
+            )
+            if user is None:
+                return RelayDecision(
+                    RelayDisposition.REJECTED,
+                    reply_text="无法识别私聊发送人，请联系管理员按企微明文 userid 登记成员后重试。",
+                )
+            actor = Actor(user.id)
+        case_ref = parse_quoted_case_ref(event.quote_content)
+        parts = self._to_case_parts(event.parts)
+        result = self._case_desk.execute(
+            PostFormalMessage(
+                case_ref=case_ref,
+                expected_version=None,
+                parts=parts,
+                intent=event.intent,
+                source_msgid=event.msgid,
+            ),
+            actor,
+        )
+        logger.info(
+            "private_followup_recorded msgid=%s sender_fp=%s case_ref=%s idempotent=%s",
+            event.msgid,
+            opaque_id_fingerprint(event.sender_userid),
+            result.case_ref,
+            result.idempotent,
+        )
+        return RelayDecision(
+            RelayDisposition.FORWARDED,
+            case_ref=result.case_ref,
+            idempotent=result.idempotent,
+            delivery_ids=result.delivery_ids,
+        )
 
     @staticmethod
     def is_channel_binding_attempt(event: InboundEvent) -> bool:
@@ -159,6 +210,12 @@ class Relay:
         if team_kind is TeamKind.DEV:
             return EntrySide.DEV
         return None
+
+    def active_actor_for_exact_wecom_userid(self, wecom_userid: str | None) -> Actor | None:
+        """Resolve an active registered human without guessing encrypted IDs."""
+        with self._session_factory() as session:
+            user = self._directory.active_user_by_exact_wecom_userid(session, wecom_userid)
+            return Actor(user.id) if user is not None else None
 
     def _handle_group(
         self,
@@ -227,7 +284,7 @@ class Relay:
                 origin_chatid=event.chatid,
                 suppress_delivery=suppress_delivery,
             ),
-            GroupActor(side),
+            GroupActor(side, self._group_author_id(event, side)),
         )
         logger.info(
             "[GROUP-TRACE] message_recorded msgid=%s chatid_fp=%s origin_side=%s "
@@ -245,6 +302,38 @@ class Relay:
             idempotent=result.idempotent,
             delivery_ids=result.delivery_ids,
         )
+
+    def _group_author_id(self, event: InboundEvent, side: EntrySide) -> UUID | None:
+        if event.sender_userid is None or event.chatid is None:
+            return None
+        try:
+            with self._session_factory() as session:
+                team = self._directory.active_team_for_chatid(session, event.chatid)
+                expected_kind = (
+                    TeamKind.CONSULT_QUEUE if side is EntrySide.CONSULT else TeamKind.DEV
+                )
+                if team.kind is not expected_kind:
+                    return None
+                user = self._directory.active_member_by_exact_wecom_userid(
+                    session,
+                    wecom_userid=event.sender_userid,
+                    team_id=team.id,
+                )
+                if user is None:
+                    logger.info(
+                        "group_sender_identity_resolved msgid=%s sender_fp=%s matched=false",
+                        event.msgid,
+                        opaque_id_fingerprint(event.sender_userid),
+                    )
+                    return None
+                logger.info(
+                    "group_sender_identity_resolved msgid=%s sender_fp=%s matched=true",
+                    event.msgid,
+                    opaque_id_fingerprint(event.sender_userid),
+                )
+                return user.id
+        except CaseDeskError:
+            return None
 
     def _to_case_parts(self, inbound_parts: Sequence[InboundPart]) -> tuple[ContentPart, ...]:
         if not inbound_parts:

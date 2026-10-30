@@ -538,7 +538,10 @@ class IssueIntakeDraft(Base):
     """Short-lived, actor-owned form state between AI drafting and confirmation."""
 
     __tablename__ = "issue_intake_drafts"
-    __table_args__ = (Index("ix_issue_intake_drafts_expiry", "expires_at"),)
+    __table_args__ = (
+        Index("ix_issue_intake_drafts_expiry", "expires_at"),
+        Index("ix_issue_intake_drafts_private_handoff_id", "private_handoff_id", unique=True),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     issue_number: Mapped[str] = mapped_column(String(32), unique=True)
@@ -546,10 +549,36 @@ class IssueIntakeDraft(Base):
     raw_text: Mapped[str] = mapped_column(Text)
     fields_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     parts_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    private_handoff_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("private_intake_handoffs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     confirmed_issue_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("issues.id"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PrivateIntakeHandoff(Base):
+    """Short-lived private-message material waiting for its owner to open H5."""
+
+    __tablename__ = "private_intake_handoffs"
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_private_intake_handoffs_token"),
+        UniqueConstraint("msgid", name="uq_private_intake_handoffs_msgid"),
+        Index("ix_private_intake_handoffs_expiry", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    token: Mapped[str] = mapped_column(String(64))
+    actor_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id"), index=True)
+    msgid: Mapped[str] = mapped_column(String(256))
+    raw_text: Mapped[str] = mapped_column(Text)
+    parts_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -604,6 +633,10 @@ class GroupIssueIntakeTurn(Base):
     msgid: Mapped[str] = mapped_column(String(256))
     user_text: Mapped[str] = mapped_column(Text)
     reply_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
+    )
+    actor_name_snapshot: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

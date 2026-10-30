@@ -109,6 +109,7 @@ def _event(
     parts=(),
     chatid="chat-consult",
     quote=None,
+    sender_userid=None,
 ) -> InboundEvent:
     return InboundEvent(
         msgid=msgid,
@@ -117,7 +118,50 @@ def _event(
         parts=tuple(parts),
         quote_content=quote,
         mentioned_bot=True,
+        sender_userid=sender_userid,
     )
+
+
+def test_group_intake_turn_keeps_member_author_snapshot_and_unknown_fallback(
+    desk_context, group_intake
+):
+    service, _agent, _storage = group_intake
+    asyncio.run(
+        service.handle(
+            _event(
+                "known-author-turn",
+                parts=(InboundTextPart("有文字的咨询问题"),),
+                sender_userid="consult-a",
+            )
+        )
+    )
+    asyncio.run(
+        service.handle(
+            _event(
+                "encrypted-author-turn",
+                parts=(InboundTextPart("另一条咨询问题"),),
+                sender_userid="opaque-encrypted-userid",
+            )
+        )
+    )
+
+    with desk_context.session_factory() as session:
+        known = session.scalar(
+            select(GroupIssueIntakeTurn).where(
+                GroupIssueIntakeTurn.msgid == "known-author-turn"
+            )
+        )
+        encrypted = session.scalar(
+            select(GroupIssueIntakeTurn).where(
+                GroupIssueIntakeTurn.msgid == "encrypted-author-turn"
+            )
+        )
+        assert known is not None
+        assert known.actor_user_id == desk_context.users["consult_a"]
+        assert known.actor_name_snapshot == "咨询甲"
+        assert encrypted is not None
+        assert encrypted.actor_user_id is None
+        assert encrypted.actor_name_snapshot is None
 
 
 def test_group_intake_requires_confirmation_and_dispatches_original_order(

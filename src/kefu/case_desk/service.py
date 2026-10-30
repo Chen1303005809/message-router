@@ -1045,6 +1045,8 @@ class CaseDesk:
     def _create_case(
         self, session: Session, command: CreateCase, actor: Actor | GroupActor
     ) -> CommandResult:
+        entry_actor_user: User | None
+        entry_actor_name: str | None = None
         if isinstance(actor, Actor):
             actor_user = self._directory.get_user(session, actor.user_id)
             self._directory.assert_consultant_in_queue(
@@ -1052,6 +1054,7 @@ class CaseDesk:
             )
             actor_id = actor.user_id
             handler_name = command.consult_handler_name or actor_user.display_name
+            entry_actor_user = actor_user
         else:
             if actor.side is not EntrySide.CONSULT or not command.origin_chatid:
                 raise Forbidden("只有已绑定的咨询群可以创建问题")
@@ -1063,6 +1066,18 @@ class CaseDesk:
             actor_user = None
             actor_id = None
             handler_name = source_team.name
+            entry_actor_user = None
+            if actor.user_id is not None:
+                possible_author = session.get(User, actor.user_id)
+                if (
+                    possible_author is not None
+                    and possible_author.active
+                    and self._directory.is_member(
+                        session, user_id=possible_author.id, team_id=source_team.id
+                    )
+                ):
+                    entry_actor_user = possible_author
+                    entry_actor_name = possible_author.display_name
         if command.source_msgid:
             existing = self._existing_source_entry(session, command.source_msgid)
             if existing is not None:
@@ -1178,8 +1193,8 @@ class CaseDesk:
             case=case,
             kind=CaseEntryKind.FORMAL_MESSAGE,
             side=EntrySide.CONSULT,
-            actor_user=actor_user,
-            actor_name=consult_handler_name,
+            actor_user=entry_actor_user,
+            actor_name=entry_actor_name or consult_handler_name,
             intent=MessageIntent.HANDOFF,
             source_msgid=source_msgid,
             metadata={"action": "create_case"},
@@ -1437,13 +1452,28 @@ class CaseDesk:
                 raise Forbidden("当前群聊未绑定到对应的问题沟通侧")
             actor_user = None
             side = actor.side
+            origin_team = self._directory.active_team_for_chatid(session, command.origin_chatid)
+            if actor.user_id is not None and origin_team.kind is expected_kind:
+                possible_author = session.get(User, actor.user_id)
+                if (
+                    possible_author is not None
+                    and possible_author.active
+                    and self._directory.is_member(
+                        session, user_id=possible_author.id, team_id=origin_team.id
+                    )
+                ):
+                    actor_user = possible_author
             if side is EntrySide.CONSULT:
-                actor_name = case.consult_handler_name
+                actor_name = actor_user.display_name if actor_user else case.consult_handler_name
             else:
                 dev_team = self._directory.get_team(
                     session, case.current_dev_team_id, kind=TeamKind.DEV
                 )
-                actor_name = dev_team.lead_display_name or dev_team.name
+                actor_name = (
+                    actor_user.display_name
+                    if actor_user
+                    else dev_team.lead_display_name or dev_team.name
+                )
         else:
             actor_user = self._directory.get_user(session, actor.user_id)
             side = cast(
@@ -1518,6 +1548,19 @@ class CaseDesk:
                 item_platform_result=item_platform_result,
             )
         ]
+        if side is EntrySide.DEV and case.current_consultant_id is not None:
+            consultant = session.get(User, case.current_consultant_id)
+            if consultant is not None and consultant.active:
+                delivery_ids.append(
+                    self._create_formal_delivery(
+                        session,
+                        case=case,
+                        entry=entry,
+                        destination_type=DeliveryDestination.USER,
+                        destination_address=consultant.wecom_userid,
+                        waiting_on_after_delivery=None,
+                    )
+                )
         if mark_processing:
             case.status = CaseStatus.IN_PROGRESS
             self._append_entry(
@@ -1562,19 +1605,30 @@ class CaseDesk:
             },
         )
         consult_channel = self._directory.active_consult_channel(session, case.consult_queue_id)
-        delivery_id = self._create_notice_delivery(
+        content = (
+            f"咨询经办已由{old_consultant or '未指定'}转交给"
+            f"{new_consultant.display_name}。"
+            f"请后续由{new_consultant.display_name}继续跟进。"
+        )
+        delivery_ids = [self._create_notice_delivery(
             session,
             entry=entry,
             case=case,
             destination_type=DeliveryDestination.CHAT,
             destination_address=consult_channel.chatid,
-            content=(
-                f"咨询经办已由{old_consultant or '未指定'}转交给"
-                f"{new_consultant.display_name}。"
-                f"请后续由{new_consultant.display_name}继续跟进。"
-            ),
+            content=content,
+        )]
+        delivery_ids.append(
+            self._create_notice_delivery(
+                session,
+                entry=entry,
+                case=case,
+                destination_type=DeliveryDestination.USER,
+                destination_address=new_consultant.wecom_userid,
+                content=content,
+            )
         )
-        return self._result(case, entry.id, delivery_ids=(delivery_id,))
+        return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
 
     def _transfer_dev_team(
         self, session: Session, command: TransferDevTeam, actor: Actor

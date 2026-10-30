@@ -6,12 +6,14 @@ import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from urllib.parse import urlencode
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from kefu.agent.service import Agent
 from kefu.agent.status_worker import IssueStatusUpdateWorker
+from kefu.case_desk.contracts import ImagePart, TextPart
 from kefu.case_desk.errors import CaseDeskError
 from kefu.case_desk.markers import parse_case_refs
 from kefu.case_desk.service import CaseDesk
@@ -41,6 +43,7 @@ from kefu.wecom.transport import (
     InboundEvent,
     InboundImagePart,
     InboundReply,
+    InboundTextPart,
     LongConnectionWeComAdapter,
     TransportDisplacedError,
     WeComTransport,
@@ -152,6 +155,20 @@ async def _group_issue_intake_cleanup_loop(intake: GroupIssueIntakeService) -> N
         await asyncio.sleep(60)
 
 
+async def _issue_intake_cleanup_loop(issues: IssueManagement) -> None:
+    while True:
+        try:
+            removed = await asyncio.to_thread(issues.cleanup_expired_drafts)
+            if removed:
+                logger.info("expired issue intake drafts and private handoffs removed=%s", removed)
+        except Exception as error:
+            logger.error(
+                "issue_intake_cleanup_failed error_type=%s",
+                type(error).__name__,
+            )
+        await asyncio.sleep(60)
+
+
 async def _inbound_loop(
     *,
     relay: Relay,
@@ -159,8 +176,21 @@ async def _inbound_loop(
     receiver: MessageReceiver | None = None,
     deferred_replies: DeferredPassiveReplyStore | None = None,
     group_intake: GroupIssueIntakeService | None = None,
+    private_intake: IssueManagement | None = None,
+    media_ingestor: MediaIngestor | None = None,
+    settings: Settings | None = None,
 ) -> None:
     async for event in transport.events():
+        if event.chattype == "single":
+            await _handle_private_inbound(
+                event,
+                relay=relay,
+                transport=transport,
+                private_intake=private_intake,
+                media_ingestor=media_ingestor,
+                settings=settings,
+            )
+            continue
         if event.chattype == "group":
             raw_quote = _raw_quote(event)
             raw_quote_refs = sorted(_case_refs_in_value(raw_quote))
@@ -192,8 +222,6 @@ async def _inbound_loop(
                 bool(event.quote_content),
                 len(event.parts),
             )
-        elif event.chattype == "single":
-            logger.info("[GROUP-TRACE] private_message_ignored msgid=%s", event.msgid)
         try:
             origin_side_resolved = (
                 event.chattype == "group"
@@ -218,21 +246,23 @@ async def _inbound_loop(
                         event.msgid,
                         opaque_id_fingerprint(event.chatid),
                     )
-                except Exception:
-                    logger.exception(
-                        "group_issue_intake_callback_failed msgid=%s chatid_fp=%s",
+                except Exception as error:
+                    logger.error(
+                        "group_issue_intake_callback_failed msgid=%s chatid_fp=%s error_type=%s",
                         event.msgid,
                         opaque_id_fingerprint(event.chatid),
+                        type(error).__name__,
                     )
                     try:
                         await transport.reply(
                             event,
                             InboundReply(text="问题受理暂时失败，请引用提案或重新 @机器人 重试。"),
                         )
-                    except Exception:
-                        logger.exception(
-                            "group_issue_intake_callback_error_reply_failed msgid=%s",
+                    except Exception as error:
+                        logger.error(
+                            "group_issue_intake_callback_error_reply_failed msgid=%s error_type=%s",
                             event.msgid,
+                            type(error).__name__,
                         )
                 continue
             suppress_delivery = await asyncio.to_thread(
@@ -250,11 +280,12 @@ async def _inbound_loop(
                 origin_side=origin_side,
                 origin_side_resolved=origin_side_resolved,
             )
-        except Exception:
-            logger.exception(
-                "[GROUP-TRACE] relay_failed msgid=%s chatid_fp=%s",
+        except Exception as error:
+            logger.error(
+                "[GROUP-TRACE] relay_failed msgid=%s chatid_fp=%s error_type=%s",
                 event.msgid,
                 opaque_id_fingerprint(event.chatid),
+                type(error).__name__,
             )
             continue
         logger.info(
@@ -276,9 +307,8 @@ async def _inbound_loop(
         )
         if pending is not None:
             logger.info(
-                "deferred passive WeCom reply msgid=%s req_id=%s case_ref=%s",
+                "deferred passive WeCom reply msgid=%s case_ref=%s",
                 event.msgid,
-                pending.req_id,
                 pending.case_ref,
             )
         elif reply is not None:
@@ -289,13 +319,14 @@ async def _inbound_loop(
                     event.msgid,
                     opaque_id_fingerprint(event.chatid),
                 )
-            except Exception:
+            except Exception as error:
                 # The formal group event is already durable. A reply failure must
                 # not cause the platform callback to be processed a second time.
-                logger.exception(
-                    "[GROUP-TRACE] callback_reply_failed msgid=%s chatid_fp=%s",
+                logger.error(
+                    "[GROUP-TRACE] callback_reply_failed msgid=%s chatid_fp=%s error_type=%s",
                     event.msgid,
                     opaque_id_fingerprint(event.chatid),
+                    type(error).__name__,
                 )
         await _release_deferred_callback(
             event=event,
@@ -306,6 +337,160 @@ async def _inbound_loop(
             origin_side=origin_side,
             suppress_delivery=suppress_delivery,
         )
+
+
+async def _handle_private_inbound(
+    event: InboundEvent,
+    *,
+    relay: Relay,
+    transport: WeComTransport,
+    private_intake: IssueManagement | None,
+    media_ingestor: MediaIngestor | None,
+    settings: Settings | None,
+) -> None:
+    sender_fp = opaque_id_fingerprint(event.sender_userid)
+    try:
+        actor = await asyncio.to_thread(
+            relay.active_actor_for_exact_wecom_userid,
+            event.sender_userid,
+        )
+        logger.info(
+            "private_sender_identity_resolved msgid=%s sender_fp=%s matched=%s",
+            event.msgid,
+            sender_fp,
+            actor is not None,
+        )
+        if actor is None:
+            await transport.reply(
+                event,
+                InboundReply(
+                    text=(
+                        "无法识别机器人私聊身份，请联系管理员按企微明文 userid"
+                        "完成成员登记后重试。"
+                    )
+                ),
+            )
+            return
+        decode_error = event.metadata.get("decode_error")
+        if isinstance(decode_error, str) and decode_error:
+            await transport.reply(event, InboundReply(text=decode_error))
+            return
+        if event.quote_content and event.quote_content.strip():
+            decision = await asyncio.to_thread(relay.handle, event)
+            if decision.reply_text and not decision.idempotent:
+                await transport.reply(event, InboundReply(text=decision.reply_text))
+            logger.info(
+                "private_followup_processed msgid=%s sender_fp=%s disposition=%s "
+                "case_ref=%s idempotent=%s",
+                event.msgid,
+                sender_fp,
+                decision.disposition,
+                decision.case_ref,
+                decision.idempotent,
+            )
+            return
+
+        text_parts = [part.text for part in event.parts if isinstance(part, InboundTextPart)]
+        plain_text = "".join(text_parts).strip()
+        has_images = any(isinstance(part, InboundImagePart) for part in event.parts)
+        if not has_images and plain_text in {"我的问题", "我的事件"}:
+            if settings is None:
+                raise RuntimeError("私聊入口缺少 H5 配置")
+            await transport.reply(
+                event,
+                InboundReply(
+                    text="打开 H5 查看问题列表",
+                    template_card=_private_link_card(
+                        title="我的问题",
+                        subtitle="进入问题中心查看你负责的问题。",
+                        url=f"{settings.web_base_url}/issues?{urlencode({'state': 'mine'})}",
+                    ),
+                ),
+            )
+            return
+        if private_intake is None or media_ingestor is None or settings is None:
+            raise RuntimeError("私聊问题受理尚未配置")
+        if not plain_text:
+            await transport.reply(
+                event,
+                InboundReply(text="私聊新问题请附上文字描述；图片可以和文字一起发送。"),
+            )
+            return
+
+        content_parts: list[TextPart | ImagePart] = []
+        raw_text_parts: list[str] = []
+        for part in event.parts:
+            if isinstance(part, InboundTextPart):
+                content_parts.append(TextPart(part.text))
+                raw_text_parts.append(part.text)
+            elif isinstance(part, InboundImagePart):
+                media_id = await asyncio.to_thread(media_ingestor.ingest, part)
+                content_parts.append(ImagePart(media_id))
+                raw_text_parts.append("[图片]")
+        raw_text = "".join(raw_text_parts).strip()
+        token = await asyncio.to_thread(
+            private_intake.create_private_intake_handoff,
+            msgid=event.msgid,
+            actor_id=actor.user_id,
+            raw_text=raw_text,
+            parts=content_parts,
+        )
+        handoff_url = (
+            f"{settings.web_base_url}/issues/private-intake#{token}"
+        )
+        await transport.reply(
+            event,
+            InboundReply(
+                text="已收到私聊问题，请打开 H5 选择队列并确认后建单。",
+                template_card=_private_link_card(
+                    title="继续提交私聊问题",
+                    subtitle="已带入本次文字和图片；选择队列及研发目标，审核确认后才会创建问题。",
+                    url=handoff_url,
+                ),
+            ),
+        )
+        logger.info(
+            "private_intake_handoff_created msgid=%s sender_fp=%s image_count=%s",
+            event.msgid,
+            sender_fp,
+            sum(isinstance(part, ImagePart) for part in content_parts),
+        )
+    except (CaseDeskError, ValueError) as error:
+        try:
+            await transport.reply(event, InboundReply(text=str(error)))
+        except Exception as reply_error:
+            logger.error(
+                "private_callback_error_reply_failed msgid=%s error_type=%s",
+                event.msgid,
+                type(reply_error).__name__,
+            )
+    except Exception as error:
+        logger.error(
+            "private_callback_failed msgid=%s sender_fp=%s error_type=%s",
+            event.msgid,
+            sender_fp,
+            type(error).__name__,
+        )
+        try:
+            await transport.reply(
+                event,
+                InboundReply(text="私聊消息暂时无法处理，请稍后重试。"),
+            )
+        except Exception as reply_error:
+            logger.error(
+                "private_callback_failure_reply_failed msgid=%s error_type=%s",
+                event.msgid,
+                type(reply_error).__name__,
+            )
+
+
+def _private_link_card(*, title: str, subtitle: str, url: str) -> Mapping[str, object]:
+    return {
+        "card_type": "text_notice",
+        "main_title": {"title": title},
+        "sub_title_text": subtitle,
+        "card_action": {"type": 1, "url": url},
+    }
 
 
 def _raw_body(event: InboundEvent) -> Mapping[str, object] | None:
@@ -448,31 +633,31 @@ async def _release_deferred_callback(
             pending.event,
             InboundReply(text=markdown_content),
         )
-    except Exception:
+    except Exception as error:
         if deferred_delivery_ids:
             await _restore_deferred_deliveries(relay, deferred_delivery_ids)
         await _acknowledge_deferred_reply(deferred_replies, pending)
-        logger.exception(
-            "failed to release deferred passive reply req_id=%s case_ref=%s",
-            pending.req_id,
+        logger.error(
+            "failed to release deferred passive reply case_ref=%s error_type=%s",
             pending.case_ref,
+            type(error).__name__,
         )
     else:
         if deferred_delivery_ids:
             try:
                 await asyncio.to_thread(relay.complete_deferred_deliveries, deferred_delivery_ids)
-            except Exception:
+            except Exception as error:
                 # The passive reply has already reached WeCom. Keep the
                 # placeholder marked as sent rather than generating a second
                 # active message if bookkeeping is temporarily unavailable.
-                logger.exception(
-                    "failed to finalize deferred group delivery case_ref=%s",
+                logger.error(
+                    "failed to finalize deferred group delivery case_ref=%s error_type=%s",
                     decision.case_ref,
+                    type(error).__name__,
                 )
         await _acknowledge_deferred_reply(deferred_replies, pending)
         logger.info(
-            "released deferred passive WeCom reply req_id=%s case_ref=%s",
-            pending.req_id,
+            "released deferred passive WeCom reply case_ref=%s",
             pending.case_ref,
         )
 
@@ -488,8 +673,11 @@ def _deferred_delivery_ids(
 async def _restore_deferred_deliveries(relay: Relay, delivery_ids: tuple[UUID, ...]) -> None:
     try:
         await asyncio.to_thread(relay.restore_deferred_deliveries, delivery_ids)
-    except Exception:
-        logger.exception("failed to restore deferred group delivery")
+    except Exception as error:
+        logger.error(
+            "failed to restore deferred group delivery error_type=%s",
+            type(error).__name__,
+        )
 
 
 async def _acknowledge_deferred_reply(
@@ -497,8 +685,11 @@ async def _acknowledge_deferred_reply(
 ) -> None:
     try:
         await asyncio.to_thread(deferred_replies.acknowledge, pending)
-    except Exception:
-        logger.exception("failed to acknowledge deferred passive reply req_id=%s", pending.req_id)
+    except Exception as error:
+        logger.error(
+            "failed to acknowledge deferred passive reply error_type=%s",
+            type(error).__name__,
+        )
 
 
 def _reply_for_decision(decision: RelayDecision) -> InboundReply | None:
@@ -525,10 +716,11 @@ async def run() -> None:
         logger.warning(
             "restored deferred group deliveries after worker restart: %s", recovered_deliveries
         )
+    media_ingestor = MediaIngestor(session_factory, storage)
     relay = Relay(
         session_factory,
         desk,
-        media_ingestor=MediaIngestor(session_factory, storage),
+        media_ingestor=media_ingestor,
     )
     message_push = MessagePush(session_factory)
     message_receiver = MessageReceiver(relay, message_push)
@@ -549,11 +741,12 @@ async def run() -> None:
     deferred_store.purge_expired()
     deferred_replies = deferred_store if settings.wecom_deferred_passive_reply_enabled else None
     status_agent = Agent(settings)
+    issue_management = IssueManagement(session_factory, desk, settings, storage=storage)
     group_intake = GroupIssueIntakeService(
         session_factory,
-        IssueManagement(session_factory, desk, settings, storage=storage),
+        issue_management,
         status_agent,
-        MediaIngestor(session_factory, storage),
+        media_ingestor,
         storage,
     )
     status_update_worker = IssueStatusUpdateWorker(desk, status_agent)
@@ -578,6 +771,7 @@ async def run() -> None:
                 tasks.create_task(_issue_status_update_loop(status_update_worker))
                 tasks.create_task(_inspection_loop(inspection))
                 tasks.create_task(_group_issue_intake_cleanup_loop(group_intake))
+                tasks.create_task(_issue_intake_cleanup_loop(issue_management))
                 tasks.create_task(
                     _inbound_loop(
                         relay=relay,
@@ -585,6 +779,9 @@ async def run() -> None:
                         receiver=message_receiver,
                         deferred_replies=deferred_replies,
                         group_intake=group_intake,
+                        private_intake=issue_management,
+                        media_ingestor=media_ingestor,
+                        settings=settings,
                     )
                 )
         except* TransportDisplacedError:

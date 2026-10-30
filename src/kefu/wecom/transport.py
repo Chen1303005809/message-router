@@ -56,6 +56,7 @@ class InboundEvent:
     mentioned_bot: bool = False
     intent: MessageIntent = MessageIntent.HANDOFF
     metadata: Mapping[str, object] = field(default_factory=dict)
+    sender_userid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,7 @@ class InboundReply:
     """An immediate response to the inbound callback that prompted it."""
 
     text: str
+    template_card: Mapping[str, object] | None = None
 
 
 class WeComTransport(Protocol):
@@ -302,6 +304,9 @@ class LongConnectionWeComAdapter:
         if not message.destination_address.strip():
             raise TransportError("企业微信投递目标为空")
         try:
+            # The SDK's chatid destination slot accepts a userid for a single
+            # recipient and a chatid for a group; DeliveryDestination preserves
+            # that distinction in our durable routing records.
             if message.kind is PartKind.TEXT:
                 raw_card = message.payload.get("template_card")
                 if raw_card is not None:
@@ -344,10 +349,16 @@ class LongConnectionWeComAdapter:
         if not isinstance(raw_frame, Mapping):
             raise TransportError("入站消息缺少企业微信回调上下文，无法回复")
         try:
-            result = await self._client.reply_markdown(
-                frame=cast(Mapping[str, object], raw_frame),
-                content=reply.text,
-            )
+            if reply.template_card is not None:
+                result = await self._client.reply_template_card(
+                    frame=cast(Mapping[str, object], raw_frame),
+                    card=reply.template_card,
+                )
+            else:
+                result = await self._client.reply_markdown(
+                    frame=cast(Mapping[str, object], raw_frame),
+                    content=reply.text,
+                )
         except Exception as error:
             raise TransportError("企业微信被动回复失败") from error
         return DeliveryReceipt(
@@ -428,11 +439,6 @@ class LongConnectionWeComAdapter:
             quote_type,
             json.dumps(_shape_for_log(quote), ensure_ascii=False, separators=(",", ":")),
         )
-        logger.info(
-            "[INBOUND-DIAG] callback_raw_frame msgid=%s payload=%s",
-            _log_string(body_map.get("msgid")),
-            _callback_frame_for_log(frame),
-        )
 
     async def _normalize_and_queue(self, frame: Mapping[str, object]) -> None:
         try:
@@ -450,8 +456,11 @@ class LongConnectionWeComAdapter:
                     error,
                 )
             event = self._error_event(frame, str(error))
-        except Exception:
-            logger.exception("[INBOUND-DIAG] failed_to_normalize_callback")
+        except Exception as error:
+            logger.error(
+                "[INBOUND-DIAG] failed_to_normalize_callback error_type=%s",
+                type(error).__name__,
+            )
             event = self._error_event(frame, "消息内容解析失败，请重新发送。")
         await self._events.put(event)
 
@@ -464,15 +473,11 @@ class LongConnectionWeComAdapter:
         chatid = body.get("chatid")
         if chatid is not None and not isinstance(chatid, str):
             raise InboundPayloadError("企业微信群聊标识无效")
-        if chattype == "single":
-            # Private messages have no product flow. Skip parsing content or
-            # sender identity, and retain no callback context.
-            return InboundEvent(
-                msgid=msgid,
-                chatid=chatid,
-                chattype=chattype,
-                parts=(),
-            )
+        sender = body.get("from")
+        sender_map = sender if isinstance(sender, Mapping) else {}
+        sender_userid = sender_map.get("userid")
+        if not isinstance(sender_userid, str) or not sender_userid:
+            sender_userid = None
         if chattype == "group" and not chatid:
             raise InboundPayloadError("企业微信群聊消息缺少 chatid")
         raw_frame = _copy_frame(frame)
@@ -482,6 +487,7 @@ class LongConnectionWeComAdapter:
             chatid=chatid,
             chattype=chattype,
             parts=parts,
+            sender_userid=sender_userid,
             quote_content=_quote_text(body.get("quote")),
             mentioned_bot=self._is_bot_mentioned(body, parts, chattype),
             metadata={"wecom_raw_frame": raw_frame},
@@ -567,6 +573,7 @@ class LongConnectionWeComAdapter:
             chatid=body_map.get("chatid") if isinstance(body_map.get("chatid"), str) else None,
             chattype=str(body_map.get("chattype") or "single"),
             parts=(),
+            sender_userid=_sender_userid(body_map),
             metadata={"wecom_raw_frame": _copy_frame(frame), "decode_error": error_message},
         )
 
@@ -612,13 +619,6 @@ def _quote_type_for_log(value: object) -> str:
     return type(value).__name__
 
 
-def _callback_frame_for_log(frame: Mapping[str, object]) -> str:
-    try:
-        return json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return repr(frame)
-
-
 def _shape_for_log(value: object, depth: int = 0) -> object:
     """Describe callback structure without copying message text or credentials."""
     if (
@@ -661,6 +661,14 @@ def _required_callback_string(data: Mapping[str, object], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InboundPayloadError(f"企业微信回调缺少有效的 {key}")
     return value.strip()
+
+
+def _sender_userid(body: Mapping[str, object]) -> str | None:
+    sender = body.get("from")
+    if not isinstance(sender, Mapping):
+        return None
+    userid = sender.get("userid")
+    return userid if isinstance(userid, str) and userid else None
 
 
 def _payload_string(data: Mapping[str, object], key: str) -> str:

@@ -40,6 +40,7 @@ class GroupActor:
     """A side identity established by the active binding for a group chat."""
 
     side: EntrySide
+    user_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

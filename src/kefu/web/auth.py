@@ -21,6 +21,7 @@ from starlette.responses import RedirectResponse
 from kefu.case_desk.contracts import Actor
 from kefu.case_desk.errors import CaseDeskError
 from kefu.config import Settings
+from kefu.observability import opaque_id_fingerprint
 from kefu.persistence.models import WebSession
 from kefu.routing.directory import DatabaseRoutingDirectory
 from kefu.tools import LoggedHttpClient
@@ -198,7 +199,10 @@ class WebAuthenticator:
             raise AuthenticationError("企业微信登录状态校验失败")
         client = self._oauth_client or WeComOAuthClient(self._settings)
         wecom_userid = client.user_id_for_code(code)
-        _LOGGER.info("WeCom OAuth identity resolved wecom_userid=%s", wecom_userid)
+        _LOGGER.info(
+            "WeCom OAuth identity resolved userid_fp=%s",
+            opaque_id_fingerprint(wecom_userid),
+        )
         with self._session_factory() as session:
             user = self._directory.get_user_by_wecom_userid(session, wecom_userid)
         raw_token = secrets.token_urlsafe(48)

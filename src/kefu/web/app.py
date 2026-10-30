@@ -116,6 +116,7 @@ configure_logging("WEB")
 # httpx's built-in INFO log prints full request URLs, including access_token query values.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+_PRIVATE_INTAKE_COOKIE = "kefu_private_intake"
 
 
 def create_app(
@@ -326,6 +327,77 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
 
+    @app.get("/issues/private-intake", response_class=HTMLResponse, include_in_schema=False)
+    async def private_intake_landing() -> Response:
+        continue_url = json.dumps(external_path("/issues/private-intake/continue"))
+        return HTMLResponse(
+            "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>正在打开私聊问题</title><body><p>正在安全打开私聊问题…</p><script>"
+            "const token=location.hash.slice(1);"
+            "if(token){sessionStorage.setItem('kefu_private_intake_token',token);}"
+            "history.replaceState(null,'',location.pathname+location.search);"
+            f"location.replace({continue_url});"
+            "</script></body></html>",
+            headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"},
+        )
+
+    @app.get(
+        "/issues/private-intake/continue",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    async def private_intake_continue(request: Request) -> Response:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        open_url = json.dumps(external_path("/api/issues/private-intake/open"))
+        new_issue_url = json.dumps(external_path("/issues/new"))
+        return HTMLResponse(
+            "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>正在验证私聊问题</title><body><p id=\"status\">正在验证账号…</p><script>"
+            "(async()=>{const status=document.getElementById('status');"
+            "const key='kefu_private_intake_token';"
+            "const token=sessionStorage.getItem(key);"
+            f"if(!token){{location.replace({new_issue_url});return;}}"
+            "try{const response=await fetch("
+            f"{open_url},"
+            "{method:'POST',headers:{'Content-Type':'application/json'},"
+            "body:JSON.stringify({token})});"
+            "if(!response.ok){throw new Error('handoff_rejected');}"
+            "sessionStorage.removeItem(key);"
+            f"location.replace({new_issue_url});"
+            "}catch(_){status.textContent='交接链接已过期或账号不匹配，请重新从机器人私聊打开卡片。';}})();"
+            "</script></body></html>",
+            headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"},
+        )
+
+    @app.post("/api/issues/private-intake/open", include_in_schema=False)
+    async def open_private_intake(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            payload = await _json_object(request)
+            token = _payload_text(payload, "token")
+            if len(token) > 64:
+                raise ValidationError("私聊交接令牌无效")
+            issue_management.get_private_intake_handoff(token, actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        except ValueError as error:
+            raise _http_error(ValidationError("私聊交接令牌无效")) from error
+        response = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store, private"})
+        response.set_cookie(
+            _PRIVATE_INTAKE_COOKIE,
+            token,
+            max_age=2 * 60 * 60,
+            path="/",
+            secure=urlsplit(settings.web_base_url).scheme == "https",
+            httponly=True,
+            samesite="strict",
+        )
+        return response
+
     @app.get("/api/wecom/agent-js-sdk-config", include_in_schema=False)
     async def agent_js_sdk_config(request: Request, url: str) -> JSONResponse:
         actor = actor_or_error(request)
@@ -426,7 +498,13 @@ def create_app(
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
+        private_intake = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
         try:
+            private_handoff = (
+                issue_management.get_private_intake_handoff(private_intake, actor)
+                if private_intake
+                else None
+            )
             queues = issue_management.list_consult_queues(actor)
             dev_teams = issue_management.list_dev_teams(actor)
             issue_management.cleanup_expired_drafts()
@@ -461,9 +539,24 @@ def create_app(
             )
         group_context_scripts = (
             _wecom_group_context_scripts(external_path("/api/wecom/agent-js-sdk-config"))
-            if wecom_customer_groups.is_configured
+            if wecom_customer_groups.is_configured and private_handoff is None
             else ""
         )
+        private_image_markup = ""
+        if private_handoff is not None and private_intake is not None:
+            private_image_markup = "".join(
+                f'<img class="intake-image" alt="私聊图片" '
+                f'src="{external_path(f"/issues/private-intakes/media/{part.media_id}")}" '
+                'loading="lazy">'
+                for part in private_handoff.parts
+                if isinstance(part, ImagePart)
+            )
+        private_content_notice = (
+            '<p class="muted">已带入机器人私聊内容及图片。提交后会进入现有问题整理和审核流程。</p>'
+            if private_handoff is not None
+            else ""
+        )
+        initial_text = escape(private_handoff.raw_text) if private_handoff is not None else ""
         inspection_access = inspection.access_for_actor(actor)
         inspection_button, inspection_dialog = (
             _inspection_control_parts(
@@ -484,9 +577,11 @@ def create_app(
           </header>
           {inspection_dialog}
           <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
+            {private_content_notice}
             <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
               aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
-              placeholder="粘贴问题内容；图片可拖入此处…"></textarea>
+              placeholder="粘贴问题内容；图片可拖入此处…">{initial_text}</textarea>
+            <div class="private-intake-images">{private_image_markup}</div>
             <input type="hidden" name="source_chat_id" value="">
             <input type="hidden" name="source_chat_status" value="not_reported">
             <input type="hidden" name="source_chat_error" value="">
@@ -522,6 +617,10 @@ def create_app(
               button.textContent = '正在上传…';
               status.hidden = false;
               form.setAttribute('aria-busy', 'true');
+              if ({"true" if private_handoff is not None else "false"}) {{
+                HTMLFormElement.prototype.submit.call(form);
+                return;
+              }}
               try {{
                 sourceChatId.value = await getWeComCustomerGroupId();
                 sourceChatStatus.value = window.wecomCustomerGroupLookupStatus || 'unknown';
@@ -538,7 +637,15 @@ def create_app(
           {group_context_scripts}
         </main>
         """
-        return HTMLResponse(_page("上传问题材料", body, body_class="issue-intake-page"))
+        response_headers = (
+            {"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"}
+            if private_handoff is not None
+            else None
+        )
+        return HTMLResponse(
+            _page("上传问题材料", body, body_class="issue-intake-page"),
+            headers=response_headers,
+        )
 
     @app.post("/api/issues/inspection/run")
     async def run_issue_inspection(request: Request) -> JSONResponse:
@@ -570,7 +677,23 @@ def create_app(
             return actor
         form = await request.form()
         draft_processing_task_id: UUID | None = None
+        private_intake_token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
         try:
+            private_handoff = None
+            if private_intake_token:
+                existing_draft_id = issue_management.get_existing_private_intake_draft(
+                    private_intake_token, actor
+                )
+                if existing_draft_id is not None:
+                    response = RedirectResponse(
+                        external_path(f"/issues/drafts/{existing_draft_id}"),
+                        status_code=303,
+                    )
+                    response.delete_cookie(_PRIVATE_INTAKE_COOKIE, path="/")
+                    return response
+                private_handoff = issue_management.get_private_intake_handoff(
+                    private_intake_token, actor
+                )
             pasted_text = _required_form_text(form, "pasted_text")
             if len(pasted_text) > 50_000:
                 raise ValidationError("粘贴内容不能超过50000个字符")
@@ -589,7 +712,11 @@ def create_app(
                 len(pasted_text),
                 len(dev_teams),
             )
-            source_chat_id = _optional_form_text(form, "source_chat_id")
+            source_chat_id = (
+                None
+                if private_handoff is not None
+                else _optional_form_text(form, "source_chat_id")
+            )
             reported_group_lookup_status = _optional_form_text(form, "source_chat_status")
             valid_group_lookup_statuses = {
                 "unknown",
@@ -744,6 +871,12 @@ def create_app(
                 elif item:
                     raise ValidationError("图片字段格式无效")
             media_ids: list[UUID] = []
+            if private_handoff is not None:
+                media_ids.extend(
+                    part.media_id
+                    for part in private_handoff.parts
+                    if isinstance(part, ImagePart)
+                )
             for upload in uploads:
                 image_data = await upload.read(MAX_IMAGE_BYTES + 1)
                 if len(image_data) > MAX_IMAGE_BYTES:
@@ -768,7 +901,7 @@ def create_app(
                 suspected_type=generated.get("suspected_type", ""),
                 current_situation=generated.get("current_situation", ""),
                 issue_current_status="问题未回复",
-                issue_source="工作台",
+                issue_source="企业微信私聊" if private_handoff is not None else "工作台",
                 deadline=datetime.now(ZoneInfo("Asia/Shanghai"))
                 + timedelta(hours=settings.issue_default_expiry_hours),
                 customer_name=customer_name,
@@ -784,6 +917,7 @@ def create_app(
                     source_group_name=source_group_name or "",
                 ),
                 actor,
+                private_handoff_token=private_intake_token,
             )
             logger.info(
                 "issue_draft_persisted request_id=%s draft_id_fp=%s image_count=%s team_selected=%s",
@@ -806,9 +940,30 @@ def create_app(
                         request_id,
                     )
             await form.close()
-        return RedirectResponse(
+        response = RedirectResponse(
             external_path(f"/issues/drafts/{draft.id}"),
             status_code=303,
+        )
+        if private_intake_token:
+            response.delete_cookie(_PRIVATE_INTAKE_COOKIE, path="/")
+        return response
+
+    @app.get("/issues/private-intakes/media/{media_id}", include_in_schema=False)
+    async def private_intake_media(request: Request, media_id: UUID) -> Response:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
+        if not token:
+            raise HTTPException(status_code=404, detail="私聊图片不存在")
+        try:
+            access = issue_management.get_private_intake_media_access(token, media_id, actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return Response(
+            storage.get(access.object_key),
+            media_type=access.mime_type,
+            headers={"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"},
         )
 
     @app.get("/issues/drafts/{draft_id}", response_class=HTMLResponse)
@@ -1421,6 +1576,7 @@ def create_app(
             f'href="{_event_filter_url(events_path, value, priority, query)}">{label}</a>'
             for value, label in (
                 ("open", "问题列表"),
+                ("mine", "我的问题"),
                 ("closed", "已关闭"),
             )
         )
@@ -1687,7 +1843,7 @@ def create_app(
             <label>截止时间（选填）
               <input name="deadline" type="datetime-local" step="60">
             </label>
-            <p class="muted">咨询经办显示名由本问题填写，独立于登录账号；研发经办显示名沿用团队设置。群聊记录不按发送成员 userid 归属。</p>
+            <p class="muted">咨询经办显示名由本问题填写，独立于登录账号；研发经办显示名沿用团队设置。群聊路由按群绑定决定；仅与在岗成员明文 userid 精确匹配且属于当前绑定团队的发送人会作为时间线作者，不改变问题归属或 H5 权限。</p>
             <p class="muted">描述文字必填，图片可选。截止时间按中国标准时间填写；留空时默认为创建后 3 小时。临近期限提醒默认提前 24 小时，创建后也可在详情中调整。</p>
             <button class="primary" type="submit">创建并发送给研发</button>
           </form>
@@ -2398,7 +2554,7 @@ def _admin_dashboard(
       <section class="admin-grid">
         <div class="panel" id="users">
           <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">企业微信 userid 用于 H5 登录和账号级权限。群聊绑定指令不校验发送人身份；群内正式回复按绑定侧别和问题标记记录。咨询经办显示名在创建问题时单独填写；研发显示名沿用团队负责人展示名。</p>
+          <p class="panel-intro">企业微信明文 userid 用于 H5 登录、账号级权限及群聊作者精确匹配。群聊绑定指令不校验发送人身份；群内路由按绑定侧别和问题标记决定，只有属于当前绑定团队的在岗成员会显示为个人作者。私聊 H5 交接及账号权限仍要求 OAuth 身份匹配登记成员。</p>
           <form class="search-form" method="get" action="{admin_path}">
             <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
             <button type="submit">搜索</button>
@@ -2770,7 +2926,7 @@ def _case_filter_for_state(state: str, priority: str = "", query: str = "") -> C
     base = {
         "mine": CaseFilter(
             lifecycle_status=LifecycleStatus.OPEN,
-            waiting_on=WaitingOn.CONSULT,
+            assigned_to_me=True,
         ),
         "dev": CaseFilter(waiting_on=WaitingOn.DEV),
         "closed": CaseFilter(lifecycle_status=LifecycleStatus.CLOSED),

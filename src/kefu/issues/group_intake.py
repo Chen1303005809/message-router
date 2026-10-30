@@ -127,8 +127,12 @@ class GroupIssueIntakeService:
             prepared = await asyncio.to_thread(self._create_initial_session, event)
         except (CaseDeskError, ValueError) as error:
             return str(error)
-        except Exception:
-            logger.exception("group_issue_intake_start_failed msgid=%s", event.msgid)
+        except Exception as error:
+            logger.error(
+                "group_issue_intake_start_failed msgid=%s error_type=%s",
+                event.msgid,
+                type(error).__name__,
+            )
             return "问题受理暂时无法启动，请稍后在群里 @机器人 重试。"
         if isinstance(prepared, str):
             return prepared
@@ -142,8 +146,12 @@ class GroupIssueIntakeService:
             prepared = await asyncio.to_thread(self._create_followup_turn, event, token)
         except (CaseDeskError, ValueError) as error:
             return str(error)
-        except Exception:
-            logger.exception("group_issue_intake_turn_reserve_failed msgid=%s", event.msgid)
+        except Exception as error:
+            logger.error(
+                "group_issue_intake_turn_reserve_failed msgid=%s error_type=%s",
+                event.msgid,
+                type(error).__name__,
+            )
             return "本轮消息暂时无法保存，请稍后引用提案并 @机器人 重试。"
         if isinstance(prepared, str):
             return prepared
@@ -197,6 +205,11 @@ class GroupIssueIntakeService:
                 route = self._directory.active_team_for_chatid(session, event.chatid or "")
                 if route.kind is not TeamKind.CONSULT_QUEUE:
                     raise RoutingUnavailable("只有已绑定的咨询队列群可以发起新问题。")
+                sender = self._directory.active_member_by_exact_wecom_userid(
+                    session,
+                    wecom_userid=event.sender_userid,
+                    team_id=route.id,
+                )
                 session.add(
                     GroupIssueIntakeSession(
                         id=session_id,
@@ -219,6 +232,8 @@ class GroupIssueIntakeService:
                         session_id=session_id,
                         msgid=msgid,
                         user_text=plain_text,
+                        actor_user_id=sender.id if sender is not None else None,
+                        actor_name_snapshot=(sender.display_name if sender is not None else None),
                         created_at=now,
                     )
                 )
@@ -289,6 +304,11 @@ class GroupIssueIntakeService:
             route = self._directory.active_team_for_chatid(session, record.chatid)
             if route.kind is not TeamKind.CONSULT_QUEUE or route.id != record.consult_queue_id:
                 return "原咨询群绑定已变化或失效，不能继续此提案。请确认群绑定后重新发起。"
+            sender = self._directory.active_member_by_exact_wecom_userid(
+                session,
+                wecom_userid=event.sender_userid,
+                team_id=route.id,
+            )
             existing = session.scalar(
                 select(GroupIssueIntakeTurn).where(GroupIssueIntakeTurn.msgid == msgid)
             )
@@ -302,6 +322,8 @@ class GroupIssueIntakeService:
                 session_id=record.id,
                 msgid=msgid,
                 user_text=user_text,
+                actor_user_id=sender.id if sender is not None else None,
+                actor_name_snapshot=(sender.display_name if sender is not None else None),
                 created_at=now,
             )
             session.add(turn)
@@ -322,8 +344,12 @@ class GroupIssueIntakeService:
             reply = str(error)
             await asyncio.to_thread(self._save_turn_reply, turn_id, reply)
             return reply
-        except Exception:
-            logger.exception("group_issue_intake_context_failed session_id=%s", session_id)
+        except Exception as error:
+            logger.error(
+                "group_issue_intake_context_failed session_id=%s error_type=%s",
+                session_id,
+                type(error).__name__,
+            )
             await asyncio.to_thread(self._save_turn_reply, turn_id, _AGENT_FAILURE_REPLY)
             return _AGENT_FAILURE_REPLY
         if context is None:
@@ -395,8 +421,12 @@ class GroupIssueIntakeService:
                     context["teams"],
                     request_id=f"group-intake-{turn_id.hex}",
                 )
-            except Exception:
-                logger.exception("group_issue_intake_agent_failed session_id=%s", session_id)
+            except Exception as error:
+                logger.error(
+                    "group_issue_intake_agent_failed session_id=%s error_type=%s",
+                    session_id,
+                    type(error).__name__,
+                )
                 reply = self._proposal_reply(
                     token,
                     fields,
@@ -414,9 +444,11 @@ class GroupIssueIntakeService:
         if should_confirm and not missing:
             try:
                 await asyncio.to_thread(self._save_proposal, session_id, turn_id, fields)
-            except Exception:
-                logger.exception(
-                    "group_issue_intake_proposal_save_failed session_id=%s", session_id
+            except Exception as error:
+                logger.error(
+                    "group_issue_intake_proposal_save_failed session_id=%s error_type=%s",
+                    session_id,
+                    type(error).__name__,
                 )
                 await asyncio.to_thread(self._save_turn_reply, turn_id, _AGENT_FAILURE_REPLY)
                 return _AGENT_FAILURE_REPLY
@@ -506,7 +538,7 @@ class GroupIssueIntakeService:
             reply = await asyncio.to_thread(self._completed_reply, session_id)
             await asyncio.to_thread(self._save_turn_reply, turn_id, reply)
             return reply
-        command, chatid, issue_id = proposal
+        command, chatid, issue_id, actor_user_id = proposal
         if issue_id is not None:
             await asyncio.to_thread(self._mark_completed, session_id, issue_id)
             return await asyncio.to_thread(self._completed_reply, session_id)
@@ -514,12 +546,14 @@ class GroupIssueIntakeService:
             result = await asyncio.to_thread(
                 self._issues.execute,
                 command,
-                GroupActor(EntrySide.CONSULT),
+                GroupActor(EntrySide.CONSULT, actor_user_id),
             )
-            if result.case_ref is None:
+            if result.issue_number is None:
                 raise RuntimeError("问题创建没有返回问题编号")
             with self._session_factory() as session:
-                issue = session.scalar(select(Case).where(Case.case_ref == result.case_ref))
+                issue = session.scalar(
+                    select(Case).where(Case.case_ref == result.issue_number)
+                )
                 if issue is None:
                     raise RuntimeError("正式问题已创建但无法读取问题记录")
                 issue_id = issue.id
@@ -529,12 +563,16 @@ class GroupIssueIntakeService:
             logger.info(
                 "group_issue_intake_dispatched session_id=%s issue_ref=%s chatid_len=%s",
                 session_id,
-                result.case_ref,
+                result.issue_number,
                 len(chatid),
             )
             return reply
-        except Exception:
-            logger.exception("group_issue_intake_dispatch_failed session_id=%s", session_id)
+        except Exception as error:
+            logger.error(
+                "group_issue_intake_dispatch_failed session_id=%s error_type=%s",
+                session_id,
+                type(error).__name__,
+            )
             recovered_issue_id = await asyncio.to_thread(
                 self._recover_or_reopen_dispatch, session_id
             )
@@ -551,7 +589,7 @@ class GroupIssueIntakeService:
 
     def _begin_dispatch(
         self, session_id: UUID, turn_id: UUID
-    ) -> tuple[CreateCase, str, UUID | None] | str | None:
+    ) -> tuple[CreateCase, str, UUID | None, UUID | None] | str | None:
         with self._session_factory() as session, session.begin():
             record = session.scalar(
                 select(GroupIssueIntakeSession)
@@ -620,7 +658,7 @@ class GroupIssueIntakeService:
             )
             record.state = GroupIssueIntakeState.DISPATCHING
             record.fields_json = fields
-            return command, record.chatid, None
+            return command, record.chatid, None, turn.actor_user_id
 
     def _recover_or_reopen_dispatch(self, session_id: UUID) -> UUID | None:
         with self._session_factory() as session, session.begin():
@@ -768,7 +806,8 @@ class GroupIssueIntakeService:
                 "",
                 f"会话标记：{INTAKE_MARKER_PREFIX}{token}〕",
                 "",
-                "请对照原始聊天核对问题描述是否完整准确；有遗漏或不准确时，引用本条提案并 @机器人 修改。"
+                "请对照原始聊天核对问题描述是否完整准确；有遗漏或不准确时，"
+                "引用本条提案并 @机器人 修改。"
                 "资料核对无误且已补齐后，回复“确认派发”才会创建正式问题并推送到目标研发群。",
             ]
         )
@@ -818,9 +857,11 @@ class GroupIssueIntakeService:
                         session.delete(turn)
                     session.delete(record)
                 removed += 1
-            except Exception:
-                logger.exception(
-                    "expired_group_issue_intake_cleanup_failed session_id=%s", session_id
+            except Exception as error:
+                logger.error(
+                    "expired_group_issue_intake_cleanup_failed session_id=%s error_type=%s",
+                    session_id,
+                    type(error).__name__,
                 )
         return removed
 

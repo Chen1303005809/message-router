@@ -51,6 +51,10 @@ class AiBotClient(Protocol):
         self, *, frame: Mapping[str, object], content: str
     ) -> Mapping[str, object]: ...
 
+    async def reply_template_card(
+        self, *, frame: Mapping[str, object], card: Mapping[str, object]
+    ) -> Mapping[str, object]: ...
+
 
 class AiBotClientError(RuntimeError):
     """The SDK could not complete a WeCom protocol operation."""
@@ -247,6 +251,17 @@ class OfficialAiBotClient:
             content,
             True,
         )
+        if hasattr(result, "__await__"):
+            result = await result
+        return _mapping(result)
+
+    async def reply_template_card(
+        self, *, frame: Mapping[str, object], card: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        responder = getattr(self._client, "reply_template_card", None)
+        if not callable(responder):
+            raise AiBotClientError("企业微信 SDK 缺少模板卡片被动回复能力")
+        result = responder(dict(frame), dict(card))
         if hasattr(result, "__await__"):
             result = await result
         return _mapping(result)
