@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from dataclasses import replace
 
 from kefu.case_desk.contracts import Actor, CreateCase, TextPart
+from kefu.config import Settings
+from kefu.issues.service import IssueManagement
+from kefu.media.storage import InMemoryObjectStorage, MediaIngestor
 from kefu.persistence.models import (
     DeliveryDestination,
     EntrySide,
     MembershipRole,
     TeamMembership,
-    WeComChannel,
 )
 from kefu.relay.delivery import DeliveryWorker
 from kefu.relay.handler import Relay
@@ -20,11 +22,23 @@ from kefu.worker import _inbound_loop
 from tests.conftest import DeskContext
 
 
-def test_inbound_loop_turns_a_saved_draft_into_a_callback_navigation_card(
+def _settings() -> Settings:
+    return replace(Settings.from_env(), web_base_url="https://events.example.test")
+
+
+def test_inbound_loop_saves_private_intake_and_replies_with_h5_handoff_card(
     desk_context: DeskContext,
 ) -> None:
     relay = Relay(desk_context.session_factory, desk_context.desk)
     transport = FakeWeComAdapter()
+    settings = _settings()
+    storage = InMemoryObjectStorage()
+    private_intake = IssueManagement(
+        desk_context.session_factory,
+        desk_context.desk,
+        settings,
+        storage=storage,
+    )
     transport.push_inbound(
         InboundEvent(
             msgid="consult-draft-worker",
@@ -39,14 +53,18 @@ def test_inbound_loop_turns_a_saved_draft_into_a_callback_navigation_card(
         _inbound_loop(
             relay=relay,
             transport=transport,
-            web_base_url="https://events.example.test",
+            private_intake=private_intake,
+            media_ingestor=MediaIngestor(desk_context.session_factory, storage),
+            settings=settings,
         )
     )
 
     assert len(transport.replies) == 1
     _, reply = transport.replies[0]
-    assert reply.title == "消息草稿已保存"
-    assert reply.actions[0].url.startswith("https://events.example.test/drafts/")
+    assert reply.template_card is not None
+    handoff_url = reply.template_card["card_action"]["url"]
+    assert isinstance(handoff_url, str)
+    assert handoff_url.startswith("https://events.example.test/issues/private-intake#")
 
 
 def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_message(
@@ -57,6 +75,7 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
             title="延迟被动回复实验",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -92,7 +111,7 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
         _inbound_loop(
             relay=relay,
             transport=transport,
-            web_base_url="https://events.example.test",
+            settings=_settings(),
             deferred_replies=deferred_replies,
         )
     )
@@ -109,13 +128,20 @@ def test_inbound_loop_replies_to_the_saved_group_callback_after_consultant_messa
     assert persisted_content is not None
     assert reply == InboundReply(text=persisted_content)
     assert "指定经办人" not in reply.text
-    assert "转发人：咨询甲  事件编号：" in reply.text
+    assert "> 咨询甲" in reply.text
     assert "@测试机器人" not in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
-    assert all(
-        message.destination_type is not DeliveryDestination.CHAT for message in transport.sent
+    assert any(
+        message.destination_type is DeliveryDestination.CHAT
+        and message.destination_address == "chat-consult"
+        for message in transport.sent
     )
+    assert all(
+        message.destination_address != "chat-dev-a"
+        for message in transport.sent
+        if message.destination_type is DeliveryDestination.CHAT
+    ), [(message.destination_address, message.payload) for message in transport.sent]
 
 
 def test_inbound_loop_passively_replies_to_consult_group_after_developer_message(
@@ -129,18 +155,12 @@ def test_inbound_loop_passively_replies_to_consult_group_after_developer_message
                 role=MembershipRole.MEMBER,
             )
         )
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=datetime.now(UTC),
-            )
-        )
     created = desk_context.desk.execute(
         CreateCase(
             title="咨询群被动回复",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -177,7 +197,7 @@ def test_inbound_loop_passively_replies_to_consult_group_after_developer_message
         _inbound_loop(
             relay=relay,
             transport=transport,
-            web_base_url="https://events.example.test",
+            settings=_settings(),
             deferred_replies=deferred_replies,
         )
     )
@@ -209,6 +229,7 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
             title="无引用延迟回复实验",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -242,7 +263,7 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
         _inbound_loop(
             relay=relay,
             transport=transport,
-            web_base_url="https://events.example.test",
+            settings=_settings(),
             deferred_replies=DeferredPassiveReplyStore(
                 desk_context.session_factory, ttl_seconds=60
             ),
@@ -257,7 +278,7 @@ def test_inbound_loop_defers_the_no_quote_prompt_for_the_experiment(
     assert decision.delivery_ids
     assert reply.text == relay.get_delivery_markdown_content(decision.delivery_ids[0])
     assert "指定经办人" not in reply.text
-    assert "转发人：咨询甲  事件编号：" in reply.text
+    assert "> 咨询甲" in reply.text
     assert parse_quoted_case_ref(reply.text) == created.case_ref
     asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
     assert all(
@@ -281,18 +302,12 @@ def test_inbound_loop_restores_consult_group_push_when_passive_reply_fails(
                 role=MembershipRole.MEMBER,
             )
         )
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=datetime.now(UTC),
-            )
-        )
     created = desk_context.desk.execute(
         CreateCase(
             title="咨询群被动回复失败兜底",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -330,7 +345,7 @@ def test_inbound_loop_restores_consult_group_push_when_passive_reply_fails(
         _inbound_loop(
             relay=Relay(desk_context.session_factory, desk_context.desk),
             transport=transport,
-            web_base_url="https://events.example.test",
+            settings=_settings(),
             deferred_replies=deferred_replies,
         )
     )
@@ -352,6 +367,7 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
             title="被动回复失败兜底",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -388,7 +404,7 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
         _inbound_loop(
             relay=Relay(desk_context.session_factory, desk_context.desk),
             transport=transport,
-            web_base_url="https://events.example.test",
+            settings=_settings(),
             deferred_replies=deferred_replies,
         )
     )
@@ -402,5 +418,5 @@ def test_inbound_loop_restores_active_group_delivery_when_passive_reply_fails(
         and "content" in message.payload
     )
     assert "指定经办人" not in str(group_markdown)
-    assert "转发人：咨询甲  事件编号：" in str(group_markdown)
+    assert "> 研发甲" in str(group_markdown)
     assert parse_quoted_case_ref(str(group_markdown)) == created.case_ref

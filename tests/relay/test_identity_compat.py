@@ -25,13 +25,19 @@ from kefu.wecom.transport import FakeWeComAdapter, InboundEvent, InboundTextPart
 
 def _bind_consult_chat(desk_context) -> None:
     with desk_context.session_factory() as session, session.begin():
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=datetime.now(UTC),
+        existing = session.scalar(
+            select(WeComChannel.id).where(
+                WeComChannel.team_id == desk_context.teams["consult"]
             )
         )
+        if existing is None:
+            session.add(
+                WeComChannel(
+                    team_id=desk_context.teams["consult"],
+                    chatid="chat-consult",
+                    initialized_at=datetime.now(UTC),
+                )
+            )
 
 
 def _create_issue(desk_context):

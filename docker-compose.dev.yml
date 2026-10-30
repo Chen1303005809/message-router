@@ -1,0 +1,18 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    image: kefu-frontend-dev
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      VITE_API_TARGET: http://web:8000
+      VITE_BASE_PATH: /
+      VITE_FILE_WATCH_POLLING: "true"
+      DEV_WECOM_USERID: ${DEV_WECOM_USERID:-}
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+
+volumes:
+  frontend_node_modules:

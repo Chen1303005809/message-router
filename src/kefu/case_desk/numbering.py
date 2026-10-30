@@ -47,9 +47,7 @@ def _next_bug_number_with_row_lock(
     session: Session, date_key: str, local_created_at: datetime
 ) -> str:
     sequence_row = session.scalar(
-        select(BugDailySequence)
-        .where(BugDailySequence.date_key == date_key)
-        .with_for_update()
+        select(BugDailySequence).where(BugDailySequence.date_key == date_key).with_for_update()
     )
     if sequence_row is None:
         try:

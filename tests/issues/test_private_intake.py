@@ -13,21 +13,12 @@ from kefu.config import Settings
 from kefu.issues.contracts import IssueFields, IssueIntake
 from kefu.issues.service import IssueManagement
 from kefu.media.storage import InMemoryObjectStorage, MediaIngestor
-from kefu.persistence.models import Case, MembershipRole, TeamMembership, WeComChannel
+from kefu.persistence.models import Case, MembershipRole, TeamMembership
 from kefu.web.app import _PRIVATE_INTAKE_COOKIE, create_app
 from kefu.wecom.transport import InboundImagePart
 
 
 def _management(desk_context, *, storage=None):
-    now = datetime.now(UTC)
-    with desk_context.session_factory() as session, session.begin():
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=now,
-            )
-        )
     return IssueManagement(
         desk_context.session_factory,
         desk_context.desk,
@@ -95,7 +86,7 @@ def test_private_handoff_is_owned_one_time_and_confirmation_is_idempotent(desk_c
         assert case.issue_source == "企业微信私聊"
 
 
-def test_private_handoff_h5_prefills_only_for_owner(desk_context):
+def test_private_handoff_api_prefills_only_for_owner(desk_context):
     storage = InMemoryObjectStorage()
     media_id = MediaIngestor(desk_context.session_factory, storage).ingest(
         InboundImagePart(b"private screenshot", "image/png")
@@ -129,40 +120,35 @@ def test_private_handoff_h5_prefills_only_for_owner(desk_context):
         storage=storage,
     )
     with TestClient(app) as client:
-        landing = client.get("/issues/private-intake")
-        assert landing.status_code == 200
-        assert "location.hash.slice(1)" in landing.text
-        assert token not in landing.text
-
-        continuation = client.get(
-            "/issues/private-intake/continue",
-            headers={"X-WeCom-UserId": "consult-a"},
-        )
-        assert continuation.status_code == 200
-        assert "/api/issues/private-intake/open" in continuation.text
-        assert token not in continuation.text
-
         opened = client.post(
             "/api/issues/private-intake/open",
             json={"token": token},
             headers={"X-WeCom-UserId": "consult-a"},
         )
         assert opened.status_code == 200
+        assert opened.json() == {"opened": True}
         assert _PRIVATE_INTAKE_COOKIE in opened.headers["set-cookie"]
 
-        page = client.get("/issues/new", headers={"X-WeCom-UserId": "consult-a"})
-        assert page.status_code == 200
-        assert page.headers["cache-control"] == "no-store, private"
-        assert page.headers["referrer-policy"] == "no-referrer"
-        assert "请检查 &lt;查询页面&gt; 的超时问题" in page.text
-        assert token not in page.text
+        options = client.get(
+            "/api/intake/options",
+            headers={"X-WeCom-UserId": "consult-a"},
+        )
+        assert options.status_code == 200
+        private_intake = options.json()["private_intake"]
+        assert private_intake["raw_text"] == "请检查 <查询页面> 的超时问题"
+        assert private_intake["media"] == [{"media_id": str(media_id)}]
+        assert token not in options.text
+
         media_path = f"/issues/private-intakes/media/{media_id}"
-        assert media_path in page.text
         image = client.get(media_path, headers={"X-WeCom-UserId": "consult-a"})
         assert image.status_code == 200
         assert image.content == b"private screenshot"
         assert image.headers["cache-control"] == "no-store, private"
-        assert "agentConfig" not in page.text
 
-        denied = client.get("/issues/new", headers={"X-WeCom-UserId": "dev-a"})
+        denied = client.get(
+            "/api/intake/options",
+            headers={"X-WeCom-UserId": "dev-a"},
+        )
         assert denied.status_code == 403
+        denied_image = client.get(media_path, headers={"X-WeCom-UserId": "dev-a"})
+        assert denied_image.status_code == 403

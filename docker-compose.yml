@@ -11,8 +11,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    ports:
-      - "0.0.0.0:18085:5432"
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
 
@@ -75,7 +73,8 @@ services:
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me-please}
       WECOM_TRANSPORT: ${WECOM_TRANSPORT:-fake}
       AUTH_MODE: ${AUTH_MODE:-development}
-      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:8000}
+      DEV_WECOM_USERID: ${DEV_WECOM_USERID:-}
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:18084}
       WECOM_CORP_ID: ${WECOM_CORP_ID:-}
       WECOM_AGENT_ID: ${WECOM_AGENT_ID:-}
       WECOM_CORP_SECRET: ${WECOM_CORP_SECRET:-}
@@ -97,8 +96,6 @@ services:
         condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
-    ports:
-      - "0.0.0.0:18084:8000"
     healthcheck:
       test:
         [
@@ -111,6 +108,28 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+    restart: unless-stopped
+    environment:
+      WEB_API_TARGET: http://web:8000
+      PORT: 8080
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:18084:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/__healthz').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   bot-worker:
     build: .
@@ -131,7 +150,7 @@ services:
       WECOM_BOT_MENTION_NAME: ${WECOM_BOT_MENTION_NAME:-}
       WECOM_LONG_CONNECTION_URL: ${WECOM_LONG_CONNECTION_URL:-}
       WECOM_CONNECT_TIMEOUT_SECONDS: ${WECOM_CONNECT_TIMEOUT_SECONDS:-20}
-      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:8000}
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:18084}
       AGENT_BASE_URL: ${AGENT_BASE_URL:-}
       AGENT_API_KEY: ${AGENT_API_KEY:-}
       AGENT_MODEL: ${AGENT_MODEL:-}

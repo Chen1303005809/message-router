@@ -13,17 +13,17 @@
 - 已登记成员的机器人私聊入口：新问题以短时一次性卡片交接到 H5，支持文字和图片并沿用现有审核建单；引用含唯一问题编号的机器人消息可按 H5 成员权限跟进，另有“我的问题”卡片入口；
 - 群聊 Agent 受理轮次保存可识别成员及姓名快照；研发回复和经办交接通知继续投递咨询群，并向当前咨询经办人持久化投递个人副本；
 - 问题管理、问题巡检、消息接收、消息推送和 Agent 五个可由 Python 程序直接调用的模块；Agent 通过 OpenAI Chat Completions function tools 调用相同接口；
-- 服务端渲染 H5：进入 `/` 直接上传问题材料，Agent 生成可编辑草稿，确认后事务化创建问题和首条投递；问题沟通保留群聊引用、详情、跟进、关闭/重开和交接 API；
+- Vue 3 + TypeScript H5：由 Vite 开发和构建，Vue Router/Pinia 管理页面和会话；FastAPI 通过同源 `/api` 提供 JSON API，OpenAPI 生成前端请求类型；OAuth、会话 Cookie、权限、版本冲突和受保护媒体仍由后端负责；
 - 每天 08:55、11:30、21:30（上海时区）按当前研发责任团队和所属咨询队列汇总未关闭问题；每个有效绑定的咨询群都会收到消息，空队列发送无未关闭问题提示。研发群的问题行显示 BUG 编号和客户名称；咨询群还显示初次受理组（旧记录回退到当前研发责任组）；投递具有幂等键和失败重试；
 - H5 组织与授权管理中心：总管理员初始化、成员与咨询/研发团队管理、团队角色维护、研发负责人展示名及团队群聊绑定；
-- PostgreSQL、MinIO、web、bot-worker 的 Docker Compose 本地运行形态。
+- PostgreSQL、MinIO、Web API、Worker 和 H5 前端统一由 Docker Compose 运行。前端容器在宿主机 `18084` 提供页面并代理同源 API，Web API 不直接发布宿主机端口。
 
 Agent 草稿需要在环境变量中配置 `AGENT_BASE_URL`、`AGENT_API_KEY` 和 `AGENT_MODEL`。`AGENT_BASE_URL` 使用 OpenAI 兼容接口的 API 基础地址，例如 `https://api.openai.com/v1`。图片只会保存为附件，不会发送给 Agent。初次过期时间默认为 3 小时，临期窗口默认为提前 24 小时，分别通过 `ISSUE_DEFAULT_EXPIRY_HOURS` 和 `ISSUE_APPROACHING_WINDOW_HOURS` 配置。未关闭问题汇总的三个推送时点固定为上海时间 08:55、11:30 和 21:30；没有未关闭问题的研发团队不发送消息。总管理员也可在新建问题页独立触发巡检，不会提交未完成的建单材料。
 
 面向咨询人员、研发人员和各级管理员的产品使用说明见[操作手册](USER_GUIDE.md)。
 产品的业务背景、协作矛盾、核心问题和解决方案见[功能说明](PRODUCT_FUNCTION_DESCRIPTION.md)。
 
-## 本地启动
+## 本地 Python 开发
 
 ```bash
 python3.12 -m venv .venv
@@ -32,24 +32,44 @@ python -m pip install -e '.[dev]'
 pytest
 ```
 
-## 本地 Docker 环境
+## 前端开发与类型生成
+
+前端使用 Vue 3、TypeScript、Vite、Vue Router 和 Pinia。生成 FastAPI OpenAPI 文档并更新 TypeScript 类型：
+
+```bash
+cd frontend
+npm ci
+npm run generate:api
+npm run dev
+```
+
+本地直接运行 Vite 时，FastAPI 应监听 `127.0.0.1:8000`；`VITE_API_TARGET` 可覆盖代理目标。
+
+## Docker Compose 开发
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-这会启动 PostgreSQL、MinIO、web 和用于本地模拟的 bot-worker。`WECOM_TRANSPORT=fake` 仅用于本地自动化验证，不能连接或发送企业微信消息。
+开发覆盖配置将 `frontend/` 挂载进容器并运行 Vite 热更新，前端访问地址为 `http://localhost:18084`。设置 `.env` 中的 `DEV_WECOM_USERID` 可在开发模式下自动通过身份请求头。该 Compose 配置也启动 PostgreSQL、MinIO、Web API 和模拟 Worker。`WECOM_TRANSPORT=fake` 仅用于本地开发，不能连接或发送企业微信消息。
 
-## 远端直接运行（不使用 Docker）
+## Compose 正式部署
 
-本项目没有单独的前端进程：H5 页面由 FastAPI 服务端渲染，页面和 API 一起由 `kefu-web` 提供，远端监听 `127.0.0.1:18000`；Nginx 负责 HTTPS 域名和 `/kefu/` 路径转发。企业微信机器人由不监听端口的 `kefu-worker` 后台进程处理。数据库、媒体存储和环境变量按服务器配置使用；当前实例使用 SQLite 与 `/var/lib/kefu/media`，环境文件位于 `/etc/kefu/`。
+生产镜像在每次发布构建时生成 Vue 静态资源，由前端 Node 容器提供页面并代理 API、OAuth 和受保护媒体。PostgreSQL、MinIO、Web API、Worker 和前端都由 Compose 管理；宿主机只发布前端 `18084` 端口，外层 Nginx 可继续负责 HTTPS 和 `/kefu/` 转发。
 
-远端不需要启动 Docker。首次迁移到 Git 工作树及后续更新命令见[远端部署速查](REMOTE_DEPLOYMENT.md)。日常更新使用服务器上的虚拟环境、Alembic 迁移和 systemd 服务。
+在目标服务器准备 `.env`，将 `WEB_BASE_URL` 设置为 H5 公网地址，例如 `https://issues.example.com/kefu`，并把 `VITE_BASE_PATH` 设为 `/kefu/`。随后执行：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Compose 会在启动 Web API 和 Worker 前完成 Alembic 迁移，并保留 Compose 中 PostgreSQL 与 MinIO 的持久卷。Nginx 模板位于 `deploy/nginx/kefu-h5.conf`。远端更新脚本和服务器步骤见[远端部署速查](REMOTE_DEPLOYMENT.md)。
 
 ## 远端部署记录
 
-当前远端实例的 SSH 入口、服务和数据路径、清理状态，以及从旧 release 上传方式迁移到 Git 工作树的步骤见[远端部署速查](REMOTE_DEPLOYMENT.md)（最后状态核对：2026-09-21）。
+Compose 是正式部署方式。旧 systemd 部署记录和迁移背景见[远端部署速查](REMOTE_DEPLOYMENT.md)。
 
 升级到问题追踪工作台时，独立的一次性 Alembic 迁移会清空升级前的问题、时间线、消息、草稿、投递、回调和媒体记录，并删除对象存储 `media/` 前缀下的全部对象（包括版本）；人员、团队、成员授权、研发/咨询群绑定和登录会话会保留。该清理不可回滚。已有实例升级前先停止旧版 web/worker，再运行迁移并启动新版本，避免清理期间仍有进程写入旧问题。Docker Compose 会先运行 `migrate` 再启动 web 和 worker；systemd 部署需一并安装 `deploy/systemd/kefu-migrate.service`，并在升级时先执行 `systemctl stop kefu-web kefu-worker`，再启动这两个服务。其他部署方式需在停掉 web/worker 后运行一次 `alembic upgrade head`。使用 S3 时，迁移凭据需能列举并删除 `media/` 前缀下的对象版本。
 

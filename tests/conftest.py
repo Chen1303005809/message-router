@@ -120,6 +120,12 @@ def desk_context() -> DeskContext:
             [
                 WeComChannel(
                     id=uuid4(),
+                    team_id=teams["consult"],
+                    chatid="chat-consult",
+                    initialized_at=now,
+                ),
+                WeComChannel(
+                    id=uuid4(),
                     team_id=teams["dev_a"],
                     chatid="chat-dev-a",
                     initialized_at=now,

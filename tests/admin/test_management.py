@@ -1,53 +1,60 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from kefu.admin.service import Administration, initialize_global_admin
 from kefu.case_desk.contracts import Actor, CreateCase, TextPart
 from kefu.case_desk.errors import Conflict, Forbidden
-from kefu.persistence.models import TeamKind
+from kefu.config import Settings
+from kefu.persistence.models import TeamKind, WeComChannel
 from kefu.web.app import create_app
 from tests.conftest import DeskContext
-from tests.web.test_app import settings
 
 
-def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
-    desk_context: DeskContext,
-) -> None:
-    app = create_app(session_factory=desk_context.session_factory, settings=settings())
+def _settings() -> Settings:
+    return Settings(
+        database_url="sqlite+pysqlite://",
+        object_storage_backend="local",
+        object_storage_root=Path("/private/tmp/kefu-admin-tests"),
+        s3_endpoint_url=None,
+        s3_bucket="kefu-media",
+        s3_access_key_id=None,
+        s3_secret_access_key=None,
+        wecom_transport="fake",
+        auth_mode="development",
+        web_base_url="http://testserver",
+        wecom_corp_id=None,
+        wecom_agent_id=None,
+        wecom_corp_secret=None,
+        dev_wecom_userid=None,
+        session_cookie_secure=False,
+    )
+
+
+def test_api_setup_creates_admin_and_manages_members_and_teams(desk_context: DeskContext) -> None:
+    app = create_app(session_factory=desk_context.session_factory, settings=_settings())
     client = TestClient(app)
 
     setup = client.post(
-        "/setup",
+        "/api/setup",
         headers={"X-WeCom-UserId": "center-admin"},
-        data={
-            "wecom_userid": "center-admin",
-            "display_name": "事件中心管理员",
-        },
-        follow_redirects=False,
+        json={"wecom_userid": "center-admin", "display_name": "工作台管理员"},
     )
-    assert setup.status_code == 303
-    assert setup.headers["location"] == "/admin"
+    assert setup.status_code == 200
+    assert setup.json() == {"initialized": True}
 
     headers = {"X-WeCom-UserId": "center-admin"}
-    page = client.get("/admin", headers=headers)
-    assert page.status_code == 200
-    assert "组织与授权" in page.text
-    assert "咨询队列" in page.text
-    assert "研发一组" in page.text
-    team_create_form = page.text.split(
-        '<form method="post" action="/admin/teams" class="form-grid team-create-form">',
-        maxsplit=1,
-    )[1].split("</form>", maxsplit=1)[0]
-    assert 'data-team-kind-select="true"' in team_create_form
-    assert 'class="team-lead-display-name-field" hidden' in team_create_form
-    assert 'data-team-lead-input="true"' in team_create_form
-    assert 'disabled></label>' in team_create_form
-    assert 'addEventListener("change"' in page.text
+    session = client.get("/api/session", headers=headers)
+    assert session.status_code == 200
+    assert session.json()["is_global_admin"] is True
+    overview = client.get("/api/admin/overview", headers=headers)
+    assert overview.status_code == 200
 
     created_user = client.post(
         "/api/admin/users",
@@ -84,9 +91,7 @@ def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
         json={"user_id": str(user_id), "role": "admin"},
     )
     assert membership.status_code == 200
-    member = next(
-        item for item in membership.json()["members"] if item["user_id"] == str(user_id)
-    )
+    member = next(item for item in membership.json()["members"] if item["user_id"] == str(user_id))
     assert member["role"] == "admin"
     assert member["active"] is True
 
@@ -99,24 +104,25 @@ def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
         headers=headers,
     )
     assert removed.status_code == 200
-    assert next(
-        item for item in removed.json()["members"] if item["user_id"] == str(user_id)
-    )["active"] is False
+    assert (
+        next(item for item in removed.json()["members"] if item["user_id"] == str(user_id))[
+            "active"
+        ]
+        is False
+    )
 
 
-def test_global_admin_can_see_all_events_and_cannot_remove_last_admin(
+def test_global_admin_can_see_all_issues_and_cannot_remove_last_admin(
     desk_context: DeskContext,
 ) -> None:
     bootstrapped = initialize_global_admin(
         desk_context.session_factory,
         wecom_userid="center-admin",
-        display_name="事件中心管理员",
+        display_name="工作台管理员",
     )
     admin = Administration(desk_context.session_factory)
     actor = Actor(bootstrapped.id)
 
-    # The bootstrap identity is allowed to perform a cross-team setup action
-    # without being added to a business team first.
     created_team = admin.create_team(
         actor,
         kind=TeamKind.DEV,
@@ -126,11 +132,18 @@ def test_global_admin_can_see_all_events_and_cannot_remove_last_admin(
     assert created_team.kind is TeamKind.DEV
     assert created_team.lead_display_name == "新研发负责人"
 
+    with desk_context.session_factory() as session, session.begin():
+        channel = session.scalar(
+            select(WeComChannel).where(WeComChannel.team_id == desk_context.teams["consult"])
+        )
+        assert channel is not None
+        channel.chatid = "chat-consult-admin-test"
     case = desk_context.desk.execute(
         CreateCase(
             title="总管理员可见性",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("内容"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -151,17 +164,20 @@ def test_global_admin_can_see_all_events_and_cannot_remove_last_admin(
 
 def test_configured_admin_is_initialized_on_web_startup(desk_context: DeskContext) -> None:
     configured = replace(
-        settings(),
+        _settings(),
         initial_admin_wecom_userid="env-admin",
         initial_admin_display_name="部署管理员",
     )
     app = create_app(session_factory=desk_context.session_factory, settings=configured)
     client = TestClient(app)
 
-    page = client.get("/settings/routing", headers={"X-WeCom-UserId": "env-admin"})
-    assert page.status_code == 200
-    assert "部署管理员" in page.text
-    assert "组织与授权" in page.text
-    assert client.get("/api/admin/overview", headers={"X-WeCom-UserId": "env-admin"}).json()[
-        "global_admin_count"
-    ] == 1
+    session = client.get("/api/session", headers={"X-WeCom-UserId": "env-admin"})
+    assert session.status_code == 200
+    assert session.json()["display_name"] == "部署管理员"
+    assert session.json()["is_global_admin"] is True
+    assert (
+        client.get("/api/admin/overview", headers={"X-WeCom-UserId": "env-admin"}).json()[
+            "global_admin_count"
+        ]
+        == 1
+    )

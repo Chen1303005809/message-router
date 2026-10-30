@@ -175,9 +175,7 @@ class WebAuthenticator:
     def begin_login(self, next_path: str) -> RedirectResponse:
         client = self._oauth_client or WeComOAuthClient(self._settings)
         state = secrets.token_urlsafe(32)
-        safe_next_path = _safe_next_path(
-            next_path, mount_path=self._settings.web_mount_path
-        )
+        safe_next_path = _safe_next_path(next_path, mount_path=self._settings.web_mount_path)
         callback_url = f"{self._settings.web_base_url}/auth/callback"
         response = RedirectResponse(client.authorize_url(callback_url, state), status_code=302)
         response.set_cookie(
@@ -219,9 +217,7 @@ class WebAuthenticator:
                 )
             )
         response = RedirectResponse(
-            _safe_next_path(
-                unquote(encoded_next_path), mount_path=self._settings.web_mount_path
-            ),
+            _safe_next_path(unquote(encoded_next_path), mount_path=self._settings.web_mount_path),
             status_code=302,
         )
         response.delete_cookie(OAUTH_STATE_COOKIE)
@@ -238,7 +234,7 @@ class WebAuthenticator:
 
 def _safe_next_path(candidate: str, *, mount_path: str = "") -> str:
     """Keep OAuth returns under this public application mount point."""
-    fallback = f"{mount_path}/events"
+    fallback = f"{mount_path}/issues"
     if not candidate.startswith("/") or candidate.startswith("//"):
         return fallback
     if mount_path and candidate != mount_path and not candidate.startswith(f"{mount_path}/"):

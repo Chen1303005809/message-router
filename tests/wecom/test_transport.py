@@ -16,7 +16,6 @@ from kefu.wecom.transport import (
     InboundTextPart,
     LongConnectionWeComAdapter,
     OutboundMessage,
-    ReplyAction,
     TransportError,
     _quote_text,
 )
@@ -67,9 +66,7 @@ class FakeAiBotClient:
         self.template_cards.append({"chatid": chatid, "req_id": req_id, "card": dict(card)})
         return {"headers": {"req_id": req_id}, "errcode": 0}
 
-    async def send_image(
-        self, *, chatid: str, req_id: str, media_id: str
-    ) -> Mapping[str, object]:
+    async def send_image(self, *, chatid: str, req_id: str, media_id: str) -> Mapping[str, object]:
         self.images.append({"chatid": chatid, "req_id": req_id, "media_id": media_id})
         return {"headers": {"req_id": req_id}, "errcode": 0}
 
@@ -84,6 +81,12 @@ class FakeAiBotClient:
         return {"headers": {"req_id": "inbound-1"}, "errcode": 0}
 
     async def reply_card(
+        self, *, frame: Mapping[str, object], card: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        self.replies.append({"kind": "card", "frame": dict(frame), "card": dict(card)})
+        return {"headers": {"req_id": "inbound-1"}, "errcode": 0}
+
+    async def reply_template_card(
         self, *, frame: Mapping[str, object], card: Mapping[str, object]
     ) -> Mapping[str, object]:
         self.replies.append({"kind": "card", "frame": dict(frame), "card": dict(card)})
@@ -234,15 +237,18 @@ def test_long_connection_can_delay_passive_reply_and_reuse_callback_req_id(
 
 
 def test_quote_text_extracts_marker_from_template_card() -> None:
-    assert _quote_text(
-        {
-            "msgtype": "template_card",
-            "template_card": {
-                "main_title": {"title": "〔KF·ABCDEFG〕"},
-                "sub_title_text": "<@dev-a>\n客户无法登录",
-            },
-        }
-    ) == "〔KF·ABCDEFG〕\n<@dev-a>\n客户无法登录"
+    assert (
+        _quote_text(
+            {
+                "msgtype": "template_card",
+                "template_card": {
+                    "main_title": {"title": "〔KF·ABCDEFG〕"},
+                    "sub_title_text": "<@dev-a>\n客户无法登录",
+                },
+            }
+        )
+        == "〔KF·ABCDEFG〕\n<@dev-a>\n客户无法登录"
+    )
 
 
 def test_long_connection_requires_an_explicit_group_mention(desk_context: DeskContext) -> None:
@@ -438,7 +444,22 @@ def test_long_connection_replies_to_the_callback_with_a_navigation_card(
             event,
             InboundReply(
                 text="已保存为草稿",
-                actions=(ReplyAction("创建新事件", "https://events.example.test/drafts/one/new"),),
+                template_card={
+                    "card_type": "text_notice",
+                    "main_title": {"title": "私聊问题已保存"},
+                    "sub_title_text": "请打开工作台继续确认",
+                    "jump_list": [
+                        {
+                            "type": 1,
+                            "title": "创建新问题",
+                            "url": "https://events.example.test/issues/private-intake#private-token",
+                        }
+                    ],
+                    "card_action": {
+                        "type": 1,
+                        "url": "https://events.example.test/issues/private-intake#private-token",
+                    },
+                },
             ),
         )
         await adapter.close()
@@ -448,7 +469,11 @@ def test_long_connection_replies_to_the_callback_with_a_navigation_card(
     card = client.replies[0]["card"]
     assert isinstance(card, dict)
     assert card["jump_list"] == [
-        {"type": 1, "title": "创建新事件", "url": "https://events.example.test/drafts/one/new"}
+        {
+            "type": 1,
+            "title": "创建新问题",
+            "url": "https://events.example.test/issues/private-intake#private-token",
+        }
     ]
 
 

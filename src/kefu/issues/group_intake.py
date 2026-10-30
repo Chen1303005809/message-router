@@ -23,7 +23,7 @@ from kefu.case_desk.contracts import (
     TextPart,
 )
 from kefu.case_desk.errors import CaseDeskError, RoutingUnavailable
-from kefu.issues.service import IssueManagement, map_image_placeholders
+from kefu.issues.service import IssueManagement
 from kefu.media.storage import MediaIngestor, ObjectStorage
 from kefu.persistence.models import (
     Case,
@@ -635,10 +635,6 @@ class GroupIssueIntakeService:
                 record.state = GroupIssueIntakeState.ACTIVE
                 return "目标研发群已失效，尚未派发。请引用提案选择当前可用的研发群后再次确认。"
             source_parts = tuple(_part_from_json(item) for item in record.parts_json)
-            image_ids = [
-                part.media_id for part in source_parts if isinstance(part, ImagePart)
-            ]
-            parts = map_image_placeholders(fields["issue_description"].strip(), image_ids)
             command = CreateCase(
                 title=fields["issue_title"],
                 consult_queue_id=record.consult_queue_id,
@@ -647,7 +643,7 @@ class GroupIssueIntakeService:
                 customer_name=fields.get("customer_name") or None,
                 customer_contact_name=fields.get("customer_contact_name") or None,
                 customer_contact_method=fields.get("customer_contact_method") or None,
-                parts=parts,
+                parts=source_parts,
                 source_msgid=source_marker,
                 issue_description=fields["issue_description"],
                 suspected_type=fields["suspected_type"],

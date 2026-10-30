@@ -25,7 +25,7 @@ from kefu.case_desk.errors import CaseDeskError, ValidationError
 from kefu.case_desk.service import CaseDesk
 from kefu.media.storage import MediaIngestError, MediaIngestor
 from kefu.observability import opaque_id_fingerprint
-from kefu.persistence.models import EntrySide, InboundMessage, TeamKind
+from kefu.persistence.models import Case, EntrySide, InboundMessage, TeamKind
 from kefu.relay.references import parse_quoted_case_ref
 from kefu.routing.directory import DatabaseRoutingDirectory
 from kefu.wecom.transport import InboundEvent, InboundImagePart, InboundPart, InboundTextPart
@@ -49,6 +49,7 @@ class RelayDecision:
     reply_text: str | None = None
     idempotent: bool = False
     delivery_ids: tuple[UUID, ...] = ()
+    origin_side: EntrySide | None = None
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -57,6 +58,7 @@ class RelayDecision:
             "reply_text": self.reply_text,
             "idempotent": self.idempotent,
             "delivery_ids": [str(delivery_id) for delivery_id in self.delivery_ids],
+            "origin_side": self.origin_side.value if self.origin_side is not None else None,
         }
 
     @classmethod
@@ -68,6 +70,11 @@ class RelayDecision:
             # idempotency rows can remain after deployment.
             disposition = RelayDisposition.IGNORED
         raw_delivery_ids = data.get("delivery_ids")
+        raw_origin_side = data.get("origin_side")
+        try:
+            origin_side = EntrySide(str(raw_origin_side)) if raw_origin_side is not None else None
+        except ValueError:
+            origin_side = None
         delivery_ids = (
             tuple(UUID(str(delivery_id)) for delivery_id in raw_delivery_ids)
             if isinstance(raw_delivery_ids, (list, tuple))
@@ -79,6 +86,7 @@ class RelayDecision:
             reply_text=cast(str | None, data.get("reply_text")),
             idempotent=True,
             delivery_ids=delivery_ids,
+            origin_side=origin_side,
         )
 
 
@@ -122,7 +130,10 @@ class Relay:
             if isinstance(decode_error, str) and decode_error:
                 decision = RelayDecision(RelayDisposition.REJECTED, reply_text=decode_error)
             elif event.chattype == "single":
-                decision = self._handle_private_followup(event)
+                decision = self._handle_private_followup(
+                    event,
+                    suppress_delivery=suppress_delivery,
+                )
             else:
                 decision = self._handle_group(
                     event,
@@ -140,7 +151,12 @@ class Relay:
             decision = RelayDecision(RelayDisposition.REJECTED, reply_text=str(error))
         return self._remember_decision(msgid, decision)
 
-    def _handle_private_followup(self, event: InboundEvent) -> RelayDecision:
+    def _handle_private_followup(
+        self,
+        event: InboundEvent,
+        *,
+        suppress_delivery: bool = False,
+    ) -> RelayDecision:
         if not event.quote_content or not event.quote_content.strip():
             return RelayDecision(
                 RelayDisposition.REJECTED,
@@ -165,6 +181,13 @@ class Relay:
                 )
             actor = Actor(user.id)
         case_ref = parse_quoted_case_ref(event.quote_content)
+        with self._session_factory() as session:
+            case = session.scalar(select(Case).where(Case.case_ref == case_ref))
+            side = (
+                cast(EntrySide, self._directory.side_for_actor(session, actor.user_id, case, None))
+                if case is not None
+                else None
+            )
         parts = self._to_case_parts(event.parts)
         result = self._case_desk.execute(
             PostFormalMessage(
@@ -173,6 +196,8 @@ class Relay:
                 parts=parts,
                 intent=event.intent,
                 source_msgid=event.msgid,
+                side=side,
+                suppress_delivery=suppress_delivery,
             ),
             actor,
         )
@@ -188,6 +213,7 @@ class Relay:
             case_ref=result.case_ref,
             idempotent=result.idempotent,
             delivery_ids=result.delivery_ids,
+            origin_side=side,
         )
 
     @staticmethod
@@ -216,6 +242,26 @@ class Relay:
         with self._session_factory() as session:
             user = self._directory.active_user_by_exact_wecom_userid(session, wecom_userid)
             return Actor(user.id) if user is not None else None
+
+    def private_followup_side(self, event: InboundEvent) -> EntrySide | None:
+        """Resolve a private follow-up's side so workers can check passive replies."""
+        if event.chattype != "single" or not event.sender_userid or not event.quote_content:
+            return None
+        try:
+            case_ref = parse_quoted_case_ref(event.quote_content)
+            with self._session_factory() as session:
+                user = self._directory.active_user_by_exact_wecom_userid(
+                    session, event.sender_userid
+                )
+                case = session.scalar(select(Case).where(Case.case_ref == case_ref))
+                if user is None or case is None:
+                    return None
+                return cast(
+                    EntrySide,
+                    self._directory.side_for_actor(session, user.id, case, None),
+                )
+        except CaseDeskError:
+            return None
 
     def _handle_group(
         self,
@@ -301,6 +347,7 @@ class Relay:
             case_ref=result.case_ref,
             idempotent=result.idempotent,
             delivery_ids=result.delivery_ids,
+            origin_side=side,
         )
 
     def _group_author_id(self, event: InboundEvent, side: EntrySide) -> UUID | None:

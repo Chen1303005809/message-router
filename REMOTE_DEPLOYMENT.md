@@ -1,70 +1,92 @@
-# 远端部署速查
+# Compose 正式部署
 
-最后在线核对：2026-09-21
+生产环境统一使用 Docker Compose 运行 PostgreSQL、MinIO、FastAPI Web API、Worker 和 Vue 前端。宿主机只发布前端 `18084` 端口；前端容器将 `/api`、OAuth 和受保护媒体请求代理到内部 `web:8000`。Compose 不启动 Nginx 容器，现有外层 Nginx 继续负责 HTTPS 与 `/kefu/` 转发。
 
-## 连接与入口
+## 地址和端口
 
-- SSH：`ssh bubble`，本机 SSH 配置指向 `root@8.162.12.61` 并选择已配置的密钥。不要把密钥或服务器环境变量写入仓库。
-- H5：`https://bubblr.blue/kefu/`。Nginx 将 `/kefu/` 转发到 `127.0.0.1:18000/`。
-- Nginx 站点：`/etc/nginx/sites-enabled/bubble`；仓库模板：`deploy/nginx/kefu-h5.conf`。
-- H5 页面由 FastAPI 服务端渲染；页面和 API 共用 `kefu-web` 的 18000 端口。机器人由不监听端口的 `kefu-worker` 进程处理。
+- H5：`https://bubblr.blue/kefu/`
+- Compose 前端：宿主机 `127.0.0.1:18084`，由外层 Nginx 转发
+- Web API、PostgreSQL、MinIO：只在 Compose 网络内供其他服务访问
+- 项目目录：`/opt/kefu/repo`
+- Compose 配置：`/opt/kefu/repo/.env`（仅保存在服务器，不进入 Git）
+- PostgreSQL 数据：`/opt/kefu/repo/postgres-data`
+- MinIO 数据：`/opt/kefu/repo/minio-data`
 
-## 当前远端状态
+更新脚本默认从 GitHub `main` 快进拉取，并执行 `docker compose up -d --build --remove-orphans`。它会等待 `http://127.0.0.1:18084/healthz` 健康检查；失败时输出 Compose 状态和最近日志。
 
-- 当前 release：`/opt/kefu/releases/20260921-update`；`/opt/kefu/current` 指向该目录。
-- Web 和 worker 由 systemd 直接运行，不使用 Docker；Python 虚拟环境为 `/opt/kefu/venv`（Python 3.12）。
-- 服务：`kefu-web.service`、`kefu-worker.service`、一次性迁移服务 `kefu-migrate.service`。模板位于 `deploy/systemd/`。
-- 运行配置只保存在服务器：`/etc/kefu/web.env`、`/etc/kefu/worker.env`。数据库为 `/var/lib/kefu/kefu.db`，本地媒体目录为 `/var/lib/kefu/media`。
-- 当前迁移版本：`d4e6a81c9b20`。上次更新后 web/worker 均 active，迁移结果为 success，端口健康检查返回 HTTP 200。
+## 首次部署或从旧进程切换
 
-上次事件数据清理已删除旧事件、时间线、草稿、投递、入站消息和本地媒体对象；用户、团队、成员授权、研发群绑定和登录会话保留。清理前没有数据库或媒体备份；已发送到企业微信群的消息不受影响。
+先准备代码目录和服务器专用 `.env`。可从仓库模板复制后填写生产值：
 
-## 一次性迁移到 Git 工作树
-
-当前服务器仍使用 release 上传目录。先把仓库克隆到新目录，再把 `current` 切换过去；原 release、虚拟环境、环境文件和数据目录保留。
-
-```bash
-ssh bubble "git clone --branch main https://github.com/Chen1303005809/message-router.git /opt/kefu/repo"
-ssh bubble "systemctl stop kefu-web.service kefu-worker.service"
-ssh bubble "ln -sfnT /opt/kefu/repo /opt/kefu/current.next && mv -Tf /opt/kefu/current.next /opt/kefu/current"
-ssh bubble "/opt/kefu/venv/bin/pip install /opt/kefu/current"
-ssh bubble "install -o root -g root -m 0644 /opt/kefu/current/deploy/systemd/*.service /etc/systemd/system/ && systemctl daemon-reload"
-ssh bubble "systemctl start kefu-migrate.service"
-ssh bubble "systemctl show kefu-migrate.service -p Result -p ExecMainStatus"
+```dotenv
+POSTGRES_DB=kefu
+POSTGRES_USER=kefu
+POSTGRES_PASSWORD=<strong-password>
+MINIO_ROOT_USER=<minio-user>
+MINIO_ROOT_PASSWORD=<strong-password>
+S3_BUCKET=kefu-media
+OBJECT_STORAGE_BACKEND=s3
+AUTH_MODE=wecom_oauth
+WEB_BASE_URL=https://bubblr.blue/kefu
+VITE_BASE_PATH=/kefu/
+SESSION_COOKIE_SECURE=true
+WECOM_CORP_ID=<corp-id>
+WECOM_AGENT_ID=<agent-id>
+WECOM_CORP_SECRET=<self-built-app-secret>
+WECOM_TRANSPORT=long_connection
+WECOM_BOT_ID=<bot-id>
+WECOM_BOT_SECRET=<bot-secret>
 ```
 
-只有看到 `Result=success` 和 `ExecMainStatus=0` 后才启动服务：
+也设置 Agent 配置、首次管理员初始化方式和其他业务参数。不要把真实凭据或 `.env` 提交到仓库。
+
+旧 systemd 版本仍在运行时，先停止旧 Web 和 Worker，并确认 Nginx 不再转发到 `18000`。然后在仓库目录启动：
 
 ```bash
-ssh bubble "systemctl start kefu-web.service kefu-worker.service"
-ssh bubble "systemctl is-active kefu-web.service kefu-worker.service; curl -fsS http://127.0.0.1:18000/healthz"
+docker compose up -d --build
+docker compose ps
+curl -fsS http://127.0.0.1:18084/healthz
 ```
 
-`kefu-migrate.service` 是一次性服务；完成后显示 `inactive` 正常，按 `Result` 和 `ExecMainStatus` 判断迁移结果。环境文件与数据不放进 Git 工作树。
+生产前端镜像会在构建时生成一次 Vue 静态资源；浏览器请求通过同源前端转发到后端。对外 H5 地址需匹配 `WEB_BASE_URL` 和 `VITE_BASE_PATH`。若使用 `/kefu/`，安装或更新外层 Nginx 站点配置：
+
+```bash
+install -m 0644 deploy/nginx/kefu-h5.conf /etc/nginx/snippets/kefu-h5.conf
+nginx -t && systemctl reload nginx
+```
+
+该模板将 `/kefu/` 转发到 `127.0.0.1:18084/` 并移除公开路径前缀。证书与 HTTPS server block 仍由服务器现有 Nginx 配置管理。
 
 ## 日常更新
 
-先把代码推送到 GitHub `main`，再在远端执行更新脚本：
+先将变更推送到 `main`，再在服务器执行：
 
 ```bash
-ssh bubble "/opt/kefu/current/deploy/update-remote.sh"
+ssh bubble "/opt/kefu/repo/deploy/update-remote.sh"
 ```
 
-脚本会检查工作树、停止 web/worker、拉取 `origin/main`、更新 `/opt/kefu/venv` 中的项目依赖、安装 systemd 模板、运行并核对数据库迁移，成功后启动两个服务并检查健康端点。若 Git 拉取失败，脚本会重新启动旧服务；依赖安装或迁移失败时会保持服务停止，避免新旧代码与数据库状态不一致。脚本不读取或覆盖 `/etc/kefu/*.env`，也不操作 `/var/lib/kefu`。
+脚本会拒绝有本地修改的工作树，快进更新代码，再由 Compose 构建并滚动应用服务。Compose 会等待 PostgreSQL 和 MinIO 初始化完成，运行 Alembic 迁移后启动 Web API 和 Worker。持久数据保存在 `postgres-data/` 和 `minio-data/`，更新不会删除这些目录。
 
-如更新中途失败，脚本会停在失败步骤并打印迁移状态；先查看服务日志再决定是否恢复旧代码。切回旧 release 不会撤销已完成的数据库迁移或数据清理。
+查看服务状态和日志：
 
-## Docker Compose（仅本地可选）
+```bash
+ssh bubble "cd /opt/kefu/repo && docker compose ps"
+ssh bubble "cd /opt/kefu/repo && docker compose logs -f frontend web bot-worker"
+```
 
-Docker Compose 只用于本地需要时启动 PostgreSQL、MinIO、web 和模拟 worker；远端日常运行不依赖 Docker。远端 H5 仍通过 Nginx 提供 HTTPS，应用进程直接监听 18000。
+如果部署检查失败，先查看脚本输出的容器状态和日志，再决定是否恢复代码。回滚应用镜像不会撤销已经完成的数据库迁移。
+
+## 旧数据说明
+
+Compose 正式数据源是 PostgreSQL 和 MinIO。SQLite 测试库及旧 systemd 实例中的 SQLite 数据不会自动导入 Compose；部署前需确认正式业务数据已在目标 PostgreSQL/MinIO 中。已有 Compose 持久数据会继续使用，不新建业务表或执行数据清理迁移。
+
+## 开发热更新
+
+本地开发覆盖配置挂载前端源码并运行 Vite：
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-查看远端最近日志：
-
-```bash
-ssh bubble "journalctl -u kefu-web.service -u kefu-worker.service -n 100 --no-pager"
-```
+编辑 `frontend/` 中的 Vue、TypeScript 或 CSS 文件即可触发热更新。停止开发覆盖后，单独使用 `docker-compose.yml` 会构建并运行生产前端镜像。

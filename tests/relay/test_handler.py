@@ -1,25 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
-
 from sqlalchemy import select
 
 from kefu.case_desk.contracts import Actor, CreateCase, TextPart
-from kefu.media.storage import InMemoryObjectStorage, MediaIngestor
+from kefu.media.storage import MediaIngestor
 from kefu.persistence.models import (
     EntrySide,
+    IssueIntakeDraft,
     MembershipRole,
-    MessageDraft,
-    PartKind,
     TeamMembership,
-    WaitingOn,
     WeComChannel,
 )
-from kefu.relay.delivery import DeliveryWorker
 from kefu.relay.handler import Relay, RelayDisposition
 from kefu.wecom.transport import (
-    FakeWeComAdapter,
     InboundEvent,
     InboundImagePart,
     InboundTextPart,
@@ -27,15 +20,10 @@ from kefu.wecom.transport import (
 from tests.conftest import DeskContext
 
 
-def test_relay_runs_draft_to_group_reply_round_trip_with_idempotency(
+def test_relay_routes_new_private_issues_to_the_h5_handoff_flow(
     desk_context: DeskContext,
 ) -> None:
-    storage = InMemoryObjectStorage()
-    relay = Relay(
-        desk_context.session_factory,
-        desk_context.desk,
-        media_ingestor=MediaIngestor(desk_context.session_factory, storage),
-    )
+    relay = Relay(desk_context.session_factory, desk_context.desk)
     original = InboundEvent(
         msgid="consult-inbound-1",
         sender_userid="consult-a",
@@ -43,63 +31,14 @@ def test_relay_runs_draft_to_group_reply_round_trip_with_idempotency(
         chattype="single",
         parts=(
             InboundTextPart("客户无法登录"),
-            InboundImagePart(data=b"screenshot", mime_type="image/png"),
             InboundTextPart("请协助定位"),
         ),
     )
-    draft = relay.handle(original)
-    assert draft.disposition is RelayDisposition.DRAFT_SAVED
-    assert draft.draft_id is not None
-    assert len(storage.objects) == 1
+    rejected = relay.handle(original)
+    assert rejected.disposition is RelayDisposition.REJECTED
+    assert rejected.reply_text is not None and "H5" in rejected.reply_text
     replay = relay.handle(original)
     assert replay.idempotent is True
-    assert replay.draft_id == draft.draft_id
-
-    created = desk_context.desk.execute(
-        CreateCase(
-            title="登录失败",
-            consult_queue_id=desk_context.teams["consult"],
-            dev_team_id=desk_context.teams["dev_a"],
-            draft_id=draft.draft_id,
-        ),
-        Actor(desk_context.users["consult_a"]),
-    )
-    transport = FakeWeComAdapter()
-    asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
-    quote = next(
-        message.payload["content"]
-        for message in transport.sent
-        if message.kind is PartKind.TEXT
-    )
-    developer_reply = InboundEvent(
-        msgid="dev-inbound-1",
-        sender_userid="dev-b",
-        chatid="chat-dev-a",
-        chattype="group",
-        parts=(
-            InboundTextPart("已找到配置问题"),
-            InboundImagePart(data=b"fix", mime_type="image/png"),
-        ),
-        quote_content=str(quote),
-        mentioned_bot=True,
-    )
-    forwarded = relay.handle(developer_reply)
-    assert forwarded.disposition is RelayDisposition.FORWARDED
-    assert forwarded.case_ref == created.case_ref
-    duplicate_reply = relay.handle(developer_reply)
-    assert duplicate_reply.idempotent is True
-
-    pending = desk_context.desk.get_case(
-        created.case_ref or "", Actor(desk_context.users["consult_a"])
-    )
-    assert pending.entries[-1].side is EntrySide.DEV
-    assert [part.kind for part in pending.entries[-1].parts] == [PartKind.TEXT, PartKind.IMAGE]
-    assert pending.waiting_on is WaitingOn.DEV
-    asyncio.run(DeliveryWorker(desk_context.desk, transport).deliver_pending())
-    delivered = desk_context.desk.get_case(
-        created.case_ref or "", Actor(desk_context.users["consult_a"])
-    )
-    assert delivered.waiting_on is WaitingOn.CONSULT
 
 
 def test_relay_rejects_unquoted_or_wrong_group_developer_reply(desk_context: DeskContext) -> None:
@@ -121,6 +60,7 @@ def test_relay_rejects_unquoted_or_wrong_group_developer_reply(desk_context: Des
             title="群聊校验",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("请处理"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -147,6 +87,7 @@ def test_relay_allows_unregistered_member_to_reply_in_dev_group(
             title="未注册成员回复",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("请研发协助处理"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -169,11 +110,12 @@ def test_relay_allows_unregistered_member_to_reply_in_dev_group(
     case = desk_context.desk.get_case(
         created.case_ref or "", Actor(desk_context.users["consult_a"])
     )
-    entry = case.entries[-1]
+    entry = next(
+        entry for entry in reversed(case.entries) if entry.kind.value == "formal_message"
+    )
     assert entry.side is EntrySide.DEV
     assert entry.actor_user_id is None
-    assert entry.actor_name_snapshot == "研发群未注册成员"
-    assert entry.metadata["actor_wecom_userid"] == "wecom-not-in-directory"
+    assert entry.actor_name_snapshot == "一组负责人"
 
 
 def test_consult_group_selects_consult_side_for_dual_role_member(
@@ -187,18 +129,12 @@ def test_consult_group_selects_consult_side_for_dual_role_member(
                 role=MembershipRole.MEMBER,
             )
         )
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=datetime.now(UTC),
-            )
-        )
     created = desk_context.desk.execute(
         CreateCase(
             title="咨询群身份判定",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
+            suspected_type="盘中",
             parts=(TextPart("原始问题"),),
         ),
         Actor(desk_context.users["consult_a"]),
@@ -218,9 +154,7 @@ def test_consult_group_selects_consult_side_for_dual_role_member(
     )
 
     assert decision.disposition is RelayDisposition.FORWARDED
-    case = desk_context.desk.get_case(
-        created.case_ref or "", Actor(desk_context.users["dev_a"])
-    )
+    case = desk_context.desk.get_case(created.case_ref or "", Actor(desk_context.users["dev_a"]))
     assert case.entries[-1].side is EntrySide.CONSULT
 
 
@@ -249,7 +183,7 @@ def test_media_storage_failure_does_not_create_partial_draft(desk_context: DeskC
     )
     assert decision.disposition is RelayDisposition.REJECTED
     with desk_context.session_factory() as session:
-        assert session.scalars(select(MessageDraft)).all() == []
+        assert session.scalars(select(IssueIntakeDraft)).all() == []
 
 
 def test_team_admin_can_bind_the_current_wecom_group(desk_context: DeskContext) -> None:

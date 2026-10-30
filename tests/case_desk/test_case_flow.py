@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -34,7 +34,6 @@ from kefu.persistence.models import (
     PartKind,
     User,
     WaitingOn,
-    WeComChannel,
 )
 from kefu.relay.delivery import DeliveryWorker
 from kefu.relay.references import parse_quoted_case_ref
@@ -58,6 +57,7 @@ def create_case(
             title="登录失败",
             consult_queue_id=context.teams["consult"],
             dev_team_id=context.teams[dev_team],
+            suspected_type="盘中",
             parts=parts or (TextPart("客户无法登录"),),
             source_msgid=source_msgid,
         ),
@@ -115,10 +115,9 @@ def test_create_preserves_mixed_order_and_changes_wait_only_after_delivery(
     marker = f"〔KF·{result.case_ref}〕"
     content = adapter.sent[0].payload["content"]
     assert content == (
-        "## 登录失败\n\n"
-        "> 研发处理团队：研发一组\n\n"
-        "**第一段文字\n第二段文字**\n\n\n"
-        f"> 转发人：咨询甲  事件编号：{marker}"
+        "## 登录失败 ｜ 未录入\n\n"
+        "**第一段文字\n第二段文字**\n\n"
+        f"> 咨询甲\n> 103001\n> {marker}"
     )
     assert "<@" not in str(content)
     assert parse_quoted_case_ref(str(content)) == result.case_ref
@@ -129,7 +128,7 @@ def test_developer_reply_keeps_team_routing_and_lead_display(desk_context: DeskC
     created = create_case(desk_context)
     initial_adapter = deliver(desk_context)
     initial_content = initial_adapter.sent[0].payload["content"]
-    assert "> 研发处理团队：研发一组" in str(initial_content)
+    assert "## 登录失败 ｜ 未录入" in str(initial_content)
     assert "指定经办人" not in str(initial_content)
     assert "<@" not in str(initial_content)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "dev_a"))
@@ -154,12 +153,10 @@ def test_developer_reply_keeps_team_routing_and_lead_display(desk_context: DeskC
     response_content = next(
         message.payload["content"] for message in adapter.sent if "content" in message.payload
     )
-    assert response_content == (
-        "## 登录失败\n\n"
-        "> 指定经办人：咨询甲\n\n"
-        "**已定位到权限配置**\n\n\n"
-        f"> 发送人：研发乙  事件编号：〔KF·{created.case_ref}〕"
-    )
+    assert "## 登录失败 ｜ 未录入" in response_content
+    assert "**已定位到权限配置**" in response_content
+    assert "> 研发乙" in response_content
+    assert f"〔KF·{created.case_ref}〕" in response_content
     assert "<@" not in str(response_content)
     assert parse_quoted_case_ref(str(response_content)) == created.case_ref
 
@@ -205,14 +202,14 @@ def test_handover_keeps_timeline_and_close_requires_consult_authority(
         ),
         actor(desk_context, "consult_a"),
     )
-    assert len(transferred.delivery_ids) == 1
+    assert len(transferred.delivery_ids) == 2
     notice_adapter = deliver(desk_context)
     notice_content = next(
         message.payload["content"]
         for message in notice_adapter.sent
         if "content" in message.payload
     )
-    assert "事件标题：登录失败" in str(notice_content)
+    assert "## 登录失败" in str(notice_content)
     assert "操作人：咨询甲" in str(notice_content)
     notice_card = next(
         message.payload["template_card"]
@@ -247,15 +244,6 @@ def test_handover_keeps_timeline_and_close_requires_consult_authority(
 def test_consultant_transfer_notifies_new_handler_and_bound_consult_group(
     desk_context: DeskContext,
 ) -> None:
-    with desk_context.session_factory() as session, session.begin():
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=datetime.now(UTC),
-            )
-        )
-
     created = create_case(desk_context)
     deliver(desk_context)
     current = desk_context.desk.get_case(created.case_ref or "", actor(desk_context, "consult_a"))
@@ -293,8 +281,8 @@ def test_consultant_transfer_notifies_new_handler_and_bound_consult_group(
     group_notice = next(
         message.payload["content"] for message in group_messages if "content" in message.payload
     )
-    assert "你已成为本事件的咨询经办人" in private_notice
-    assert "咨询经办人已由咨询甲转交给咨询乙" in group_notice
+    assert "咨询经办已由咨询甲转交给咨询乙" in private_notice
+    assert "咨询经办已由咨询甲转交给咨询乙" in group_notice
     assert created.case_ref in group_notice
 
 
@@ -534,10 +522,9 @@ def test_image_first_bundle_does_not_send_event_card(desk_context: DeskContext) 
     assert all("template_card" not in message.payload for message in adapter.sent)
     content = adapter.sent[0].payload["content"]
     assert content == (
-        "## 登录失败\n\n"
-        "> 研发处理团队：研发一组\n\n"
-        "**图片后的补充说明**\n\n\n"
-        f"> 转发人：咨询甲  事件编号：〔KF·{created.case_ref}〕"
+        "## 登录失败 ｜ 未录入\n\n"
+        "**图片后的补充说明**\n\n"
+        f"> 咨询甲\n> 103001\n> 〔KF·{created.case_ref}〕"
     )
     assert str(content).count(f"〔KF·{created.case_ref}〕") == 1
 
@@ -690,6 +677,7 @@ def test_correction_is_append_only_and_copies_the_formal_message(desk_context: D
             title="另一个问题",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_b"],
+            suspected_type="盘中",
             parts=(TextPart("正确事件的初始内容"),),
             source_msgid="target-message",
         ),

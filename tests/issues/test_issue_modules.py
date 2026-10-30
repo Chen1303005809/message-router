@@ -246,12 +246,10 @@ def test_manual_inspection_sends_summaries_to_dev_and_consult_teams(issue_contex
             "chat-consult",
             "chat-dev",
         }
-        content_by_address = {
-            message.destination_address: message.content for message in messages
-        }
+        content_by_address = {message.destination_address: message.content for message in messages}
         assert content_by_address == {
-            "chat-consult": f"{issue.bug_number}｜客户甲（研发一组）",
-            "chat-dev": f"{issue.bug_number}｜客户甲",
+            "chat-consult": f"问题巡检\n**客户甲** ｜ {issue.bug_number}（研发一组）",
+            "chat-dev": f"问题巡检\n**客户甲** ｜ {issue.bug_number}",
         }
         closed_issue = session.get(Case, issue.id)
         assert closed_issue is not None
@@ -261,7 +259,7 @@ def test_manual_inspection_sends_summaries_to_dev_and_consult_teams(issue_contex
 
     closed = issue_context["inspection"].inspect(now=created_at + timedelta(hours=24))
     assert closed.scanned_issues == 0
-    assert closed.summary_messages == 1
+    assert closed.summary_messages == 2
     with issue_context["factory"]() as session:
         message = session.scalar(
             select(MessageOutbox)
@@ -269,7 +267,7 @@ def test_manual_inspection_sends_summaries_to_dev_and_consult_teams(issue_contex
             .order_by(MessageOutbox.created_at.desc())
         )
         assert message is not None
-        assert message.content == "暂无未关闭问题"
+        assert message.content == "问题巡检\n暂无进行中的问题"
 
 
 def test_scheduled_inspection_sends_to_all_active_consult_queues_and_falls_back_to_current_team(
@@ -368,40 +366,41 @@ def test_scheduled_inspection_sends_to_all_active_consult_queues_and_falls_back_
     repeated = issue_context["inspection"].inspect_scheduled(now=scheduled_at)
 
     assert first.scanned_issues == 2
-    assert first.summary_messages == 4
-    assert first.unresolved_targets == 1
+    assert first.summary_messages == 5
+    assert first.unresolved_targets == 0
     assert repeated.summary_messages == 0
-    assert repeated.unresolved_targets == 1
+    assert repeated.unresolved_targets == 0
     with issue_context["factory"]() as session:
         messages = session.scalars(select(MessageOutbox)).all()
         by_address = {message.destination_address: message.content for message in messages}
         dev_summary = "\n".join(
             sorted(
                 (
-                    f"{initial_team_issue.bug_number}｜客户乙",
-                    f"{fallback_team_issue.bug_number}｜客户丙",
+                    f"**客户乙** ｜ {initial_team_issue.bug_number}",
+                    f"**客户丙** ｜ {fallback_team_issue.bug_number}",
                 ),
-                key=lambda line: line.split("｜", maxsplit=1)[0],
+                key=lambda line: line.split(" ｜ ", maxsplit=1)[1],
             )
         )
         consult_summary = "\n".join(
             sorted(
                 (
-                    f"{initial_team_issue.bug_number}｜客户乙（研发一组）",
-                    f"{fallback_team_issue.bug_number}｜客户丙（研发二组）",
+                    f"**客户乙** ｜ {initial_team_issue.bug_number}（研发一组）",
+                    f"**客户丙** ｜ {fallback_team_issue.bug_number}（研发二组）",
                 ),
-                key=lambda line: line.split("｜", maxsplit=1)[0],
+                key=lambda line: line.split(" ｜ ", maxsplit=1)[1],
             )
         )
         assert by_address == {
-            "chat-dev-current": dev_summary,
-            "chat-consult": "暂无未关闭问题",
-            "chat-consult-south": consult_summary,
-            "chat-consult-empty": "暂无未关闭问题",
+            "chat-dev": "问题巡检\n暂无进行中的问题",
+            "chat-dev-current": f"问题巡检\n{dev_summary}",
+            "chat-consult": "问题巡检\n暂无进行中的问题",
+            "chat-consult-south": f"问题巡检\n{consult_summary}",
+            "chat-consult-empty": "问题巡检\n暂无进行中的问题",
         }
 
 
-def test_new_issue_page_exposes_admin_inspection_action(issue_context):
+def test_inspection_api_permission_is_exposed_in_session_contract(issue_context):
     import kefu.web.app as web_app
 
     app = web_app.create_app(
@@ -411,12 +410,9 @@ def test_new_issue_page_exposes_admin_inspection_action(issue_context):
     )
     headers = {"X-WeCom-UserId": "consult-1"}
     with TestClient(app) as client:
-        regular_page = client.get("/issues/new", headers=headers)
-        assert regular_page.status_code == 200
-        assert (
-            '<button class="primary" type="button" data-inspection-run="true"'
-            not in regular_page.text
-        )
+        regular = client.get("/api/session", headers=headers)
+        assert regular.status_code == 200
+        assert regular.json()["can_inspect"] is False
         denied = client.post("/api/issues/inspection/run", headers=headers)
         assert denied.status_code == 403
 
@@ -425,28 +421,24 @@ def test_new_issue_page_exposes_admin_inspection_action(issue_context):
             assert user is not None
             user.is_global_admin = True
 
-        admin_page = client.get("/issues/new", headers=headers)
-        assert admin_page.status_code == 200
-        button_index = admin_page.text.index(
-            '<button class="primary" type="button" data-inspection-run="true"'
-        )
-        form_index = admin_page.text.index('<form class="panel create-form intake-form"')
-        assert button_index < form_index
-        assert "fetch(inspectionButton.dataset.endpoint" in admin_page.text
-
+        admin = client.get("/api/session", headers=headers)
+        assert admin.status_code == 200
+        assert admin.json()["can_inspect"] is True
         response = client.post("/api/issues/inspection/run", headers=headers)
         assert response.status_code == 200
         assert response.json() == {
             "scanned_issues": 0,
-            "summary_messages": 1,
+            "summary_messages": 2,
             "unresolved_targets": 0,
         }
 
     with issue_context["factory"]() as session:
-        message = session.scalar(select(MessageOutbox))
+        message = session.scalar(
+            select(MessageOutbox).where(MessageOutbox.destination_address == "chat-consult")
+        )
         assert message is not None
         assert message.destination_address == "chat-consult"
-        assert message.content == "暂无未关闭问题"
+        assert message.content == "问题巡检\n暂无进行中的问题"
 
 
 def test_person_target_push_is_idempotent_and_retries_transient_failure(issue_context):
@@ -454,9 +446,7 @@ def test_person_target_push_is_idempotent_and_retries_transient_failure(issue_co
         RecipientReference(RecipientKind.PERSON, issue_context["user_id"])
     )
     assert target.destination_type is DeliveryDestination.USER
-    first = issue_context["push"].enqueue(
-        target, "个人提醒", idempotency_key="person-reminder-1"
-    )
+    first = issue_context["push"].enqueue(target, "个人提醒", idempotency_key="person-reminder-1")
     duplicate = issue_context["push"].enqueue(
         target, "个人提醒", idempotency_key="person-reminder-1"
     )
@@ -686,7 +676,7 @@ def test_agent_group_issue_draft_limits_target_ids_and_modules(issue_context):
     assert "[图片]" in payload["messages"][1]["content"]
 
 
-def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_context, monkeypatch):
+def test_draft_api_passes_text_only_to_agent_and_confirms_issue(issue_context, monkeypatch):
     import kefu.web.app as web_app
 
     captured_text: list[str] = []
@@ -717,7 +707,6 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
 
     stub_agent = StubAgent()
     monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: stub_agent)
-
     app = web_app.create_app(
         session_factory=issue_context["factory"],
         settings=issue_context["settings"],
@@ -725,51 +714,37 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
     )
     headers = {"X-WeCom-UserId": "consult-1"}
     with TestClient(app) as client:
-        root = client.get("/", follow_redirects=False)
-        legacy = client.get("/events/new", follow_redirects=False)
         legacy_api = client.get("/api/events/issue-123", follow_redirects=False)
-        upload_page = client.get("/issues/new", headers=headers)
-        assert root.status_code == 302
-        assert root.headers["location"] == "/issues/new"
-        assert legacy.status_code == 307
-        assert legacy.headers["location"] == "/issues/new"
         assert legacy_api.status_code == 307
         assert legacy_api.headers["location"] == "/api/issues/issue-123"
-        assert upload_page.status_code == 200
-        assert "新建问题" in upload_page.text
 
         pasted_text = "引用内容\n[图片]\n@机器人 保存后报错\n[图片]"
         draft_response = client.post(
-            "/issues/draft",
+            "/api/issues/drafts",
             headers=headers,
             data={
                 "consult_queue_id": str(issue_context["queue_id"]),
                 "pasted_text": pasted_text,
             },
             files=[("images", ("error.png", b"PRIVATE_IMAGE_BYTES", "image/png"))],
-            follow_redirects=False,
         )
-        assert draft_response.status_code == 303, draft_response.text
+        assert draft_response.status_code == 201, draft_response.text
         assert captured_text == [pasted_text]
         assert captured_group_names == [None]
         assert "PRIVATE_IMAGE_BYTES" not in captured_text[0]
+        draft = draft_response.json()["draft"]
+        assert "[图片]" in draft["raw_text"]
+        assert draft["fields"]["issue_description"] == "工作台生成的问题描述"
 
-        draft_path = draft_response.headers["location"]
-        preview = client.get(draft_path, headers=headers)
-        assert preview.status_code == 200
-        assert 'name="issue_current_status"' in preview.text
-        assert "盘中" in preview.text
-        assert "[图片]" in preview.text
-        assert "<img class=\"intake-image\"" in preview.text
-        draft_id = draft_path.rsplit("/", maxsplit=1)[-1]
-
-        local_deadline = (datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(hours=18)).strftime(
-            "%Y-%m-%dT%H:%M"
+        local_deadline = (
+            (datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(hours=18))
+            .replace(second=0, microsecond=0)
+            .isoformat(timespec="minutes")
         )
         confirmation = client.post(
-            f"/issues/drafts/{draft_id}/confirm",
+            f"/api/issues/drafts/{draft['id']}/confirm",
             headers=headers,
-            data={
+            json={
                 "issue_title": "确认后的问题标题",
                 "issue_description": "确认后的问题描述",
                 "customer_name": "用户确认的客户名称",
@@ -778,30 +753,24 @@ def test_workbench_upload_calls_agent_with_text_only_and_confirms_issue(issue_co
                 "issue_current_status": "问题未回复",
                 "current_situation": "确认后的现状",
                 "deadline": local_deadline,
-                "bug_number": "",
-                "feedback_event_point": "版本上线后首次反馈",
                 "issue_source": "工作台",
             },
-            follow_redirects=False,
         )
-        assert confirmation.status_code == 303
-        detail = client.get(confirmation.headers["location"], headers=headers)
-        assert detail.status_code == 200
-        assert "确认后的问题描述" in detail.text
-        issue_number = confirmation.headers["location"].rsplit("/", maxsplit=1)[-1]
+        assert confirmation.status_code == 200, confirmation.text
+        issue_number = confirmation.json()["issue_number"]
         issue_api = client.get(f"/api/issues/{issue_number}", headers=headers)
         assert issue_api.status_code == 200
-        assert issue_api.json()["issue_number"] == issue_number
+        assert issue_api.json()["issue_description"] == "确认后的问题描述"
         assert issue_api.json()["customer_name"] == "用户确认的客户名称"
         assert "case_ref" not in issue_api.json()
 
 
-def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
+def test_draft_api_uses_verified_group_name_and_ignores_client_name(
     issue_context, monkeypatch, caplog
 ):
     import kefu.web.app as web_app
 
-    caplog.set_level("INFO", logger="kefu.web.app")
+    caplog.set_level("INFO", logger="kefu.web.routes_intake")
     captured_group_names: list[str | None] = []
     group_lookups: list[tuple[str, str]] = []
 
@@ -842,10 +811,9 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
 
         def customer_group_name_for_member(self, chat_id: str, wecom_userid: str):
             group_lookups.append((chat_id, wecom_userid))
-            return "杭州星河科技客户群"
+            return "M杭州孚盈—期货交易平台服务群"
 
-    stub_agent = StubAgent()
-    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: stub_agent)
+    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: StubAgent())
     settings = replace(issue_context["settings"], web_base_url="http://localhost:8000")
     app = web_app.create_app(
         session_factory=issue_context["factory"],
@@ -855,12 +823,6 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
     )
     headers = {"X-WeCom-UserId": "consult-1"}
     with TestClient(app) as client:
-        upload_page = client.get("/issues/new", headers=headers)
-        assert upload_page.status_code == 200
-        assert "getWeComCustomerGroupId" in upload_page.text
-        assert 'name="source_chat_status"' in upload_page.text
-        assert 'name="source_chat_error"' in upload_page.text
-        assert "not_group_chat_tools" in upload_page.text
         config_response = client.get(
             "/api/wecom/agent-js-sdk-config",
             headers=headers,
@@ -871,7 +833,7 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
         assert config_response.headers["cache-control"] == "no-store, private"
 
         draft_response = client.post(
-            "/issues/draft",
+            "/api/issues/drafts",
             headers=headers,
             data={
                 "consult_queue_id": str(issue_context["queue_id"]),
@@ -881,28 +843,21 @@ def test_workbench_upload_uses_verified_group_name_and_ignores_client_name(
                 "source_chat_error": "getCurExternalChat:fail_no_permission",
                 "source_group_name": "浏览器伪造的名称",
             },
-            follow_redirects=False,
         )
-        assert draft_response.status_code == 303, draft_response.text
+        assert draft_response.status_code == 201, draft_response.text
         assert group_lookups == [("verified-by-wecom", "consult-1")]
-        assert captured_group_names == ["杭州星河科技客户群"]
+        assert captured_group_names == ["M杭州孚盈—期货交易平台服务群"]
         assert (
             "browser_status=success browser_error=getCurExternalChat:fail_no_permission "
             "chat_id_present=True"
         ) in caplog.text
-        assert "browser_error=getCurExternalChat:fail_no_permission" in caplog.text
-        assert "group_name='杭州星河科技客户群'" in caplog.text
-        assert "customer_name='杭州星河科技'" in caplog.text
-
-        preview = client.get(draft_response.headers["location"], headers=headers)
-        assert preview.status_code == 200
-        assert 'name="customer_name"' in preview.text
-        assert 'value="杭州星河科技"' in preview.text
+        assert "group_name='M杭州孚盈—期货交易平台服务群'" in caplog.text
+        draft = draft_response.json()["draft"]
+        assert draft["source_group_name"] == "M杭州孚盈—期货交易平台服务群"
+        assert draft["fields"]["customer_name"] == "孚盈投资"
 
 
-def test_workbench_upload_continues_without_group_context_when_wecom_lookup_fails(
-    issue_context, monkeypatch
-):
+def test_draft_api_continues_without_group_context_when_lookup_fails(issue_context, monkeypatch):
     import kefu.web.app as web_app
 
     captured_group_names: list[str | None] = []
@@ -932,10 +887,11 @@ def test_workbench_upload_continues_without_group_context_when_wecom_lookup_fail
         is_configured = True
 
         def customer_group_name_for_member(self, chat_id: str, wecom_userid: str):
-            raise web_app.WeComCustomerGroupError("企微暂不可用")
+            from kefu.wecom.customer_groups import WeComCustomerGroupError
 
-    stub_agent = StubAgent()
-    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: stub_agent)
+            raise WeComCustomerGroupError("企微暂不可用")
+
+    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: StubAgent())
     app = web_app.create_app(
         session_factory=issue_context["factory"],
         settings=issue_context["settings"],
@@ -944,22 +900,19 @@ def test_workbench_upload_continues_without_group_context_when_wecom_lookup_fail
     )
     with TestClient(app) as client:
         response = client.post(
-            "/issues/draft",
+            "/api/issues/drafts",
             headers={"X-WeCom-UserId": "consult-1"},
             data={
                 "consult_queue_id": str(issue_context["queue_id"]),
                 "pasted_text": "普通上传继续完成",
                 "source_chat_id": "unavailable-group",
             },
-            follow_redirects=False,
         )
-    assert response.status_code == 303, response.text
+    assert response.status_code == 201, response.text
     assert captured_group_names == [None]
 
 
-def test_external_group_upload_falls_back_when_agent_description_is_empty(
-    issue_context, monkeypatch
-):
+def test_draft_api_falls_back_to_source_when_agent_description_is_empty(issue_context, monkeypatch):
     import kefu.web.app as web_app
 
     agent_inputs: list[tuple[str, str | None]] = []
@@ -994,11 +947,7 @@ def test_external_group_upload_falls_back_when_agent_description_is_empty(
         def customer_group_name_for_member(self, chat_id: str, wecom_userid: str):
             return "星河科技客户群"
 
-    monkeypatch.setattr(
-        web_app,
-        "Agent",
-        lambda _settings, _tools: EmptyDescriptionAgent(),
-    )
+    monkeypatch.setattr(web_app, "Agent", lambda _settings, _tools: EmptyDescriptionAgent())
     app = web_app.create_app(
         session_factory=issue_context["factory"],
         settings=issue_context["settings"],
@@ -1007,17 +956,15 @@ def test_external_group_upload_falls_back_when_agent_description_is_empty(
     )
     with TestClient(app) as client:
         response = client.post(
-            "/issues/draft",
+            "/api/issues/drafts",
             headers={"X-WeCom-UserId": "consult-1"},
             data={
                 "consult_queue_id": str(issue_context["queue_id"]),
                 "pasted_text": "登录后点击保存没有反应",
                 "source_chat_id": "external-group-id",
             },
-            follow_redirects=False,
         )
-        assert agent_inputs == [("登录后点击保存没有反应", "星河科技客户群")]
-        assert response.status_code == 303, response.text
-        preview = client.get(response.headers["location"], headers={"X-WeCom-UserId": "consult-1"})
-        assert preview.status_code == 200
-        assert "登录后点击保存没有反应</textarea>" in preview.text
+    assert agent_inputs == [("登录后点击保存没有反应", "星河科技客户群")]
+    assert response.status_code == 201, response.text
+    draft = response.json()["draft"]
+    assert draft["fields"]["issue_description"] == "登录后点击保存没有反应"

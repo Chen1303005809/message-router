@@ -23,7 +23,6 @@ from kefu.persistence.models import (
     IssueModule,
     PartKind,
     StoredMedia,
-    WeComChannel,
 )
 from kefu.relay.handler import Relay
 from kefu.wecom.transport import (
@@ -83,14 +82,6 @@ class FakeGroupAgent:
 
 @pytest.fixture
 def group_intake(desk_context):
-    with desk_context.session_factory() as session, session.begin():
-        session.add(
-            WeComChannel(
-                team_id=desk_context.teams["consult"],
-                chatid="chat-consult",
-                initialized_at=datetime.now(UTC),
-            )
-        )
     storage = InMemoryObjectStorage()
     agent = FakeGroupAgent()
     service = GroupIssueIntakeService(
@@ -202,7 +193,7 @@ def test_group_intake_requires_confirmation_and_dispatches_original_order(
     result = asyncio.run(service.handle(confirmation))
 
     assert "目标研发群：**研发一组**" in result
-    assert "问题编号：**" in result
+    assert "BUG 编号：**" in result
     with desk_context.session_factory() as session:
         issue = session.scalar(select(Case))
         assert issue is not None
@@ -299,7 +290,7 @@ def test_worker_keeps_existing_issue_quote_on_relay_path(desk_context, group_int
     with desk_context.session_factory() as session:
         issue = session.scalar(select(Case).where(Case.case_ref == created.case_ref))
         assert issue is not None
-        assert issue.last_entry_sequence == 2
+        assert issue.last_entry_sequence == 3
     assert agent.calls == 0
 
 
