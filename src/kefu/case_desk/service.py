@@ -1628,6 +1628,7 @@ class CaseDesk:
         self._assert_expected_version(case, command.expected_version)
         self._directory.assert_consult_manager(session, actor.user_id, case)
         self._assert_open(case)
+        dev_channel = self._directory.active_channel(session, case.current_dev_team_id)
         actor_user = self._directory.get_user(session, actor.user_id)
         case.lifecycle_status = LifecycleStatus.CLOSED
         case.status = CaseStatus.CLOSED
@@ -1641,7 +1642,15 @@ class CaseDesk:
             actor_user=actor_user,
             metadata={"action": "close_case"},
         )
-        return self._result(case, entry.id)
+        delivery_id = self._create_notice_delivery(
+            session,
+            entry=entry,
+            case=case,
+            destination_type=DeliveryDestination.CHAT,
+            destination_address=dev_channel.chatid,
+            content="咨询侧已确认问题闭环并关闭本问题。",
+        )
+        return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
     def _set_case_status(
         self, session: Session, command: SetCaseStatus, actor: Actor
