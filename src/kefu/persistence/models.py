@@ -167,6 +167,16 @@ class DeliveryItemStatus(StrEnum):
     FAILED = "failed"
 
 
+class DeletionTargetKind(StrEnum):
+    ISSUE = "issue"
+    TEAM = "team"
+
+
+class DeletionRecordOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 def enum_column(enum: type[StrEnum], *, length: int = 32) -> SqlEnum:
     """Store stable lowercase enum values on both PostgreSQL and SQLite."""
     return SqlEnum(
@@ -684,6 +694,31 @@ class MessageOutbox(Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ContentDeletionRecord(Base):
+    """Durable audit record for a synchronous content deletion operation."""
+
+    __tablename__ = "content_deletion_records"
+    __table_args__ = (
+        Index("ix_content_deletion_records_created_at", "created_at"),
+        Index("ix_content_deletion_records_operation", "operation_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    operation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True))
+    parent_record_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    target_kind: Mapped[DeletionTargetKind] = mapped_column(enum_column(DeletionTargetKind))
+    # Intentionally not a foreign key: audit records must remain after targets are deleted.
+    target_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    target_label: Mapped[str] = mapped_column(String(768))
+    actor_user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True))
+    actor_name: Mapped[str] = mapped_column(String(256))
+    outcome: Mapped[DeletionRecordOutcome] = mapped_column(
+        enum_column(DeletionRecordOutcome, length=16)
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class WebSession(Base):

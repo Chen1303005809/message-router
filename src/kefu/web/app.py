@@ -134,9 +134,9 @@ def create_app(
         database_target_fp = database_target_fingerprint(engine.url)
         session_factory = create_session_factory(engine)
     desk = CaseDesk(session_factory, web_base_url=settings.web_base_url)
-    administration = Administration(session_factory)
     authenticator = authenticator or WebAuthenticator(session_factory, settings)
     storage = storage or _storage_from_settings(settings)
+    administration = Administration(session_factory, storage=storage)
     media_ingestor = MediaIngestor(session_factory, storage)
     issue_management = IssueManagement(
         session_factory,
@@ -1066,6 +1066,42 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
 
+    @app.delete("/api/admin/issues/{issue_number}")
+    async def admin_delete_issue_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            result = administration.delete_closed_issue(actor, issue_number)
+            return JSONResponse(
+                {
+                    "deleted_issue_number": result.deleted_issue_numbers[0],
+                    "deletion_record_id": str(result.record_ids[0]),
+                    "operation_id": str(result.operation_id),
+                }
+            )
+        except MediaIngestError as error:
+            raise _http_error(ValidationError(str(error))) from error
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+
+    @app.delete("/api/admin/teams/{team_id}")
+    async def admin_delete_team_api(request: Request, team_id: UUID) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            result = administration.delete_team(actor, team_id)
+            return JSONResponse(
+                {
+                    "deleted_team_id": str(result.deleted_target_id),
+                    "deleted_team": result.deleted_target_label,
+                    "deleted_issue_numbers": list(result.deleted_issue_numbers),
+                    "deletion_record_ids": [str(record_id) for record_id in result.record_ids],
+                    "operation_id": str(result.operation_id),
+                }
+            )
+        except MediaIngestError as error:
+            raise _http_error(ValidationError(str(error))) from error
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+
     @app.post("/api/admin/teams")
     async def admin_create_team_api(request: Request) -> JSONResponse:
         actor = actor_or_error(request)
@@ -1239,6 +1275,19 @@ def create_app(
             )
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
+        return RedirectResponse(external_path("/admin"), status_code=303)
+
+    @app.post("/admin/teams/{team_id}/delete", include_in_schema=False)
+    async def admin_delete_team_form(request: Request, team_id: UUID) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            administration.delete_team(actor, team_id)
+        except MediaIngestError as error:
+            raise _http_error(ValidationError(str(error))) from error
+        except CaseDeskError as error:
+            raise _http_error(error) from error
         return RedirectResponse(external_path("/admin"), status_code=303)
 
     @app.post("/admin/teams/{team_id}/members", include_in_schema=False)
@@ -1454,6 +1503,10 @@ def create_app(
         active_tasks = desk.list_issue_status_queue()
         active_draft_tasks = desk.list_issue_draft_processing_tasks()
         recent_changes = desk.list_recent_issue_status_changes()
+        is_global_admin = administration.is_global_admin(actor)
+        recent_deletions = (
+            administration.list_content_deletions(actor) if is_global_admin else ()
+        )
         task_cards = "".join(
             _issue_draft_queue_card(item)
             for item in active_draft_tasks
@@ -1464,13 +1517,26 @@ def create_app(
         change_cards = "".join(
             _recent_status_change_card(item, external_path) for item in recent_changes
         ) or '<p class="empty">暂无状态变化记录。</p>'
+        deletion_cards = "".join(
+            _deletion_queue_card(item) for item in recent_deletions
+        ) or '<p class="empty">暂无删除记录。</p>'
+        deletion_section = (
+            f"""
+          <section class="queue-section panel">
+            <div class="section-heading"><h2>最近删除记录</h2><span>最多 50 条</span></div>
+            <div class="status-history">{deletion_cards}</div>
+          </section>
+            """
+            if is_global_admin
+            else ""
+        )
         events_path = external_path("/issues")
         queue_path = external_path("/status-queue")
         body = f"""
         <main class="status-queue-main">
           <header class="topbar"><div><div class="eyebrow">问题工作台 · 后台任务</div>
             <h1>异步任务队列</h1>
-            <p class="muted">这里显示 Agent 草稿整理和问题状态判定任务；页面每 5 秒自动刷新。</p></div>
+            <p class="muted">这里显示 Agent 草稿整理、问题状态判定任务和管理员删除记录；页面每 5 秒自动刷新。</p></div>
             <nav><a href="{queue_path}">立即刷新</a><a href="{events_path}">问题工作台</a></nav>
           </header>
           <section class="queue-section panel">
@@ -1481,6 +1547,7 @@ def create_app(
             <div class="section-heading"><h2>最近状态变化</h2><span>最多 50 条</span></div>
             <div class="status-history">{change_cards}</div>
           </section>
+          {deletion_section}
         </main>
         <script>window.setTimeout(() => window.location.reload(), 5000);</script>
         """
@@ -1488,10 +1555,14 @@ def create_app(
 
     @app.get("/api/status-queue")
     async def status_queue_api(request: Request) -> JSONResponse:
-        actor_or_error(request)
+        actor = actor_or_error(request)
         active_tasks = desk.list_issue_status_queue()
         active_draft_tasks = desk.list_issue_draft_processing_tasks()
         recent_changes = desk.list_recent_issue_status_changes()
+        is_global_admin = administration.is_global_admin(actor)
+        recent_deletions = (
+            administration.list_content_deletions(actor) if is_global_admin else ()
+        )
         return JSONResponse(
             {
                 "items": [
@@ -1533,6 +1604,25 @@ def create_app(
                         "created_at": item.created_at.isoformat(),
                     }
                     for item in recent_changes
+                ],
+                "recent_deletions": [
+                    {
+                        "id": str(item.id),
+                        "operation_id": str(item.operation_id),
+                        "parent_record_id": (
+                            str(item.parent_record_id)
+                            if item.parent_record_id is not None
+                            else None
+                        ),
+                        "target_kind": item.target_kind.value,
+                        "target_id": str(item.target_id) if item.target_id is not None else None,
+                        "target_label": item.target_label,
+                        "actor_name": item.actor_name,
+                        "outcome": item.outcome.value,
+                        "error_message": item.error_message,
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in recent_deletions
                 ],
             }
         )
@@ -1723,7 +1813,8 @@ def create_app(
                 case = issue_management.get(issue_number, actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
-        can_use_side_selector = administration.is_global_admin(actor)
+        is_global_admin = administration.is_global_admin(actor)
+        can_use_side_selector = is_global_admin
         deliveries_by_entry: dict[UUID, list[Any]] = {}
         for delivery in case.deliveries:
             deliveries_by_entry.setdefault(delivery.entry_id, []).append(delivery)
@@ -1746,6 +1837,11 @@ def create_app(
         )
         lifecycle_forms = _lifecycle_forms(case, external_path)
         top_close_control = _top_close_control(case, external_path)
+        delete_control = _issue_delete_control(
+            case,
+            external_path,
+            is_global_admin=is_global_admin,
+        )
         action_panel = (
             f'<section class="action-panel panel">{message_form}{lifecycle_forms}</section>'
             if message_form or lifecycle_forms
@@ -1755,6 +1851,7 @@ def create_app(
         <main class="case-main">
           <a class="back-link" href="{events_path}">← 返回问题工作台</a>
           {top_close_control}
+          {delete_control}
           <header class="case-titlebar">
             <div><h1>{escape(case.title)}</h1></div>
             <div class="case-state-badges">
@@ -2007,6 +2104,21 @@ def create_app(
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path(f"/issues/{escape(issue_number)}"), status_code=303)
+
+    @app.post("/issues/{issue_number}/delete", include_in_schema=False)
+    async def delete_closed_issue_form(
+        request: Request, issue_number: str
+    ) -> RedirectResponse:
+        actor = page_actor_or_login(request)
+        if isinstance(actor, RedirectResponse):
+            return actor
+        try:
+            administration.delete_closed_issue(actor, issue_number)
+        except MediaIngestError as error:
+            raise _http_error(ValidationError(str(error))) from error
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return RedirectResponse(external_path("/issues?state=closed"), status_code=303)
 
     @app.post("/issues/{issue_number}/reopen", include_in_schema=False)
     async def reopen_issue(request: Request, issue_number: str) -> RedirectResponse:
@@ -2448,6 +2560,10 @@ def _admin_team_card(
         {lead_editor}
         <label class="check-label"><input type="checkbox" name="active"{checked}> 启用</label>
         <button class="subtle-button" type="submit">保存</button>
+      </form>
+      <form method="post" action="{path_for(f"/admin/teams/{team_id}/delete")}" class="team-delete-form"
+        onsubmit="return confirm('删除该团队，并同时删除其关联的已关闭问题及未确认会话？如果仍有未关闭问题引用，此操作会被拒绝。此操作不可恢复。')">
+        <button class="danger-button" type="submit">删除团队及已关闭问题</button>
       </form>
       {channel}
       <form method="post" action="{path_for(f"/admin/teams/{team_id}/inspection-rule")}" class="team-inspection-form" data-inspection-rule-form="true">
@@ -3148,6 +3264,7 @@ button.primary:disabled { opacity: .72; cursor: wait; }
 .queue-pending { color: #805000; background: #fff2cc; }
 .queue-processing { color: #155eef; background: #eaf1ff; }
 .queue-retry { color: #b42318; background: #fee4e2; }
+.queue-completed { color: #087a54; background: #e5f7ef; }
 .status-change-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .status-change-card > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .status-change-field { padding: 3px 7px; border-radius: 999px; color: #52627b; background: #eef1f5; font-size: 10px; font-weight: 700; }
@@ -3488,6 +3605,9 @@ button.primary:hover{{background:#004eeb}}
 .team-edit-form input{{margin:0;min-width:0;flex:1}}
 .team-edit-form .check-label{{margin:0;white-space:nowrap}}
 .team-edit-form button{{margin:0}}
+.team-delete-form{{margin:7px 0 12px}}
+.team-delete-form .danger-button{{min-height:34px}}
+.content-delete-control{{display:flex;justify-content:flex-end;margin:0 0 12px}}
 .subtle-button{{padding:7px 9px;font-size:12px}}
 .danger-button{{padding:7px 9px;font-size:12px;color:#b42318;border-color:#fecdca;background:#fffafa}}
 .channel-box{{margin:12px 0;padding:11px;border-radius:9px;background:#f8fafc}}
@@ -3839,6 +3959,29 @@ def _issue_draft_queue_card(item: Any) -> str:
         '<span class="queue-state queue-processing">处理中</span></div>'
         f'<p>快速上传 · 开始时间 {_format_datetime(item.started_at)}</p>'
         '</article>'
+    )
+
+
+def _deletion_queue_card(item: Any) -> str:
+    target_kind = "问题" if item.target_kind.value == "issue" else "团队"
+    outcome, outcome_class = (
+        ("已删除", "queue-completed")
+        if item.outcome.value == "succeeded"
+        else ("失败", "queue-retry")
+    )
+    cascade = " · 团队级联" if item.parent_record_id is not None else ""
+    error = (
+        f'<p class="queue-error">{escape(item.error_message[:300])}</p>'
+        if item.error_message
+        else ""
+    )
+    return (
+        '<article class="queue-card">'
+        f'<div class="queue-card-heading"><strong>{target_kind} · '
+        f'{escape(item.target_label)}</strong>'
+        f'<span class="queue-state {outcome_class}">{outcome}</span></div>'
+        f'<p>{escape(item.actor_name)}{cascade} · {_format_datetime(item.created_at)}</p>'
+        f'{error}</article>'
     )
 
 
@@ -4282,6 +4425,23 @@ def _top_close_control(case: Any, path_for: Callable[[str], str]) -> str:
     <form class="top-close-control" method="post" action="{close_action}">
       <input type="hidden" name="version" value="{case.version}">
       <button type="submit" class="status-action-close">关闭问题</button>
+    </form>
+    """
+
+
+def _issue_delete_control(
+    case: Any,
+    path_for: Callable[[str], str],
+    *,
+    is_global_admin: bool,
+) -> str:
+    if not is_global_admin or case.lifecycle_status is not LifecycleStatus.CLOSED:
+        return ""
+    action = path_for(f"/issues/{escape(case.case_ref)}/delete")
+    return f"""
+    <form class="content-delete-control" method="post" action="{action}"
+      onsubmit="return confirm('永久删除该已关闭问题及其时间线和附件？此操作不可恢复。')">
+      <button type="submit" class="danger-button">删除已关闭问题</button>
     </form>
     """
 
