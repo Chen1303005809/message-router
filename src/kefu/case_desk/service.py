@@ -1619,8 +1619,10 @@ class CaseDesk:
             destination_type=DeliveryDestination.CHAT,
             destination_address=consult_channel.chatid,
             content=content,
+            event_type="咨询经办变更",
         )]
         delivery_ids.append(
+            # The new consultant continues the case from this personal message.
             self._create_notice_delivery(
                 session,
                 entry=entry,
@@ -1628,6 +1630,8 @@ class CaseDesk:
                 destination_type=DeliveryDestination.USER,
                 destination_address=new_consultant.wecom_userid,
                 content=content,
+                event_type="咨询经办变更",
+                include_markdown=True,
             )
         )
         return self._result(case, entry.id, delivery_ids=tuple(delivery_ids))
@@ -1668,14 +1672,18 @@ class CaseDesk:
             destination_type=DeliveryDestination.CHAT,
             destination_address=old_channel.chatid,
             content="本问题已转出至另一研发责任团队，后续更新不再发送到本群。",
+            event_type="问题转出",
         )
         new_delivery = self._create_notice_delivery(
+            # The receiving team needs a quoteable marker to start its follow-up.
             session,
             entry=entry,
             case=case,
             destination_type=DeliveryDestination.CHAT,
             destination_address=new_channel.chatid,
             content="本问题已转入本团队，请在问题中心查看完整时间线。",
+            event_type="问题转入",
+            include_markdown=True,
         )
         return self._result(case, entry.id, delivery_ids=(old_delivery, new_delivery))
 
@@ -1705,6 +1713,7 @@ class CaseDesk:
             destination_type=DeliveryDestination.CHAT,
             destination_address=dev_channel.chatid,
             content="咨询侧已确认问题闭环并关闭本问题。",
+            event_type="问题关闭",
         )
         return self._result(case, entry.id, delivery_ids=(delivery_id,))
 
@@ -1786,12 +1795,15 @@ class CaseDesk:
         delivery_ids: tuple[UUID, ...] = ()
         if channel is not None:
             delivery_id = self._create_notice_delivery(
+                # Keep the marker so the development team can quote and respond.
                 session,
                 entry=entry,
                 case=case,
                 destination_type=DeliveryDestination.CHAT,
                 destination_address=channel.chatid,
                 content="咨询侧已重新打开本问题，请研发继续处理。",
+                event_type="问题重新打开",
+                include_markdown=True,
             )
             delivery_ids = (delivery_id,)
         return self._result(case, entry.id, delivery_ids=delivery_ids)
@@ -1859,6 +1871,7 @@ class CaseDesk:
             destination_type=source_destination_type,
             destination_address=source_destination_address,
             content="上一条正式消息已被标记为误发；请以问题中心中的纠错记录为准。",
+            event_type="消息纠错",
         )
         target_destination_type, target_destination_address = self._destination_for_side(
             session, target, original.side
@@ -2114,6 +2127,8 @@ class CaseDesk:
         destination_type: DeliveryDestination,
         destination_address: str,
         content: str,
+        event_type: str,
+        include_markdown: bool = False,
     ) -> UUID:
         return self._create_delivery(
             session,
@@ -2128,6 +2143,8 @@ class CaseDesk:
                 operator_name=entry.actor_name_snapshot,
                 content=content,
                 history_url=f"{self._web_base_url}/events/{case.case_ref}",
+                event_type=event_type,
+                include_markdown=include_markdown,
             ),
         )
 

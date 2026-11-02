@@ -114,18 +114,21 @@ def build_notice_bundle(
     case_ref: str,
     bug_number: str,
     case_title: str,
+    event_type: str,
     operator_name: str,
     content: str,
     history_url: str,
+    include_markdown: bool = False,
 ) -> tuple[RenderedDeliveryItem, ...]:
-    """Decorate a system notice and provide the internal history action."""
-    marker = format_case_marker(case_ref)
-    return (
-        RenderedDeliveryItem(
-            kind=PartKind.TEXT,
-            payload={
-                "content": (
-                    format_case_message(
+    """Build a history card, adding quoteable Markdown only when needed."""
+    rendered: list[RenderedDeliveryItem] = []
+    if include_markdown:
+        marker = format_case_marker(case_ref)
+        rendered.append(
+            RenderedDeliveryItem(
+                kind=PartKind.TEXT,
+                payload={
+                    "content": format_case_message(
                         case_title=case_title,
                         body=content,
                         details_after=(
@@ -134,24 +137,22 @@ def build_notice_bundle(
                             marker,
                         ),
                     )
-                )
-            },
-        ),
-        _history_card(
-            case_ref, bug_number, case_title, operator_name, "操作人", history_url
-        ),
+                },
+            )
+        )
+    rendered.append(
+        _history_card(case_title, bug_number, event_type, operator_name, history_url)
     )
+    return tuple(rendered)
 
 
 def _history_card(
-    case_ref: str,
-    bug_number: str,
     case_title: str,
-    actor_name: str,
-    actor_label: str,
+    bug_number: str,
+    event_type: str,
+    operator_name: str,
     history_url: str,
 ) -> RenderedDeliveryItem:
-    marker = format_case_marker(case_ref)
     action = {"type": 1, "title": "查看问题历史", "url": history_url}
     return RenderedDeliveryItem(
         kind=PartKind.TEXT,
@@ -160,10 +161,10 @@ def _history_card(
                 "card_type": "text_notice",
                 "main_title": {
                     "title": case_title[:26],
-                    "desc": f"{actor_label}：{actor_name}"[:30],
+                    "desc": f"操作人：{operator_name}"[:30],
                 },
                 "sub_title_text": (
-                    f"{bug_number} · {marker} · 点击查看完整问题时间线"
+                    f"{bug_number} · {event_type} · 点击查看完整问题时间线"
                 ),
                 "jump_list": [action],
                 "card_action": {"type": 1, "url": history_url},
