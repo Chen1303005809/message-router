@@ -64,7 +64,7 @@ from kefu.case_desk.contracts import (
 from kefu.case_desk.errors import Conflict, Forbidden, NotFound, RoutingUnavailable, ValidationError
 from kefu.case_desk.markers import new_case_ref, normalize_case_ref
 from kefu.case_desk.numbering import next_bug_number
-from kefu.issues.titles import format_customer_issue_title
+from kefu.tools.issue_titles import format_customer_issue_title
 from kefu.persistence.models import (
     DEFAULT_APPROACHING_WINDOW_MINUTES,
     DEFAULT_CASE_DEADLINE_HOURS,
