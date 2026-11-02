@@ -64,6 +64,7 @@ from kefu.case_desk.contracts import (
 from kefu.case_desk.errors import Conflict, Forbidden, NotFound, RoutingUnavailable, ValidationError
 from kefu.case_desk.markers import new_case_ref, normalize_case_ref
 from kefu.case_desk.numbering import next_bug_number
+from kefu.issues.titles import format_customer_issue_title
 from kefu.persistence.models import (
     DEFAULT_APPROACHING_WINDOW_MINUTES,
     DEFAULT_CASE_DEADLINE_HOURS,
@@ -1105,6 +1106,7 @@ class CaseDesk:
         channel = self._directory.active_channel(session, dev_team.id)
         self._directory.active_consult_channel(session, command.consult_queue_id)
         title = self._validated_title(command.title, parts)
+        title = format_customer_issue_title(title, command.customer_name or "")
         customer_name = self._validated_customer_name(command.customer_name)
         customer_group_name = self._validated_customer_group_name(command.customer_group_name)
         consult_handler_name = self._validated_handler_name(handler_name)
