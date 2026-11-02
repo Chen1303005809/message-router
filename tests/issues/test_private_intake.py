@@ -131,15 +131,19 @@ def test_private_handoff_h5_prefills_only_for_owner(desk_context):
     with TestClient(app) as client:
         landing = client.get("/issues/private-intake")
         assert landing.status_code == 200
-        assert "location.hash.slice(1)" in landing.text
+        assert 'src="static/private-intake.js"' in landing.text
         assert token not in landing.text
+        handoff_script = client.get("/static/private-intake.js")
+        assert handoff_script.status_code == 200
+        assert "location.hash.slice(1)" in handoff_script.text
+        assert 'sessionStorage.setItem(key, token)' in handoff_script.text
 
         continuation = client.get(
             "/issues/private-intake/continue",
             headers={"X-WeCom-UserId": "consult-a"},
         )
         assert continuation.status_code == 200
-        assert "/api/issues/private-intake/open" in continuation.text
+        assert 'src="static/private-intake.js"' in continuation.text
         assert token not in continuation.text
 
         opened = client.post(
@@ -154,10 +158,18 @@ def test_private_handoff_h5_prefills_only_for_owner(desk_context):
         assert page.status_code == 200
         assert page.headers["cache-control"] == "no-store, private"
         assert page.headers["referrer-policy"] == "no-referrer"
-        assert "请检查 &lt;查询页面&gt; 的超时问题" in page.text
+        assert "请检查 &lt;查询页面&gt; 的超时问题" not in page.text
         assert token not in page.text
-        media_path = f"/issues/private-intakes/media/{media_id}"
-        assert media_path in page.text
+        intake = client.get(
+            "/api/issues/intake-options",
+            headers={"X-WeCom-UserId": "consult-a"},
+        )
+        assert intake.status_code == 200
+        assert intake.headers["cache-control"] == "no-store, private"
+        private_intake = intake.json()["private_intake"]
+        assert private_intake["raw_text"] == "请检查 <查询页面> 的超时问题"
+        media_path = private_intake["images"][0]["url"]
+        assert media_path == f"/issues/private-intakes/media/{media_id}"
         image = client.get(media_path, headers={"X-WeCom-UserId": "consult-a"})
         assert image.status_code == 200
         assert image.content == b"private screenshot"

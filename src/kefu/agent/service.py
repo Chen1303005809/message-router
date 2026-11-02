@@ -33,7 +33,6 @@ from kefu.config import Settings
 from kefu.inspection.service import IssueInspectionService
 from kefu.issues.contracts import IssueFields, IssueIntake
 from kefu.issues.service import IssueManagement, map_image_placeholders
-from kefu.tools.issue_titles import format_customer_issue_title
 from kefu.messages.receiver import MessageReceiver
 from kefu.messages.recipients import (
     RecipientKind,
@@ -49,6 +48,7 @@ from kefu.persistence.models import (
     WaitingOn,
 )
 from kefu.tools import LoggedHttpClient
+from kefu.tools.issue_titles import format_customer_issue_title
 
 logger = logging.getLogger(__name__)
 

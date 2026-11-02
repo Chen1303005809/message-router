@@ -1,6 +1,6 @@
 # ruff: noqa: E501
 
-"""Server-rendered H5 issue workspace with no business rules of its own."""
+"""Static H5 issue workspace served by the same-origin FastAPI app."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
+from functools import lru_cache
 from hmac import compare_digest
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -23,6 +25,7 @@ from fastapi.exception_handlers import http_exception_handler as default_http_ex
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
+from starlette.staticfiles import StaticFiles
 
 from kefu.admin.service import (
     Administration,
@@ -45,7 +48,6 @@ from kefu.case_desk.contracts import (
     CaseFilter,
     CloseCase,
     CreateCase,
-    EntryView,
     ImagePart,
     PostFormalMessage,
     ReopenCase,
@@ -71,7 +73,6 @@ from kefu.config import Settings
 from kefu.inspection.service import IssueInspectionService
 from kefu.issues.contracts import IssueFields, IssueIntake
 from kefu.issues.service import IssueManagement, map_image_placeholders
-from kefu.tools.issue_titles import format_customer_issue_title
 from kefu.logging_setup import configure_logging
 from kefu.media.storage import (
     MAX_IMAGE_BYTES,
@@ -88,25 +89,21 @@ from kefu.persistence.database import create_engine_from_url, create_session_fac
 from kefu.persistence.models import (
     MAX_DEADLINE_INCREMENT_MINUTES,
     MIN_DEADLINE_INCREMENT_MINUTES,
-    CaseEntryKind,
     CasePriority,
     CaseStatus,
-    DeadlineStatus,
-    DeliveryDestination,
-    DeliveryStatus,
     EntrySide,
     IssueCurrentStatus,
     IssueModule,
     LifecycleStatus,
     MembershipRole,
     MessageIntent,
-    PartKind,
     StoredMedia,
     TeamKind,
     User,
     WaitingOn,
 )
 from kefu.relay.handler import Relay
+from kefu.tools.issue_titles import format_customer_issue_title
 from kefu.web.auth import AuthenticationError, WebAuthenticator
 from kefu.wecom.customer_group_mapping import customer_name_for_group
 from kefu.wecom.customer_groups import WeComCustomerGroupClient, WeComCustomerGroupError
@@ -117,6 +114,12 @@ configure_logging("WEB")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 _PRIVATE_INTAKE_COOKIE = "kefu_private_intake"
+_STATIC_DIR = Path(__file__).with_name("static")
+
+
+@lru_cache(maxsize=8)
+def _static_page_content(name: str) -> str:
+    return (_STATIC_DIR / name).read_text(encoding="utf-8")
 
 
 def create_app(
@@ -173,6 +176,7 @@ def create_app(
         database_target_fp,
     )
     app = FastAPI(title="问题工作台", version="0.1.0")
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="web-static")
     app.state.modules = {
         "issues": issue_management,
         "inspection": inspection,
@@ -192,6 +196,13 @@ def create_app(
         if not mount_path or path == mount_path or path.startswith(f"{mount_path}/"):
             return path
         return f"{mount_path}{path}"
+
+    def static_page(name: str = "app.html", *, headers: Mapping[str, str] | None = None) -> HTMLResponse:
+        page = _static_page_content(name).replace(
+            "__KEFU_BASE_PATH__",
+            settings.web_mount_path,
+        )
+        return HTMLResponse(page, headers=dict(headers or {}))
 
     @app.exception_handler(HTTPException)
     async def handle_http_exception(request: Request, error: HTTPException) -> Response:
@@ -329,16 +340,8 @@ def create_app(
 
     @app.get("/issues/private-intake", response_class=HTMLResponse, include_in_schema=False)
     async def private_intake_landing() -> Response:
-        continue_url = json.dumps(external_path("/issues/private-intake/continue"))
-        return HTMLResponse(
-            "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>正在打开私聊问题</title><body><p>正在安全打开私聊问题…</p><script>"
-            "const token=location.hash.slice(1);"
-            "if(token){sessionStorage.setItem('kefu_private_intake_token',token);}"
-            "history.replaceState(null,'',location.pathname+location.search);"
-            f"location.replace({continue_url});"
-            "</script></body></html>",
+        return static_page(
+            "private-intake.html",
             headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"},
         )
 
@@ -351,25 +354,8 @@ def create_app(
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        open_url = json.dumps(external_path("/api/issues/private-intake/open"))
-        new_issue_url = json.dumps(external_path("/issues/new"))
-        return HTMLResponse(
-            "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>正在验证私聊问题</title><body><p id=\"status\">正在验证账号…</p><script>"
-            "(async()=>{const status=document.getElementById('status');"
-            "const key='kefu_private_intake_token';"
-            "const token=sessionStorage.getItem(key);"
-            f"if(!token){{location.replace({new_issue_url});return;}}"
-            "try{const response=await fetch("
-            f"{open_url},"
-            "{method:'POST',headers:{'Content-Type':'application/json'},"
-            "body:JSON.stringify({token})});"
-            "if(!response.ok){throw new Error('handoff_rejected');}"
-            "sessionStorage.removeItem(key);"
-            f"location.replace({new_issue_url});"
-            "}catch(_){status.textContent='交接链接已过期或账号不匹配，请重新从机器人私聊打开卡片。';}})();"
-            "</script></body></html>",
+        return static_page(
+            "private-intake.html",
             headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"},
         )
 
@@ -442,35 +428,7 @@ def create_app(
                 return RedirectResponse(external_path("/admin"), status_code=303)
         except CaseDeskError as error:
             raise _http_error(error) from error
-        token_hint = (
-            "请输入部署时配置的初始化令牌。"
-            if settings.admin_bootstrap_token
-            else (
-                "开发模式可使用与表单一致的 X-WeCom-UserId 请求头；"
-                "生产环境请先配置 ADMIN_BOOTSTRAP_TOKEN。"
-            )
-        )
-        body = f"""
-        <main class="setup-card">
-          <div class="eyebrow">首次使用 · H5 问题管理中心</div>
-          <h1>初始化总管理员</h1>
-          <p class="muted">总管理员使用企业微信 userid 登录，不单独设置密码。初始化完成后，人员授权、团队配置和研发/咨询群绑定都可以在管理中心可视化完成。</p>
-          <div class="notice">{escape(token_hint)}</div>
-          <form method="post" action="{external_path("/setup")}">
-            <label>企业微信 userid
-              <input name="wecom_userid" required maxlength="128" placeholder="例如 zhangsan">
-            </label>
-            <label>显示名称
-              <input name="display_name" required maxlength="256" value="问题中心总管理员">
-            </label>
-            <label>初始化令牌
-              <input name="token" type="password" autocomplete="off" placeholder="生产环境必填">
-            </label>
-            <button class="primary" type="submit">完成初始化并进入管理中心</button>
-          </form>
-        </main>
-        """
-        return HTMLResponse(_page("初始化总管理员", body, body_class="setup-page"))
+        return static_page()
 
     @app.post("/setup", include_in_schema=False)
     async def setup_submit(request: Request) -> RedirectResponse:
@@ -493,16 +451,157 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return RedirectResponse(external_path("/admin"), status_code=303)
 
+    @app.get("/api/setup", include_in_schema=False)
+    async def setup_status_api() -> JSONResponse:
+        try:
+            initialized = administration.has_global_admin()
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return JSONResponse(
+            {
+                "initialized": initialized,
+                "requires_token": bool(settings.admin_bootstrap_token),
+                "auth_mode": settings.auth_mode,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/setup", include_in_schema=False)
+    async def setup_api(request: Request) -> JSONResponse:
+        try:
+            if administration.has_global_admin():
+                raise Conflict("总管理员已经初始化")
+            payload = await _json_object(request)
+            userid = _payload_text(payload, "wecom_userid")
+            display_name = _payload_text(payload, "display_name")
+            _authorize_initial_setup(
+                request,
+                _payload_text(payload, "token") if "token" in payload else "",
+                userid,
+                settings,
+            )
+            initialize_global_admin(
+                session_factory,
+                wecom_userid=userid,
+                display_name=display_name,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"ok": True}, status_code=201)
+
+    @app.get("/api/ui/context", include_in_schema=False)
+    async def ui_context_api(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            queues = issue_management.list_consult_queues(actor)
+            access = inspection.access_for_actor(actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return JSONResponse(
+            {
+                "user_id": str(actor.user_id),
+                "is_global_admin": access.is_global_admin,
+                "can_inspect": access.can_inspect,
+                "can_create_issue": bool(queues),
+                "wecom_group_context_enabled": wecom_customer_groups.is_configured,
+                "modules": [item.value for item in IssueModule],
+                "issue_statuses": [item.value for item in IssueCurrentStatus],
+            },
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    @app.get("/api/issues/intake-options", include_in_schema=False)
+    async def intake_options_api(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        private_token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
+        try:
+            queues = issue_management.list_consult_queues(actor)
+            dev_teams = issue_management.list_dev_teams(actor)
+            private_handoff = (
+                issue_management.get_private_intake_handoff(private_token, actor)
+                if private_token
+                else None
+            )
+            access = inspection.access_for_actor(actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        private_images = []
+        private_text = ""
+        if private_handoff is not None:
+            private_text = private_handoff.raw_text
+            private_images = [
+                {
+                    "media_id": str(part.media_id),
+                    "url": external_path(f"/issues/private-intakes/media/{part.media_id}"),
+                }
+                for part in private_handoff.parts
+                if isinstance(part, ImagePart)
+            ]
+        return JSONResponse(
+            {
+                "queues": [{"id": str(item.id), "name": item.name} for item in queues],
+                "dev_teams": [
+                    {
+                        "id": str(team.id),
+                        "name": team.name,
+                        "lead_display_name": team.lead_display_name,
+                    }
+                    for team in dev_teams
+                ],
+                "private_intake": (
+                    {
+                        "raw_text": private_text,
+                        "images": private_images,
+                    }
+                    if private_handoff is not None
+                    else None
+                ),
+                "can_inspect": access.can_inspect,
+                "is_global_admin": access.is_global_admin,
+                "wecom_group_context_enabled": (
+                    wecom_customer_groups.is_configured and private_handoff is None
+                ),
+                "modules": [item.value for item in IssueModule],
+                "issue_statuses": [item.value for item in IssueCurrentStatus],
+            },
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    @app.get("/api/issues/legacy-intake-options", include_in_schema=False)
+    async def legacy_intake_options_api(request: Request) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            queues = issue_management.list_consult_queues(actor)
+            dev_teams = issue_management.list_dev_teams(actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return JSONResponse(
+            {
+                "queues": [{"id": str(item.id), "name": item.name} for item in queues],
+                "dev_teams": [
+                    {
+                        "id": str(team.id),
+                        "name": team.name,
+                        "lead_display_name": team.lead_display_name,
+                    }
+                    for team in dev_teams
+                ],
+                "modules": [item.value for item in IssueModule],
+                "issue_statuses": [item.value for item in IssueCurrentStatus],
+            },
+            headers={"Cache-Control": "no-store, private"},
+        )
+
     @app.get("/issues/new", response_class=HTMLResponse)
     async def new_issue_intake_page(request: Request) -> Response:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        private_intake = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
+        private_token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
         try:
             private_handoff = (
-                issue_management.get_private_intake_handoff(private_intake, actor)
-                if private_intake
+                issue_management.get_private_intake_handoff(private_token, actor)
+                if private_token
                 else None
             )
             queues = issue_management.list_consult_queues(actor)
@@ -515,137 +614,17 @@ def create_app(
                 f"{external_path('/issues')}?{urlencode({'notice': 'missing_consult_queue'})}",
                 status_code=302,
             )
-        queue_options = "".join(
-            f'<option value="{queue.id}" '
-            f"{'selected' if len(queues) == 1 else ''}>{escape(queue.name)}</option>"
-            for queue in queues
-        )
-        if len(queues) > 1:
-            queue_options = (
-                '<option value="" disabled selected>选择队列</option>'
-                + queue_options
-            )
-            queue_control = (
-                '<label class="intake-queue"><span class="visually-hidden">咨询队列</span>'
-                f'<select name="consult_queue_id" required aria-label="咨询队列">{queue_options}</select>'
-                "</label>"
-            )
-        else:
-            queue_control = f'<input type="hidden" name="consult_queue_id" value="{queues[0].id}">'
         if not dev_teams:
             return RedirectResponse(
                 f"{external_path('/issues')}?{urlencode({'notice': 'missing_dev_team'})}",
                 status_code=302,
             )
-        group_context_scripts = (
-            _wecom_group_context_scripts(external_path("/api/wecom/agent-js-sdk-config"))
-            if wecom_customer_groups.is_configured and private_handoff is None
-            else ""
-        )
-        private_image_markup = ""
-        if private_handoff is not None and private_intake is not None:
-            private_image_markup = "".join(
-                f'<img class="intake-image" alt="私聊图片" '
-                f'src="{external_path(f"/issues/private-intakes/media/{part.media_id}")}" '
-                'loading="lazy">'
-                for part in private_handoff.parts
-                if isinstance(part, ImagePart)
-            )
-        private_content_notice = (
-            '<p class="muted">已带入机器人私聊内容及图片。提交后会进入现有问题整理和审核流程。</p>'
-            if private_handoff is not None
-            else ""
-        )
-        initial_text = escape(private_handoff.raw_text) if private_handoff is not None else ""
-        inspection_access = inspection.access_for_actor(actor)
-        inspection_button, inspection_dialog = (
-            _inspection_control_parts(
-                external_path,
-                selectable=inspection_access.is_global_admin,
-            )
-            if inspection_access.can_inspect
-            else ("", "")
-        )
-        body = f"""
-        <main class="create-main intake-page">
-          <header class="page-heading intake-heading">
-            <h1>新建问题</h1>
-            <div class="intake-heading-actions">
-              {inspection_button}
-              <a class="intake-back-link" href="{external_path("/issues")}">返回问题列表</a>
-            </div>
-          </header>
-          {inspection_dialog}
-          <form class="panel create-form intake-form" method="post" action="{external_path("/issues/draft")}" enctype="multipart/form-data">
-            {private_content_notice}
-            <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus
-              aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true"
-              placeholder="粘贴问题内容；图片可拖入此处…">{initial_text}</textarea>
-            <div class="private-intake-images">{private_image_markup}</div>
-            <input type="hidden" name="source_chat_id" value="">
-            <input type="hidden" name="source_chat_status" value="not_reported">
-            <input type="hidden" name="source_chat_error" value="">
-            <div class="intake-actions">
-              {_image_upload_controls(compact=True)}
-              {queue_control}
-              <button class="primary" type="submit" data-issue-draft-submit="true">上传</button>
-            </div>
-            <p class="draft-submit-status muted" data-issue-draft-status="true" role="status"
-              aria-live="polite" hidden>
-              <span class="draft-loading-spinner" aria-hidden="true"></span>
-              正在整理…
-            </p>
-          </form>
-          <script>
-          (() => {{
-            const form = document.querySelector('.intake-page form');
-            const button = form?.querySelector('[data-issue-draft-submit="true"]');
-            const status = form?.querySelector('[data-issue-draft-status="true"]');
-            const sourceChatId = form?.querySelector('[name="source_chat_id"]');
-            const sourceChatStatus = form?.querySelector('[name="source_chat_status"]');
-            const sourceChatError = form?.querySelector('[name="source_chat_error"]');
-            if (!form || !button || !status || !sourceChatId || !sourceChatStatus || !sourceChatError) return;
-            let submitting = false;
-            form.addEventListener('submit', async (event) => {{
-              if (submitting) {{
-                event.preventDefault();
-                return;
-              }}
-              event.preventDefault();
-              submitting = true;
-              button.disabled = true;
-              button.textContent = '正在上传…';
-              status.hidden = false;
-              form.setAttribute('aria-busy', 'true');
-              if ({"true" if private_handoff is not None else "false"}) {{
-                HTMLFormElement.prototype.submit.call(form);
-                return;
-              }}
-              try {{
-                sourceChatId.value = await getWeComCustomerGroupId();
-                sourceChatStatus.value = window.wecomCustomerGroupLookupStatus || 'unknown';
-                sourceChatError.value = window.wecomCustomerGroupLookupError || 'sdk_error_field_empty';
-              }} catch (_) {{
-                sourceChatId.value = '';
-                sourceChatStatus.value = 'client_exception';
-                sourceChatError.value = 'client_exception';
-              }}
-              HTMLFormElement.prototype.submit.call(form);
-            }});
-          }})();
-          </script>
-          {group_context_scripts}
-        </main>
-        """
-        response_headers = (
+        headers = (
             {"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"}
             if private_handoff is not None
             else None
         )
-        return HTMLResponse(
-            _page("上传问题材料", body, body_class="issue-intake-page"),
-            headers=response_headers,
-        )
+        return static_page(headers=headers)
 
     @app.post("/api/issues/inspection/run")
     async def run_issue_inspection(request: Request) -> JSONResponse:
@@ -669,10 +648,12 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
 
+    @app.post("/api/issues/drafts", include_in_schema=False)
     @app.post("/issues/draft", include_in_schema=False)
-    async def create_issue_draft(request: Request) -> RedirectResponse:
+    async def create_issue_draft(request: Request) -> Response:
+        api_request = request.url.path == "/api/issues/drafts"
         request_id = getattr(request.state, "request_id", "untracked")
-        actor = page_actor_or_login(request)
+        actor = actor_or_error(request) if api_request else page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await request.form()
@@ -685,10 +666,14 @@ def create_app(
                     private_intake_token, actor
                 )
                 if existing_draft_id is not None:
-                    response = RedirectResponse(
-                        external_path(f"/issues/drafts/{existing_draft_id}"),
-                        status_code=303,
-                    )
+                    response: Response
+                    if api_request:
+                        response = JSONResponse({"draft_id": str(existing_draft_id)})
+                    else:
+                        response = RedirectResponse(
+                            external_path(f"/issues/drafts/{existing_draft_id}"),
+                            status_code=303,
+                        )
                     response.delete_cookie(_PRIVATE_INTAKE_COOKIE, path="/")
                     return response
                 private_handoff = issue_management.get_private_intake_handoff(
@@ -940,10 +925,14 @@ def create_app(
                         request_id,
                     )
             await form.close()
-        response = RedirectResponse(
-            external_path(f"/issues/drafts/{draft.id}"),
-            status_code=303,
-        )
+        response: Response
+        if api_request:
+            response = JSONResponse({"draft_id": str(draft.id)}, status_code=201)
+        else:
+            response = RedirectResponse(
+                external_path(f"/issues/drafts/{draft.id}"),
+                status_code=303,
+            )
         if private_intake_token:
             response.delete_cookie(_PRIVATE_INTAKE_COOKIE, path="/")
         return response
@@ -972,62 +961,78 @@ def create_app(
         if isinstance(actor, RedirectResponse):
             return actor
         try:
+            issue_management.get_intake_draft(draft_id, actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return static_page(headers={"Cache-Control": "no-store, private"})
+
+    @app.get("/api/issues/drafts/{draft_id}", include_in_schema=False)
+    async def issue_draft_api(request: Request, draft_id: UUID) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
             draft = issue_management.get_intake_draft(draft_id, actor)
             queues = issue_management.list_consult_queues(actor)
             dev_teams = issue_management.list_dev_teams(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
-        team_options = '<option value="">请选择初次受理组</option>' + "".join(
-            f'<option value="{team.id}" '
-            f"{'selected' if team.id == draft.fields.initial_acceptance_team_id else ''}>"
-            f"{escape(team.name)}</option>"
-            for team in dev_teams
-        )
         queue_name = next(
             (queue.name for queue in queues if queue.id == draft.consult_queue_id),
             "已登记咨询队列",
         )
-        parts_html = "".join(
-            (
-                f'<pre class="intake-part">{escape(part.text)}</pre>'
-                if isinstance(part, TextPart)
-                else (
-                    f'<img class="intake-image" src="{external_path(f"/issues/drafts/{draft.id}/media/{part.media_id}")}" '
-                    f'alt="问题图片附件">'
+        parts = []
+        for part in draft.parts:
+            if isinstance(part, TextPart):
+                parts.append({"kind": "text", "text": part.text})
+            elif isinstance(part, ImagePart):
+                parts.append(
+                    {
+                        "kind": "image",
+                        "media_id": str(part.media_id),
+                        "url": external_path(
+                            f"/issues/drafts/{draft.id}/media/{part.media_id}"
+                        ),
+                    }
                 )
-            )
-            for part in draft.parts
-        )
-        initial_deadline = _datetime_local_value(draft.initial_expires_at)
         fields = draft.fields
-        module_options = _issue_module_options(fields.suspected_type)
-        body = f"""
-        <main class="create-main intake-review-page">
-          <a class="back-link" href="{external_path("/issues/new")}">← 重新上传材料</a>
-          <form class="panel create-form" method="post" action="{external_path(f"/issues/drafts/{draft.id}/confirm")}">
-            <label>问题标题 <input name="issue_title" required maxlength="512" value="{escape(fields.issue_title)}" placeholder="Agent 生成的简短问题概括"></label>
-            <label>转发正文 <textarea name="issue_description" required maxlength="20000" rows="8">{escape(fields.issue_description)}</textarea></label>
-            <p class="muted intake-review-hint">标题和正文会转发给初次受理组，图片按原顺序作为附件转发。</p>
-            <div class="intake-key-fields">
-              <label>客户名称 <input name="customer_name" maxlength="256" value="{escape(fields.customer_name)}" placeholder="请输入客户名称"></label>
-              <div class="intake-readonly-field"><span>客户群聊名称</span><strong>{escape(draft.source_group_name or "未获取")}</strong></div>
-              <label>初次受理组 <select name="initial_acceptance_team_id" required>{team_options}</select></label>
-              <label>怀疑类型 <select name="suspected_type" required>{module_options}</select></label>
-            </div>
-            <details class="panel intake-source">
-              <summary>收到的材料</summary>
-              <div class="intake-source-content"><p class="muted">咨询队列：{escape(queue_name)}</p>{parts_html}</div>
-            </details>
-            <input type="hidden" name="customer_contact_name" value="{escape(fields.customer_contact_name)}">
-            <input type="hidden" name="customer_contact_method" value="{escape(fields.customer_contact_method)}">
-            <input type="hidden" name="issue_current_status" value="{escape(fields.issue_current_status)}">
-            <input type="hidden" name="current_situation" value="{escape(fields.current_situation)}">
-            <input type="hidden" name="deadline" value="{initial_deadline}">
-            <button class="primary" type="submit">确认并推送给初次受理组</button>
-          </form>
-        </main>
-        """
-        return HTMLResponse(_page("确认问题", body, body_class="issue-review-page"))
+        return JSONResponse(
+            {
+                "id": str(draft.id),
+                "issue_number": draft.issue_number,
+                "raw_text": draft.raw_text,
+                "parts": parts,
+                "consult_queue_id": str(draft.consult_queue_id),
+                "consult_queue_name": queue_name,
+                "fields": {
+                    "issue_title": fields.issue_title,
+                    "issue_description": fields.issue_description,
+                    "customer_name": fields.customer_name,
+                    "customer_contact_name": fields.customer_contact_name,
+                    "customer_contact_method": fields.customer_contact_method,
+                    "initial_acceptance_team_id": (
+                        str(fields.initial_acceptance_team_id)
+                        if fields.initial_acceptance_team_id
+                        else None
+                    ),
+                    "suspected_type": fields.suspected_type,
+                    "issue_current_status": fields.issue_current_status,
+                    "current_situation": fields.current_situation,
+                    "issue_source": fields.issue_source,
+                    "deadline": _datetime_local_value(
+                        fields.deadline or draft.initial_expires_at
+                    ),
+                },
+                "source_group_name": draft.source_group_name,
+                "first_recorder_name": draft.first_recorder_name,
+                "initial_expires_at": _datetime_local_value(draft.initial_expires_at),
+                "dev_teams": [
+                    {"id": str(team.id), "name": team.name}
+                    for team in dev_teams
+                ],
+                "modules": [item.value for item in IssueModule],
+                "issue_statuses": [item.value for item in IssueCurrentStatus],
+            },
+            headers={"Cache-Control": "no-store, private"},
+        )
 
     @app.get("/issues/drafts/{draft_id}/media/{media_id}", include_in_schema=False)
     async def issue_draft_media(request: Request, draft_id: UUID, media_id: UUID) -> Response:
@@ -1047,33 +1052,80 @@ def create_app(
         except CaseDeskError as error:
             raise _http_error(error) from error
 
+    @app.post("/api/issues/drafts/{draft_id}/confirm", include_in_schema=False)
     @app.post("/issues/drafts/{draft_id}/confirm", include_in_schema=False)
-    async def confirm_issue_draft(request: Request, draft_id: UUID) -> RedirectResponse:
-        actor = page_actor_or_login(request)
+    async def confirm_issue_draft(request: Request, draft_id: UUID) -> Response:
+        api_request = request.url.path == f"/api/issues/drafts/{draft_id}/confirm"
+        actor = actor_or_error(request) if api_request else page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        form = await request.form()
+        form = await _json_object(request) if api_request else await request.form()
         try:
             fields = IssueFields(
-                issue_title=_required_form_text(form, "issue_title"),
-                issue_description=_required_form_text(form, "issue_description"),
-                customer_name=_optional_form_text(form, "customer_name") or "",
-                customer_contact_name=_optional_form_text(form, "customer_contact_name") or "",
-                customer_contact_method=_optional_form_text(form, "customer_contact_method") or "",
-                initial_acceptance_team_id=UUID(
-                    _required_form_text(form, "initial_acceptance_team_id")
+                issue_title=(
+                    _payload_text(form, "issue_title")
+                    if api_request
+                    else _required_form_text(form, "issue_title")
                 ),
-                suspected_type=_optional_form_text(form, "suspected_type") or "",
-                issue_current_status=_required_form_text(form, "issue_current_status"),
-                current_situation=_optional_form_text(form, "current_situation") or "",
-                issue_source=_optional_form_text(form, "issue_source") or "工作台",
-                deadline=_parse_local_deadline(_required_form_text(form, "deadline")),
+                issue_description=(
+                    _payload_text(form, "issue_description")
+                    if api_request
+                    else _required_form_text(form, "issue_description")
+                ),
+                customer_name=(
+                    _payload_text(form, "customer_name")
+                    if api_request
+                    else _optional_form_text(form, "customer_name") or ""
+                ),
+                customer_contact_name=(
+                    _payload_text(form, "customer_contact_name")
+                    if api_request
+                    else _optional_form_text(form, "customer_contact_name") or ""
+                ),
+                customer_contact_method=(
+                    _payload_text(form, "customer_contact_method")
+                    if api_request
+                    else _optional_form_text(form, "customer_contact_method") or ""
+                ),
+                initial_acceptance_team_id=UUID(
+                    _payload_text(form, "initial_acceptance_team_id")
+                    if api_request
+                    else _required_form_text(form, "initial_acceptance_team_id")
+                ),
+                suspected_type=(
+                    _payload_text(form, "suspected_type")
+                    if api_request
+                    else _optional_form_text(form, "suspected_type") or ""
+                ),
+                issue_current_status=(
+                    _payload_text(form, "issue_current_status")
+                    if api_request
+                    else _required_form_text(form, "issue_current_status")
+                ),
+                current_situation=(
+                    _payload_text(form, "current_situation")
+                    if api_request
+                    else _optional_form_text(form, "current_situation") or ""
+                ),
+                issue_source=(
+                    _payload_text(form, "issue_source")
+                    if api_request
+                    else _optional_form_text(form, "issue_source") or "工作台"
+                ),
+                deadline=_parse_local_deadline(
+                    _payload_text(form, "deadline")
+                    if api_request
+                    else _required_form_text(form, "deadline")
+                ),
             )
             result = issue_management.confirm_intake(draft_id, fields, actor)
         except (CaseDeskError, ValueError) as error:
             raise _http_error(_as_case_desk_error(error)) from error
         finally:
-            await form.close()
+            if not api_request:
+                await form.close()
+        if api_request:
+            return JSONResponse({"issue_number": result.issue_number}, status_code=201)
         return RedirectResponse(
             external_path(f"/issues/{result.issue_number}"),
             status_code=303,
@@ -1113,28 +1165,15 @@ def create_app(
     @app.get("/settings/routing", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/admin", response_class=HTMLResponse)
     async def admin_page(request: Request, q: str = "") -> Response:
+        del q
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         try:
-            overview = administration.overview(actor)
-            users = administration.list_users(actor, query=q)
-            all_users = users if not q.strip() else administration.list_users(actor)
-            teams = administration.list_teams(actor)
-            schedule = administration.inspection_schedule(actor)
+            administration.overview(actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
-        body = _admin_dashboard(
-            actor=actor,
-            overview=overview,
-            users=users,
-            member_options=all_users,
-            teams=teams,
-            schedule=schedule,
-            query=q,
-            path_for=external_path,
-        )
-        return HTMLResponse(_page("组织与授权", body, body_class="admin-page"))
+        return static_page()
 
     @app.get("/api/admin/overview")
     async def admin_overview_api(request: Request) -> JSONResponse:
@@ -1533,101 +1572,11 @@ def create_app(
         return RedirectResponse(external_path("/admin"), status_code=303)
 
     @app.get("/issues", response_class=HTMLResponse)
-    async def events_page(
-        request: Request,
-        state: str = "open",
-        priority: str = "",
-        q: str = "",
-        notice: str | None = None,
-    ) -> Response:
-        if state not in {"mine", "dev", "open", "closed"}:
-            state = "open"
-        query = q.strip()
+    async def events_page(request: Request) -> Response:
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        try:
-            cases = issue_management.list(
-                _case_filter_for_state(state, priority, query), actor
-            )
-            consult_queues = issue_management.list_consult_queues(actor)
-        except CaseDeskError as error:
-            raise _http_error(error) from error
-        cards = "".join(_case_card(summary, external_path) for summary in cases.items)
-        cards = cards or '<p class="empty">当前筛选下没有问题。</p>'
-        events_path = external_path("/issues")
-        clear_search_link = (
-            f'<a class="button-link" href="{_event_filter_url(events_path, state, priority)}">清除</a>'
-            if query
-            else ""
-        )
-        search_form = (
-            f'<form class="issue-search-form" method="get" action="{events_path}">'
-            f'<input type="hidden" name="state" value="{escape(state)}">'
-            f'<input type="hidden" name="priority" value="{escape(priority)}">'
-            f'<label class="sr-only" for="issue-search">搜索问题</label>'
-            f'<input id="issue-search" type="search" name="q" value="{escape(query)}" '
-            'placeholder="搜索 BUG 编号或客户名称">'
-            '<button type="submit">搜索</button>'
-            f"{clear_search_link}</form>"
-        )
-        tabs = " ".join(
-            f'<a class="{"active" if state == value else ""}" '
-            f'href="{_event_filter_url(events_path, value, priority, query)}">{label}</a>'
-            for value, label in (
-                ("open", "问题列表"),
-                ("mine", "我的问题"),
-                ("closed", "已关闭"),
-            )
-        )
-        selected_priority = CasePriority(priority) if priority else None
-        priority_filters = " ".join(
-            f'<a class="{"active" if selected_priority is level else ""}" '
-            f'href="{_event_filter_url(events_path, state, level.value if level else "", query)}">{label}</a>'
-            for level, label in (
-                (None, "全部等级"),
-                (CasePriority.NORMAL, "普通"),
-                (CasePriority.URGENT, "紧急"),
-                (CasePriority.SEVERE, "严重"),
-            )
-        )
-        inspection_access = inspection.access_for_actor(actor)
-        is_global_admin = inspection_access.is_global_admin
-        admin_link = (
-            f'<a class="nav-admin" href="{external_path("/admin")}">组织与授权</a>'
-            if is_global_admin
-            else ""
-        )
-        queue_link = f'<a href="{external_path("/status-queue")}">异步任务队列</a>'
-        create_link = (
-            f'<a class="nav-create" href="{external_path("/issues/new")}">＋ 新建问题</a>'
-            if consult_queues
-            else ""
-        )
-        inspection_button, inspection_dialog = (
-            _inspection_control_parts(
-                external_path,
-                selectable=inspection_access.is_global_admin,
-            )
-            if inspection_access.can_inspect
-            else ("", "")
-        )
-        notice_markup = _issue_access_notice(notice)
-
-        return HTMLResponse(
-            _page(
-                "问题中心",
-                f"{notice_markup}"
-                f'<header class="topbar"><div><div class="eyebrow"></div>'
-                f"<nav>{tabs}{queue_link}{admin_link}{create_link}{inspection_button}</nav></header>"
-                f"{inspection_dialog}"
-                f'<section class="filter-panel">{search_form}'
-                f'<div class="filter-label">紧急程度</div>'
-                f'<nav class="priority-filters">{priority_filters}</nav></section>'
-                f'<main class="event-list">{cards}</main>',
-                body_class="event-page",
-            )
-        )
+        return static_page()
 
     @app.get("/api/issues")
     async def issues_api(
@@ -1656,58 +1605,7 @@ def create_app(
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        active_tasks = desk.list_issue_status_queue()
-        active_draft_tasks = desk.list_issue_draft_processing_tasks()
-        recent_changes = desk.list_recent_issue_status_changes()
-        is_global_admin = administration.is_global_admin(actor)
-        recent_deletions = (
-            administration.list_content_deletions(actor) if is_global_admin else ()
-        )
-        task_cards = "".join(
-            _issue_draft_queue_card(item)
-            for item in active_draft_tasks
-        ) + "".join(
-            _status_queue_card(item, external_path) for item in active_tasks
-        ) or '<p class="empty">当前没有排队或执行中的任务。</p>'
-        task_count = len(active_tasks) + len(active_draft_tasks)
-        change_cards = "".join(
-            _recent_status_change_card(item, external_path) for item in recent_changes
-        ) or '<p class="empty">暂无状态变化记录。</p>'
-        deletion_cards = "".join(
-            _deletion_queue_card(item) for item in recent_deletions
-        ) or '<p class="empty">暂无删除记录。</p>'
-        deletion_section = (
-            f"""
-          <section class="queue-section panel">
-            <div class="section-heading"><h2>最近删除记录</h2><span>最多 50 条</span></div>
-            <div class="status-history">{deletion_cards}</div>
-          </section>
-            """
-            if is_global_admin
-            else ""
-        )
-        events_path = external_path("/issues")
-        queue_path = external_path("/status-queue")
-        body = f"""
-        <main class="status-queue-main">
-          <header class="topbar"><div><div class="eyebrow">问题工作台 · 后台任务</div>
-            <h1>异步任务队列</h1>
-            <p class="muted">这里显示 Agent 草稿整理、问题状态判定任务和管理员删除记录；页面每 5 秒自动刷新。</p></div>
-            <nav><a href="{queue_path}">立即刷新</a><a href="{events_path}">问题工作台</a></nav>
-          </header>
-          <section class="queue-section panel">
-            <div class="section-heading"><h2>当前任务</h2><span>显示 {task_count} 条，最多各 100 条</span></div>
-            <div class="queue-stack">{task_cards}</div>
-          </section>
-          <section class="queue-section panel">
-            <div class="section-heading"><h2>最近状态变化</h2><span>最多 50 条</span></div>
-            <div class="status-history">{change_cards}</div>
-          </section>
-          {deletion_section}
-        </main>
-        <script>window.setTimeout(() => window.location.reload(), 5000);</script>
-        """
-        return HTMLResponse(_page("异步任务队列", body, body_class="status-queue-page"))
+        return static_page()
 
     @app.get("/api/status-queue")
     async def status_queue_api(request: Request) -> JSONResponse:
@@ -1788,72 +1686,13 @@ def create_app(
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        try:
-            queues = issue_management.list_consult_queues(actor)
-            dev_teams = issue_management.list_dev_teams(actor)
-        except CaseDeskError as error:
-            raise _http_error(error) from error
-        if not queues:
-            raise _http_error(Forbidden("你没有可用的咨询队列权限，或所选咨询队列尚未绑定咨询群"))
-        queue_options = "".join(
-            f'<option value="{queue.id}">{escape(queue.name)}</option>' for queue in queues
-        )
-        dev_team_options = "".join(
-            f'<option value="{team.id}">{escape(team.name)}'
-            f"（经办人：{escape(team.lead_display_name or team.name)}）</option>"
-            for team in dev_teams
-        )
-        issue_module_options = _issue_module_options("")
-        issue_status_options = _issue_status_options("问题未回复")
-        body = f"""
-        <main class="create-main">
-          <a class="back-link" href="{external_path("/issues")}">← 返回问题中心</a>
-          <header class="page-heading"><div class="eyebrow">H5 问题中心</div>
-            <h1>创建新问题</h1><p class="muted">填写问题和客户信息，补充图片后直接交给研发跟进。</p></header>
-          <form class="panel create-form" method="post" action="{external_path("/legacy/events/new")}" enctype="multipart/form-data">
-            <h2>问题信息</h2>
-            <label>问题标题 <input name="title" required maxlength="512" placeholder="例如：订单提交后页面报错"></label>
-            <label>咨询经办显示名 <input name="consult_handler_name" required maxlength="256" placeholder="可填写姓名或团队内使用的称呼"></label>
-            <label>问题描述 <textarea name="description" required maxlength="20000" rows="6" placeholder="描述客户现象、发生时间、影响范围和复现步骤"></textarea></label>
-            <div class="form-row">
-              <label>怀疑类型（问题所属模块） <select name="suspected_type" required>{issue_module_options}</select></label>
-              <label>问题状态 <select name="issue_current_status" required>{issue_status_options}</select></label>
-            </div>
-            {_image_upload_controls()}
-            <label>客户 / 企业名称 <input name="customer_name" required maxlength="256" placeholder="例如：杭州某某科技"></label>
-            <label>客户群聊名称（选填） <input name="customer_group_name" maxlength="256" placeholder="客户所在企业微信群聊名称"></label>
-            <div class="form-row">
-              <label>联系人（选填） <input name="customer_contact_name" maxlength="256"></label>
-              <label>联系方式（选填） <input name="customer_contact_method" maxlength="256" placeholder="电话、邮箱或其他联系方法"></label>
-            </div>
-            <div class="form-row">
-              <label>紧急程度
-                <select name="priority">
-                  <option value="normal" selected>普通</option><option value="urgent">紧急</option>
-                  <option value="severe">严重</option>
-                </select>
-              </label>
-              <label>咨询团队 <select name="consult_queue_id" required>
-                <option value="" disabled selected>选择咨询团队</option>{queue_options}
-              </select></label>
-            </div>
-            <label>研发处理团队 <select name="dev_team_id" required>
-              <option value="" disabled selected>选择研发处理团队</option>{dev_team_options}
-            </select></label>
-            <label>截止时间（选填）
-              <input name="deadline" type="datetime-local" step="60">
-            </label>
-            <p class="muted">咨询经办显示名由本问题填写，独立于登录账号；研发经办显示名沿用团队设置。群聊路由按群绑定决定；仅与在岗成员明文 userid 精确匹配且属于当前绑定团队的发送人会作为时间线作者，不改变问题归属或 H5 权限。</p>
-            <p class="muted">描述文字必填，图片可选。截止时间按中国标准时间填写；留空时默认为创建后 3 小时。临近期限提醒默认提前 24 小时，创建后也可在详情中调整。</p>
-            <button class="primary" type="submit">创建并发送给研发</button>
-          </form>
-        </main>
-        """
-        return HTMLResponse(_page("创建问题", body, body_class="case-create-page"))
+        return static_page()
 
+    @app.post("/api/issues", include_in_schema=False)
     @app.post("/legacy/events/new", include_in_schema=False)
-    async def create_case_from_h5(request: Request) -> RedirectResponse:
-        actor = page_actor_or_login(request)
+    async def create_case_from_h5(request: Request) -> Response:
+        api_request = request.url.path == "/api/issues"
+        actor = actor_or_error(request) if api_request else page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
         form = await request.form()
@@ -1941,6 +1780,8 @@ def create_app(
         finally:
             await form.close()
         assert result.issue_number is not None
+        if api_request:
+            return JSONResponse({"issue_number": result.issue_number}, status_code=201)
         return RedirectResponse(external_path(f"/issues/{result.issue_number}"), status_code=303)
 
     @app.get("/issues/{issue_number}", response_class=HTMLResponse)
@@ -1966,92 +1807,9 @@ def create_app(
                     )
                 except Conflict:
                     pass
-                case = issue_management.get(issue_number, actor)
         except CaseDeskError as error:
             raise _http_error(error) from error
-        is_global_admin = administration.is_global_admin(actor)
-        can_use_side_selector = is_global_admin
-        deliveries_by_entry: dict[UUID, list[Any]] = {}
-        for delivery in case.deliveries:
-            deliveries_by_entry.setdefault(delivery.entry_id, []).append(delivery)
-        entries = "".join(
-            _render_entry(
-                case.issue_number,
-                entry,
-                external_path,
-                deliveries_by_entry.get(entry.id, ()),
-            )
-            for entry in case.entries
-        )
-        events_path = external_path("/issues")
-        message_form = _message_form(
-            case.issue_number,
-            case.version,
-            case.lifecycle_status,
-            external_path,
-            show_side=can_use_side_selector,
-        )
-        lifecycle_forms = _lifecycle_forms(case, external_path)
-        top_close_control = _top_close_control(case, external_path)
-        delete_control = _issue_delete_control(
-            case,
-            external_path,
-            is_global_admin=is_global_admin,
-        )
-        action_panel = (
-            f'<section class="action-panel panel">{message_form}{lifecycle_forms}</section>'
-            if message_form or lifecycle_forms
-            else ""
-        )
-        body = f"""
-        <main class="case-main">
-          <a class="back-link" href="{events_path}">← 返回问题工作台</a>
-          {top_close_control}
-          {delete_control}
-          <header class="case-titlebar">
-            <div><h1>{escape(case.title)}</h1></div>
-            <div class="case-state-badges">
-              {_deadline_badge(case.deadline_status)}
-              {_priority_badge(case.priority)}
-            </div>
-          </header>
-          <section class="issue-fields panel">
-            <h2>问题信息</h2>
-            <div class="issue-fields-grid">
-              <div class="issue-field issue-field-wide"><span>问题描述</span><p>{escape(case.issue_description or case.title)}</p></div>
-              <div class="issue-field"><span>初次受理组</span><strong>{escape(case.initial_acceptance_team_name or case.current_dev_team_name)}</strong></div>
-              <div class="issue-field"><span>研发归属团队</span><strong>{escape(case.current_dev_team_name)}</strong></div>
-              <div class="issue-field"><span>怀疑类型（问题所属模块）</span><strong>{escape(case.suspected_type or "未填写")}</strong></div>
-              <div class="issue-field"><span>现状说明</span><p>{escape(case.current_situation or "未填写")}</p></div>
-              <div class="issue-field"><span>问题状态</span>{_issue_current_status_control(case, external_path)}</div>
-              <div class="issue-field"><span>问题初次过期时间</span><strong>{_format_datetime(case.initial_expires_at or case.deadline)}</strong></div>
-              <div class="issue-field"><span>BUG 编号</span><strong>{escape(case.bug_number or "不适用")}</strong></div>
-              <div class="issue-field"><span>首次记录人</span><strong>{escape(case.first_recorder_name)}</strong></div>
-            </div>
-          </section>
-          <section class="case-overview panel">
-            <div class="case-overview-heading"><h2>客户与责任信息</h2>
-              <div class="updated-at">最近更新 {_format_datetime(case.updated_at)}</div></div>
-            <div class="case-meta-grid">
-              <div><span>客户 / 企业</span><strong>{escape(case.customer_name or "未录入")}</strong></div>
-              <div><span>客户群聊名称</span><strong>{escape(case.customer_group_name or "未获取")}</strong></div>
-              <div><span>咨询团队</span><strong>{escape(case.consult_queue_name)}</strong></div>
-              <div><span>创建时间</span><strong>{_format_datetime(case.created_at)}</strong></div>
-              <div><span>截止时间</span><strong>{_format_datetime(case.deadline)}</strong></div>
-              <div><span>临近期限提醒</span><strong>提前 {_duration_label(case.approaching_window_minutes)}</strong></div>
-            </div>
-          </section>
-          {_metadata_form(case, external_path)}
-          {_transfer_controls(case, external_path)}
-          {_deadline_controls(case, external_path)}
-          <section class="timeline-section">
-            <div class="section-heading"><h2>问题时间线</h2><span>{len(case.entries)} 条记录</span></div>
-            <div class="timeline">{entries}</div>
-          </section>
-          {action_panel}
-        </main>
-        """
-        return HTMLResponse(_page(case.title, body, body_class="case-detail-page"))
+        return static_page()
 
     @app.get("/api/issues/{issue_number}")
     async def issue_api(request: Request, issue_number: str) -> JSONResponse:
@@ -2367,6 +2125,203 @@ def create_app(
             raise _http_error(_as_case_desk_error(error)) from error
         return JSONResponse({"issue_number": result.issue_number, "version": result.version})
 
+    @app.post("/api/issues/{issue_number}/messages")
+    async def post_message_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            side_value = payload.get("side")
+            result = issue_management.execute(
+                PostFormalMessage(
+                    case_ref=issue_number,
+                    expected_version=int(payload["version"]),
+                    parts=(TextPart(_payload_text(payload, "text")),),
+                    intent=MessageIntent(
+                        payload.get("intent", MessageIntent.HANDOFF.value)
+                    ),
+                    side=EntrySide(str(side_value)) if side_value else None,
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.patch("/api/issues/{issue_number}/metadata")
+    async def update_issue_metadata_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            result = issue_management.execute(
+                UpdateCaseMetadata(
+                    case_ref=issue_number,
+                    expected_version=int(payload["version"]),
+                    customer_name=_payload_text(payload, "customer_name"),
+                    customer_group_name=_payload_text(payload, "customer_group_name"),
+                    customer_contact_name=_payload_text(payload, "customer_contact_name"),
+                    customer_contact_method=_payload_text(payload, "customer_contact_method"),
+                    priority=CasePriority(_payload_text(payload, "priority")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.patch("/api/issues/{issue_number}/issue-current-status")
+    async def update_issue_current_status_api(
+        request: Request, issue_number: str
+    ) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            result = issue_management.execute(
+                SetIssueCurrentStatus(
+                    case_ref=issue_number,
+                    expected_version=int(payload["version"]),
+                    issue_current_status=_payload_text(payload, "issue_current_status"),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.patch("/api/issues/{issue_number}/deadline")
+    async def update_issue_deadline_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            version = int(payload["version"])
+            deadline_text = payload.get("deadline")
+            if deadline_text is not None:
+                if not isinstance(deadline_text, str):
+                    raise ValidationError("截止时间格式无效")
+                deadline = _parse_local_deadline(deadline_text)
+                if deadline is None:
+                    raise ValidationError("请填写截止日期和时间")
+                command = SetCaseDeadline(
+                    case_ref=issue_number,
+                    expected_version=version,
+                    deadline=deadline,
+                )
+            else:
+                adjustment_minutes = _half_hour_hours_to_minutes(
+                    _payload_text(payload, "adjustment_hours"), "调整时长"
+                )
+                direction = payload.get("direction", "delay")
+                if direction == "advance":
+                    adjustment_minutes = -adjustment_minutes
+                elif direction != "delay":
+                    raise ValidationError("期限调整方向无效")
+                command = AdjustCaseDeadline(
+                    case_ref=issue_number,
+                    expected_version=version,
+                    adjustment_minutes=adjustment_minutes,
+                )
+            result = issue_management.execute(command, actor)
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.patch("/api/issues/{issue_number}/deadline/approaching-window")
+    async def update_issue_approaching_window_api(
+        request: Request, issue_number: str
+    ) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            result = issue_management.execute(
+                SetCaseApproachingWindow(
+                    case_ref=issue_number,
+                    expected_version=int(payload["version"]),
+                    approaching_window_minutes=_half_hour_hours_to_minutes(
+                        _payload_text(payload, "approaching_hours"), "临近期限提醒时间"
+                    ),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.post("/api/issues/{issue_number}/open")
+    async def open_issue_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        try:
+            case = issue_management.get(issue_number, actor)
+            if _can_auto_accept_case(case):
+                try:
+                    issue_management.execute(
+                        SetCaseStatus(
+                            case_ref=case.case_ref,
+                            expected_version=case.version,
+                            status=CaseStatus.IN_PROGRESS,
+                        ),
+                        actor,
+                    )
+                except Conflict:
+                    case = issue_management.get(issue_number, actor)
+                    if _can_auto_accept_case(case):
+                        issue_management.execute(
+                            SetCaseStatus(
+                                case_ref=case.case_ref,
+                                expected_version=case.version,
+                                status=CaseStatus.IN_PROGRESS,
+                            ),
+                            actor,
+                        )
+            case = issue_management.get(issue_number, actor)
+        except CaseDeskError as error:
+            raise _http_error(error) from error
+        return JSONResponse({"issue_number": case.issue_number, "version": case.version})
+
+    @app.patch("/api/issues/{issue_number}/status")
+    async def set_issue_status_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            result = issue_management.execute(
+                SetCaseStatus(
+                    case_ref=issue_number,
+                    expected_version=int(payload["version"]),
+                    status=CaseStatus(_payload_text(payload, "status")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.post("/api/issues/{issue_number}/close")
+    async def close_issue_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            result = issue_management.execute(
+                CloseCase(issue_number, int(payload["version"])), actor
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
+    @app.post("/api/issues/{issue_number}/reopen")
+    async def reopen_issue_api(request: Request, issue_number: str) -> JSONResponse:
+        actor = actor_or_error(request)
+        payload = await _json_object(request)
+        try:
+            result = issue_management.execute(
+                ReopenCase(
+                    case_ref=issue_number,
+                    expected_version=int(payload["version"]),
+                    waiting_on=WaitingOn(_payload_text(payload, "waiting_on")),
+                ),
+                actor,
+            )
+        except (CaseDeskError, ValueError, KeyError) as error:
+            raise _http_error(_as_case_desk_error(error)) from error
+        return JSONResponse({"issue_number": result.issue_number, "version": result.version})
+
     @app.get("/issues/{issue_number}/media/{media_id}", include_in_schema=False)
     async def issue_media(request: Request, issue_number: str, media_id: UUID) -> Response:
         actor = actor_or_error(request)
@@ -2488,304 +2443,16 @@ def _inspection_schedule_json(schedule: ManagedInspectionSchedule) -> dict[str, 
     return {"times": list(schedule.times), "timezone": schedule.timezone}
 
 
-def _admin_dashboard(
-    *,
-    actor: Actor,
-    overview: AdminOverview,
-    users: tuple[ManagedUser, ...],
-    member_options: tuple[ManagedUser, ...],
-    teams: tuple[ManagedTeam, ...],
-    schedule: ManagedInspectionSchedule,
-    query: str,
-    path_for: Callable[[str], str],
-) -> str:
-    admin_path = path_for("/admin")
-    events_path = path_for("/issues")
-    visible_users = tuple(user for user in member_options if user.active)
-    initialized_label = (
-        f"{overview.initialized_dev_team_count}/{overview.dev_team_count} 个研发群已绑定"
-        if overview.dev_team_count
-        else "暂未创建研发团队"
-    )
-    search_value = escape(query)
-
-    user_rows = (
-        "".join(_admin_user_row(user, path_for=path_for) for user in users)
-        or '<p class="empty">没有匹配的成员。</p>'
-    )
-    team_cards = (
-        "".join(_admin_team_card(team, users=visible_users, path_for=path_for) for team in teams)
-        or '<p class="empty">还没有团队，请先创建咨询团队或研发团队。</p>'
-    )
-    schedule_value = escape(", ".join(schedule.times))
-    return f"""
-    <header class="topbar admin-topbar">
-      <div>
-        <div class="eyebrow">H5 问题管理中心</div>
-        <h1>组织与授权</h1>
-        <p class="muted">总管理员：{escape(actor.user_id.hex[:8])} · 管理成员、团队与群聊路由</p>
-      </div>
-      <nav><a href="{events_path}">返回问题中心</a><a class="active" href="{admin_path}">管理设置</a></nav>
-    </header>
-    <main class="admin-main">
-      <section class="hero-banner">
-        <div><span class="status-dot"></span><strong>权限配置已启用</strong>
-          <p>先录入企业微信成员，再将成员加入咨询团队或研发团队；角色为“管理员”的成员可以处理本团队的交接和群绑定。</p>
-        </div>
-        <span class="badge badge-blue">总管理员</span>
-      </section>
-
-      <section class="stats-grid">
-        <div class="stat-card"><span>在岗成员</span><strong>{overview.active_user_count}</strong><small>共 {overview.user_count} 个身份</small></div>
-        <div class="stat-card"><span>咨询团队</span><strong>{overview.consult_queue_count}</strong><small>按团队隔离可见范围</small></div>
-        <div class="stat-card"><span>研发团队</span><strong>{overview.dev_team_count}</strong><small>{escape(initialized_label)}</small></div>
-        <div class="stat-card"><span>总管理员</span><strong>{overview.global_admin_count}</strong><small>至少保留 1 名在岗管理员</small></div>
-      </section>
-
-      <section class="panel inspection-settings" id="inspection-settings">
-        <div class="panel-heading"><div><div class="eyebrow">巡检推送</div><h2>每日时间点</h2></div><span class="count-pill">上海时间</span></div>
-        <p class="panel-intro">定时巡检使用上海时区。输入一个或多个 HH:mm 时间点，以逗号分隔；至少保留一个且不能重复。</p>
-        <form method="post" action="{path_for("/admin/inspection/schedule")}" class="inspection-schedule-form">
-          <label>每日巡检时间<input name="times" required value="{schedule_value}" placeholder="08:55, 11:30, 21:30"></label>
-          <button class="primary" type="submit">保存时间表</button>
-        </form>
-      </section>
-
-      <section class="admin-grid">
-        <div class="panel" id="users">
-          <div class="panel-heading"><div><div class="eyebrow">Step 1</div><h2>成员与总权限</h2></div><span class="count-pill">{overview.user_count}</span></div>
-          <p class="panel-intro">企业微信明文 userid 用于 H5 登录、账号级权限及群聊作者精确匹配。群聊绑定指令不校验发送人身份；群内路由按绑定侧别和问题标记决定，只有属于当前绑定团队的在岗成员会显示为个人作者。私聊 H5 交接及账号权限仍要求 OAuth 身份匹配登记成员。</p>
-          <form class="search-form" method="get" action="{admin_path}">
-            <input name="q" value="{search_value}" placeholder="搜索姓名或 userid">
-            <button type="submit">搜索</button>
-            {f'<a class="button-link" href="{admin_path}">清除</a>' if query else ""}
-          </form>
-          <details class="add-box" open>
-            <summary>＋ 新增企业成员</summary>
-            <form method="post" action="{path_for("/admin/users")}" class="form-grid">
-              <label>显示名称<input name="display_name" required maxlength="256" placeholder="例如 张三"></label>
-              <label>企业微信 userid<input name="wecom_userid" required maxlength="128" placeholder="例如 zhangsan"></label>
-              <label class="check-label"><input type="checkbox" name="is_global_admin"> 同时设为总管理员</label>
-              <button class="primary" type="submit">添加成员</button>
-            </form>
-          </details>
-          <div class="managed-list">{user_rows}</div>
-        </div>
-
-        <div class="panel" id="teams">
-          <div class="panel-heading"><div><div class="eyebrow">Step 2</div><h2>团队与授权</h2></div><span class="count-pill">{overview.team_count}</span></div>
-          <p class="panel-intro">咨询团队负责问题归属和咨询侧可见范围，并可绑定咨询群接收通知；研发团队负责问题路由和研发群消息转发，负责人姓名仅作展示，不关联成员账号。</p>
-          <details class="add-box" open>
-            <summary>＋ 新增团队</summary>
-            <form method="post" action="{path_for("/admin/teams")}" class="form-grid team-create-form">
-              <label>团队类型<select name="kind" data-team-kind-select="true"><option value="consult_queue">{_team_kind_label(TeamKind.CONSULT_QUEUE)}</option><option value="dev">{_team_kind_label(TeamKind.DEV)}</option></select></label>
-              <label>团队名称<input name="name" required maxlength="256" placeholder="例如 平台研发组"></label>
-              <label class="team-lead-display-name-field" hidden>研发负责人展示名<input name="lead_display_name" data-team-lead-input="true" maxlength="256" placeholder="仅显示，不关联企业微信成员" disabled></label>
-              <button class="primary" type="submit">创建团队</button>
-            </form>
-            {_team_create_form_script()}
-          </details>
-          <div class="managed-list">{team_cards}</div>
-          {_team_inspection_rule_script()}
-        </div>
-      </section>
-
-      <section class="permission-note">
-        <strong>授权规则</strong>
-          <span>成员 = 可查看和处理团队问题；团队管理员 = 可在本团队内执行交接、转交和群聊绑定；总管理员 = 可管理全组织并查看全部问题。</span>
-      </section>
-    </main>
-    """
 
 
-def _team_create_form_script() -> str:
-    return """
-    <script>
-    (() => {
-      const form = document.querySelector('.team-create-form');
-      const kind = form?.querySelector('[data-team-kind-select="true"]');
-      const leadField = form?.querySelector('.team-lead-display-name-field');
-      const leadInput = form?.querySelector('[data-team-lead-input="true"]');
-      if (!kind || !leadField || !leadInput) return;
-
-      const updateLeadField = () => {
-        const isDevTeam = kind.value === "dev";
-        leadField.hidden = !isDevTeam;
-        leadInput.disabled = !isDevTeam;
-      };
-
-      kind.addEventListener("change", updateLeadField);
-      updateLeadField();
-    })();
-    </script>
-    """
 
 
-def _admin_user_row(user: ManagedUser, *, path_for: Callable[[str], str]) -> str:
-    user_id = escape(str(user.id))
-    memberships = (
-        "".join(
-            f'<span class="tag {"tag-muted" if not membership.active else ""}">'
-            f"{escape(_team_kind_label(membership.team_kind))} · {escape(membership.team_name)} · "
-            f"{escape(_role_label(membership.role))}</span>"
-            for membership in user.memberships
-        )
-        or '<span class="muted">尚未加入团队</span>'
-    )
-    global_badge = '<span class="badge badge-amber">总管理员</span>' if user.is_global_admin else ""
-    active_badge = (
-        '<span class="badge badge-green">在岗</span>'
-        if user.active
-        else '<span class="badge badge-gray">已停用</span>'
-    )
-    checked_active = " checked" if user.active else ""
-    checked_admin = " checked" if user.is_global_admin else ""
-    return f"""
-    <details class="managed-row">
-      <summary><span class="avatar">{escape(user.display_name[:1])}</span><span class="user-summary"><strong>{escape(user.display_name)}</strong><small>{escape(user.wecom_userid)}</small></span>{active_badge}{global_badge}<span class="chevron">⌄</span></summary>
-      <div class="managed-detail">
-        <div class="tag-list">{memberships}</div>
-        <form method="post" action="{path_for(f"/admin/users/{user_id}")}" class="edit-form">
-          <label>显示名称<input name="display_name" required maxlength="256" value="{escape(user.display_name)}"></label>
-          <label class="check-label"><input type="checkbox" name="active"{checked_active}> 在岗，可登录</label>
-          <label class="check-label"><input type="checkbox" name="is_global_admin"{checked_admin}> 总管理员</label>
-          <button type="submit">保存成员权限</button>
-        </form>
-      </div>
-    </details>
-    """
 
 
-def _admin_team_card(
-    team: ManagedTeam,
-    *,
-    users: tuple[ManagedUser, ...],
-    path_for: Callable[[str], str],
-) -> str:
-    team_id = escape(str(team.id))
-    team_badge = _team_kind_label(team.kind)
-    status = (
-        '<span class="badge badge-green">启用</span>'
-        if team.active
-        else '<span class="badge badge-gray">已停用</span>'
-    )
-    checked = " checked" if team.active else ""
-    member_rows = (
-        "".join(_admin_team_member_row(team, member, path_for=path_for) for member in team.members)
-        or '<p class="empty">还没有授权成员。</p>'
-    )
-    options = (
-        "".join(
-            f'<option value="{escape(str(user.id))}">{escape(user.display_name)}（{escape(user.wecom_userid)}）</option>'
-            for user in users
-        )
-        or '<option value="">请先添加在岗成员</option>'
-    )
-    lead_editor = (
-        f'<label>负责人展示名<input name="lead_display_name" maxlength="256" '
-        f'value="{escape(team.lead_display_name or "")}" placeholder="仅显示，不关联成员账号"></label>'
-        if team.kind is TeamKind.DEV
-        else ""
-    )
-    age_checked = " checked" if team.inspection_age_hours is not None else ""
-    age_value = escape(str(team.inspection_age_hours or ""))
-    own_all_selected = " selected" if not team.inspection_own_only else ""
-    own_only_selected = " selected" if team.inspection_own_only else ""
-    channel = ""
-    if team.kind in (TeamKind.DEV, TeamKind.CONSULT_QUEUE):
-        chat_label = "研发群" if team.kind is TeamKind.DEV else "咨询群"
-        channel_value = escape(team.channel_chatid or "")
-        channel_status = (
-            f'<span class="muted">当前群：{channel_value}</span>'
-            if team.channel_initialized
-            else f'<span class="warning-text">尚未绑定{chat_label}</span>'
-        )
-        channel = f"""
-        <div class="channel-box"><div><strong>{chat_label}通道</strong>{channel_status}</div>
-          <form method="post" action="{path_for(f"/admin/teams/{team_id}/channel")}" class="inline-form">
-            <input name="chatid" required maxlength="256" value="{channel_value}" placeholder="粘贴企业微信群 chatid">
-            <button type="submit">绑定</button>
-          </form>
-        </div>
-        """
-    return f"""
-    <article class="team-card">
-      <div class="team-header"><div><span class="eyebrow">{escape(team_badge)}</span><h3>{escape(team.name)}</h3></div>{status}</div>
-      <form method="post" action="{path_for(f"/admin/teams/{team_id}")}" class="team-edit-form">
-        <input name="name" required maxlength="256" value="{escape(team.name)}">
-        {lead_editor}
-        <label class="check-label"><input type="checkbox" name="active"{checked}> 启用</label>
-        <button class="subtle-button" type="submit">保存</button>
-      </form>
-      <form method="post" action="{path_for(f"/admin/teams/{team_id}/delete")}" class="team-delete-form"
-        onsubmit="return confirm('删除该团队，并同时删除其关联的已关闭问题及未确认会话？如果仍有未关闭问题引用，此操作会被拒绝。此操作不可恢复。')">
-        <button class="danger-button" type="submit">删除团队及已关闭问题</button>
-      </form>
-      {channel}
-      <form method="post" action="{path_for(f"/admin/teams/{team_id}/inspection-rule")}" class="team-inspection-form" data-inspection-rule-form="true">
-        <strong>巡检筛选规则</strong>
-        <label class="inspection-age-toggle"><input type="checkbox" name="inspection_age_limited"{age_checked} data-inspection-age-toggle="true"> 创建超过</label>
-        <label class="inspection-hours-label"><input type="number" name="inspection_age_hours" min="1" step="1" value="{age_value}" placeholder="小时" data-inspection-hours="true">小时且仍未关闭</label>
-        <label>问题归属<select name="inspection_own_only"><option value="true"{own_only_selected}>仅本团队归属的问题</option><option value="false"{own_all_selected}>全部团队的问题</option></select></label>
-        <button class="subtle-button" type="submit">保存巡检规则</button>
-      </form>
-      <div class="member-heading"><strong>授权成员</strong><span>{sum(1 for member in team.members if member.active)} 人在岗</span></div>
-      <div class="member-list">{member_rows}</div>
-      <form method="post" action="{path_for(f"/admin/teams/{team_id}/members")}" class="add-member-form">
-        <select name="user_id" required>{options}</select>
-        <select name="role"><option value="member">成员</option><option value="admin">团队管理员</option></select>
-        <button type="submit">授权加入</button>
-      </form>
-    </article>
-    """
 
 
-def _team_inspection_rule_script() -> str:
-    return """
-    <script>
-    (() => {
-      document.querySelectorAll('[data-inspection-rule-form="true"]').forEach((form) => {
-        const toggle = form.querySelector('[data-inspection-age-toggle="true"]');
-        const hours = form.querySelector('[data-inspection-hours="true"]');
-        if (!toggle || !hours) return;
-        const update = () => {
-          hours.disabled = !toggle.checked;
-          hours.required = toggle.checked;
-        };
-        toggle.addEventListener('change', update);
-        update();
-      });
-    })();
-    </script>
-    """
 
 
-def _admin_team_member_row(
-    team: ManagedTeam,
-    member: ManagedTeamMember,
-    *,
-    path_for: Callable[[str], str],
-) -> str:
-    team_id = escape(str(team.id))
-    user_id = escape(str(member.user_id))
-    active = (
-        '<span class="status-dot small"></span>'
-        if member.active
-        else '<span class="status-dot small off"></span>'
-    )
-    role = _role_label(member.role)
-    return f"""
-    <div class="member-row"><div>{active}<span><strong>{escape(member.display_name)}</strong><small>{escape(member.wecom_userid)} · {escape(role)}</small></span></div>
-      <div class="member-actions">
-        <form method="post" action="{path_for(f"/admin/teams/{team_id}/members")}" class="role-form">
-          <input type="hidden" name="user_id" value="{user_id}">
-          <select name="role"><option value="member"{" selected" if member.role is MembershipRole.MEMBER else ""}>成员</option><option value="admin"{" selected" if member.role is MembershipRole.ADMIN else ""}>管理员</option></select>
-          <button class="subtle-button" type="submit">保存</button>
-        </form>
-        <form method="post" action="{path_for(f"/admin/teams/{team_id}/members/{user_id}/remove")}"><button class="danger-button" type="submit">移除</button></form>
-      </div>
-    </div>
-    """
 
 
 def _team_kind_label(kind: TeamKind) -> str:
@@ -2796,118 +2463,6 @@ def _team_kind_label(kind: TeamKind) -> str:
     return labels.get(kind, kind.value)
 
 
-def _inspection_control_parts(
-    path_for: Callable[[str], str],
-    *,
-    selectable: bool = True,
-) -> tuple[str, str]:
-    if not selectable:
-        button = (
-            '<button class="primary inspection-run-button" type="button" '
-            'data-inspection-team-run="true">立刻巡检</button>'
-        )
-        status_and_script = f"""
-        <p class="muted inspection-run-status" data-inspection-status="true" role="status" aria-live="polite" hidden></p>
-        <script>
-        (() => {{
-          const button = document.querySelector('[data-inspection-team-run="true"]');
-          const status = document.querySelector('[data-inspection-status="true"]');
-          if (!button || !status) return;
-          button.addEventListener('click', async () => {{
-            if (button.disabled) return;
-            button.disabled = true;
-            status.hidden = false;
-            status.textContent = '正在巡检所管理的团队群聊…';
-            try {{
-              const response = await fetch({path_for("/api/issues/inspection/run")!r}, {{
-                method: 'POST',
-                headers: {{ 'Accept': 'application/json' }}
-              }});
-              const result = await response.json().catch(() => ({{}}));
-              if (!response.ok) throw new Error(result.detail || '巡检失败，请稍后重试。');
-              status.textContent =
-                `巡检完成：扫描 ${{result.scanned_issues}} 个未关闭问题，` +
-                `已加入推送队列 ${{result.summary_messages}} 条。`;
-            }} catch (error) {{
-              status.textContent = error.message || '巡检失败，请稍后重试。';
-            }} finally {{
-              button.disabled = false;
-            }}
-          }});
-        }})();
-        </script>
-        """
-        return button, status_and_script
-
-    options = "".join(
-        f'<label class="inspection-kind-option"><input type="checkbox" name="team_kinds" '
-        f'value="{escape(kind.value)}" checked> {escape(_team_kind_label(kind))}</label>'
-        for kind in TeamKind
-    )
-    button = (
-        '<button class="primary inspection-run-button" type="button" '
-        'data-inspection-open="true">立刻巡检</button>'
-    )
-    dialog = f"""
-    <dialog class="inspection-dialog" data-inspection-dialog="true" aria-labelledby="inspection-dialog-title">
-      <h2 id="inspection-dialog-title">选择巡检群聊类型</h2>
-      <p>每个群仍按该团队设置的巡检规则筛选问题。</p>
-      <fieldset><legend tabindex="-1">群聊类型（至少选择一种）</legend>{options}</fieldset>
-      <p class="inspection-choice-error" data-inspection-choice-error="true" role="alert" hidden>请至少选择一种群聊类型。</p>
-      <div class="inspection-dialog-actions">
-        <button type="button" data-inspection-cancel="true">取消</button>
-        <button class="primary" type="button" data-inspection-submit="true">开始巡检</button>
-      </div>
-    </dialog>
-    <p class="muted inspection-run-status" data-inspection-status="true" role="status" aria-live="polite" hidden></p>
-    <script>
-    (() => {{
-      const openButton = document.querySelector('[data-inspection-open="true"]');
-      const dialog = document.querySelector('[data-inspection-dialog="true"]');
-      const cancelButton = dialog?.querySelector('[data-inspection-cancel="true"]');
-      const submitButton = dialog?.querySelector('[data-inspection-submit="true"]');
-      const status = document.querySelector('[data-inspection-status="true"]');
-      const choiceError = dialog?.querySelector('[data-inspection-choice-error="true"]');
-      if (!openButton || !dialog || !submitButton || !status) return;
-      openButton.addEventListener('click', () => dialog.showModal());
-      cancelButton?.addEventListener('click', () => dialog.close());
-      submitButton.addEventListener('click', async () => {{
-        const teamKinds = Array.from(
-          dialog.querySelectorAll('input[name="team_kinds"]:checked'),
-          (input) => input.value
-        );
-        if (!teamKinds.length) {{
-          if (choiceError) choiceError.hidden = false;
-          dialog.querySelector('legend')?.focus();
-          return;
-        }}
-        if (choiceError) choiceError.hidden = true;
-        submitButton.disabled = true;
-        status.hidden = false;
-        status.textContent = '正在执行巡检…';
-        try {{
-          const response = await fetch({path_for("/api/issues/inspection/run")!r}, {{
-            method: 'POST',
-            headers: {{ 'Accept': 'application/json', 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ team_kinds: teamKinds }})
-          }});
-          const result = await response.json().catch(() => ({{}}));
-          if (!response.ok) throw new Error(result.detail || '巡检失败，请稍后重试。');
-          status.textContent =
-            `巡检完成：扫描 ${{result.scanned_issues}} 个未关闭问题，` +
-            `已加入推送队列 ${{result.summary_messages}} 条，` +
-            `${{result.unresolved_targets}} 个群聊路由未解析。`;
-          dialog.close();
-        }} catch (error) {{
-          status.textContent = error.message || '巡检失败，请稍后重试。';
-        }} finally {{
-          submitButton.disabled = false;
-        }}
-      }});
-    }})();
-    </script>
-    """
-    return button, dialog
 
 
 def _role_label(role: MembershipRole) -> str:
@@ -2948,45 +2503,8 @@ def _case_filter_for_state(state: str, priority: str = "", query: str = "") -> C
     )
 
 
-def _event_filter_url(path: str, state: str, priority: str, query: str = "") -> str:
-    values = {"state": state if state in {"mine", "dev", "open", "closed"} else "open"}
-    if priority:
-        values["priority"] = CasePriority(priority).value
-    if query.strip():
-        values["q"] = query.strip()
-    return f"{path}?{urlencode(values)}"
 
 
-def _issue_access_notice(notice: str | None) -> str:
-    messages = {
-        "missing_consult_queue": (
-            "当前账号没有可用的咨询队列，或咨询队列尚未绑定企业微信群聊，暂时无法新建问题。"
-            "已为你打开问题列表。"
-        ),
-        "missing_dev_team": "当前没有已绑定群聊的研发受理组，暂时无法新建问题。已为你打开问题列表。",
-    }
-    message = messages.get(notice or "")
-    if message is None:
-        return ""
-    return f"""
-    <aside class="flash-notice" data-flash-notice="true" role="status" aria-live="polite">
-      <span>{escape(message)}</span>
-      <button type="button" data-flash-notice-close="true" aria-label="关闭提醒">×</button>
-    </aside>
-    <script>
-    (() => {{
-      const notice = document.querySelector('[data-flash-notice="true"]');
-      if (!notice) return;
-      const url = new URL(window.location.href);
-      url.searchParams.delete('notice');
-      window.history.replaceState(null, '', url.pathname + url.search + url.hash);
-      notice.querySelector('[data-flash-notice-close="true"]')?.addEventListener(
-        'click', () => notice.remove(), {{ once: true }}
-      );
-      window.setTimeout(() => notice.remove(), 5000);
-    }})();
-    </script>
-    """
 
 
 async def _urlencoded_form(request: Request) -> dict[str, str]:
@@ -3077,38 +2595,16 @@ def _browser_forbidden_response(
     if should_return:
         target = _add_forbidden_return_marker(target)
 
-    message = escape(detail)
-    issue_list_path = escape(fallback_path, quote=True)
-    if should_return:
-        safe_target = escape(target, quote=True)
-        action_links = f'<a href="{safe_target}">返回上一页</a>'
-        script = (
-            f"window.alert({_script_json(detail)});"
-            f"window.location.replace({_script_json(target)});"
-        )
-    else:
-        action_links = (
-            '<button type="button" onclick="window.history.back()">返回上一页</button>'
-            f'<a href="{issue_list_path}">打开问题列表</a>'
-        )
-        script = f"window.alert({_script_json(detail)});"
-
     response_headers = {"Cache-Control": "no-store"}
     response_headers.update(headers or {})
+    page = _static_page_content("forbidden.html")
+    page = page.replace("__KEFU_BASE_PATH__", mount_path)
+    page = page.replace("__KEFU_FORBIDDEN_MESSAGE__", escape(detail, quote=True))
+    page = page.replace("__KEFU_FORBIDDEN_TARGET__", escape(target, quote=True))
+    page = page.replace("__KEFU_FORBIDDEN_RETURN__", "true" if should_return else "false")
+    page = page.replace("__KEFU_ISSUE_LIST__", escape(fallback_path, quote=True))
     return HTMLResponse(
-        content=(
-            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-            '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            "<title>权限不足</title><style>"
-            "body{font:16px -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;"
-            "max-width:600px;margin:10vh auto;padding:24px;color:#172033;background:#f5f7fb}"
-            ".card{padding:24px;border:1px solid #e2e8f0;border-radius:14px;background:#fff}"
-            "p{line-height:1.6;color:#475467;white-space:pre-wrap}"
-            "a,button{display:inline-block;margin:8px 12px 0 0;color:#155eef;font:inherit}"
-            "</style></head><body><main class=\"card\"><h1>权限不足</h1>"
-            f"<p>{message}</p><nav>{action_links}</nav></main>"
-            f"<script>{script}</script></body></html>"
-        ),
+        content=page,
         status_code=403,
         headers=response_headers,
     )
@@ -3160,852 +2656,16 @@ def _add_forbidden_return_marker(path: str) -> str:
     return urlunsplit(("", "", parsed.path, urlencode(query), ""))
 
 
-def _script_json(value: str) -> str:
-    return (
-        json.dumps(value, ensure_ascii=False)
-        .replace("&", "\\u0026")
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
-        .replace("\u2028", "\\u2028")
-        .replace("\u2029", "\\u2029")
-    )
 
 
-_WORKBENCH_CSS = """
-:root {
-  color-scheme: light;
-  --ink: #18243a;
-  --muted: #66758c;
-  --line: #e0e7f0;
-  --surface: #ffffff;
-  --page: #f2f5f9;
-  --blue: #285fe8;
-  --blue-soft: #edf3ff;
-  --green: #087a54;
-  --amber: #9a5b00;
-  --red: #b42318;
-}
-* { box-sizing: border-box; }
-body {
-  max-width: 1040px;
-  padding: 24px;
-  color: var(--ink);
-  background: var(--page);
-  line-height: 1.55;
-}
-body.event-page { max-width: 1180px; padding: 30px 28px 48px; }
-body.case-detail-page, body.case-create-page { max-width: 980px; padding: 26px 24px 48px; }
-body.status-queue-page { max-width: 1120px; padding: 30px 28px 48px; }
-body.admin-page { max-width: 1200px; background: var(--page); }
-body.setup-page { max-width: 100%; min-height: 100vh; padding: 24px; background: #edf3ff; }
-h1 { color: var(--ink); }
-h2 { color: #23344f; }
-.muted, .case-card small { color: var(--muted); }
-.topbar { align-items: center; margin-bottom: 22px; }
-.topbar h1 { margin: 4px 0 0; font-size: 30px; }
-.topbar nav { gap: 5px; }
-.topbar nav a {
-  padding: 8px 11px;
-  border-radius: 9px;
-  color: #52627b;
-  font-size: 13px;
-  font-weight: 650;
-}
-.topbar nav a.active, .topbar nav a:hover { color: var(--blue); background: var(--blue-soft); }
-.topbar nav .nav-create { color: #fff; background: var(--blue); }
-.topbar nav .nav-create:hover { color: #fff; background: #174bc4; }
-.overview-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
-.overview-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); box-shadow: 0 5px 18px #162a4608; }
-.overview-card span { color: var(--muted); font-size: 13px; font-weight: 650; }
-.overview-card strong { color: var(--ink); font-size: 24px; line-height: 1; font-variant-numeric: tabular-nums; }
-.filter-panel, .panel, .case-card, .case-overview, .metadata-editor {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
-  box-shadow: 0 5px 18px #162a4608;
-}
-.filter-panel { padding: 13px 16px; margin-bottom: 16px; }
-.issue-search-form { display: flex; align-items: center; gap: 8px; margin-bottom: 13px; }
-.issue-search-form input { flex: 1; min-width: 0; margin: 0; }
-.issue-search-form button, .issue-search-form .button-link { flex: 0 0 auto; margin: 0; }
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.filter-label { color: var(--muted); font-size: 12px; font-weight: 700; margin-bottom: 6px; }
-.priority-filters { display: flex; gap: 6px; margin: 0; }
-.priority-filters a { padding: 5px 9px; border-radius: 8px; color: #58667b; font-size: 13px; }
-.priority-filters a.active, .priority-filters a:hover { color: var(--blue); background: var(--blue-soft); }
-.event-list { max-width: none; display: grid; gap: 11px; }
-.case-card {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 16px 18px;
-  box-shadow: 0 3px 12px #162a4607;
-  transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease;
-}
-.case-card:hover { border-color: #b6c9f3; box-shadow: 0 8px 20px #162a4610; transform: translateY(-1px); }
-.case-card-link { display: grid; gap: 8px; color: inherit; text-decoration: none; }
-.case-card-link:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; border-radius: 6px; }
-.case-card-auto-accept { position: relative; }
-.case-card-hitbox { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; padding: 0; border: 0; border-radius: 14px; color: transparent; background: transparent; cursor: pointer; }
-.case-card-hitbox:hover { border-color: transparent; background: transparent; }
-.case-card-hitbox:focus-visible { outline: 3px solid #9db8ff; outline-offset: 3px; }
-.case-card-content { display: grid; gap: 8px; pointer-events: none; }
-.case-card-top, .case-card-meta, .case-card-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.case-card-title { font-size: 16px; font-weight: 750; line-height: 1.4; }
-.case-customer { font-size: 13px; color: #41516a; }
-.case-card-meta { justify-content: space-between; font-size: 12px; }
-.case-ref { font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #7c8aa0; }
-.status-badge, .delivery-badge, .entry-intent {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 9px; border-radius: 999px;
-  font-size: 11px; font-weight: 750; white-space: nowrap;
-}
-.status-open { color: #075985; background: #e0f2fe; }
-.status-closed { color: #58667b; background: #edf0f4; }
-.case-status-pending { color: #805000; background: #fff2cc; }
-.case-status-progress { color: #087a54; background: #e5f7ef; }
-.case-status-feedback { color: #155eef; background: #eaf1ff; }
-.case-status-suspended { color: #6941c6; background: #f2edff; }
-.issue-current-status { color: #344054; background: #eef2f6; }
-.issue-status-no-reply { color: #175cd3; background: #eff8ff; }
-.issue-status-resolved { color: #067647; background: #ecfdf3; }
-.issue-status-pending-info { color: #b42318; background: #fef3f2; }
-.issue-status-upgrade-follow-up { color: #6941c6; background: #f4f3ff; }
-.issue-status-request-pending { color: #0e7490; background: #ecfeff; }
-.issue-status-unresolvable { color: #b54708; background: #fff4ed; }
-.deadline-approaching { color: #9a5b00; background: #fff2cc; }
-.deadline-overdue { color: #b42318; background: #fee4e2; }
-.priority-normal { color: #58667b; background: #edf0f4; }
-.priority-urgent { color: #9a5b00; background: #fff2cc; }
-.priority-severe { color: #b42318; background: #fee4e2; }
-.back-link { display: inline-block; margin-bottom: 14px; color: #52627b; font-size: 13px; font-weight: 650; }
-.back-link:hover { color: var(--blue); }
-.page-heading { margin-bottom: 18px; }
-.page-heading h1 { margin: 4px 0; }
-.case-titlebar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 2px 0 18px; }
-.case-titlebar h1 { margin: 0; font-size: 27px; line-height: 1.25; }
-.case-state-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.top-close-control { margin: 0 0 12px; }
-.top-close-control button.status-action-close { min-height: 40px; padding: 8px 15px; border: 1px solid transparent; border-radius: 9px; color: #fff; background: #b42318; font-size: 13px; font-weight: 750; }
-.top-close-control button.status-action-close:hover:not(:disabled) { background: #8f1c13; }
-.case-overview { padding: 18px 20px; }
-.case-overview-heading, .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.case-overview-heading h2, .section-heading h2 { margin-bottom: 13px; font-size: 17px; }
-.updated-at, .section-heading span { color: var(--muted); font-size: 12px; }
-.case-meta-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px 20px; }
-.case-meta-grid div { min-width: 0; }
-.case-meta-grid span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
-.case-meta-grid strong { display: block; overflow-wrap: anywhere; font-size: 13px; }
-.transfer-controls, .deadline-controls { margin-top: 12px; padding: 18px 20px; }
-.transfer-controls h2, .deadline-controls h2 { margin: 0 0 5px; font-size: 16px; }
-.transfer-controls-intro, .deadline-controls-intro { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
-.transfer-control-grid, .deadline-control-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.transfer-control-card, .deadline-control-card { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfe; }
-.transfer-control-card h3, .deadline-control-card h3 { margin: 0 0 5px; color: #23344f; font-size: 14px; }
-.transfer-control-card p, .deadline-control-card p { margin: 0 0 11px; color: var(--muted); font-size: 12px; }
-.transfer-control-card form, .deadline-control-card form { display: grid; gap: 11px; min-width: 0; margin: 0; }
-.transfer-control-card label, .deadline-control-card label { display: grid; gap: 5px; font-size: 13px; font-weight: 650; }
-.transfer-control-card select, .deadline-control-card select, .deadline-control-card input { width: 100%; min-height: 40px; padding: 8px 10px; }
-.deadline-control-card .muted { margin: 0; }
-.transfer-control-empty { padding: 10px 12px; border-radius: 9px; background: #f1f4f8; }
-.transfer-controls button { justify-self: start; }
-.metadata-editor { margin-top: 12px; padding: 0 16px; }
-.metadata-editor summary { padding: 13px 0; cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 700; }
-.metadata-editor form { border-top: 1px solid var(--line); padding: 6px 0 14px; }
-.metadata-editor[open] summary { border-bottom: 1px solid var(--line); }
-.form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.create-main { max-width: 760px; margin: 0 auto; }
-.source-panel, .create-form { padding: 18px 20px; margin: 12px 0; }
-.source-panel h2, .create-form h2 { font-size: 16px; margin-bottom: 13px; }
-.create-form label, .metadata-editor label { font-size: 13px; }
-.intake-review-page .create-form { display: grid; gap: 10px; padding: 16px; }
-.intake-review-page .create-form > label { margin: 0; }
-.intake-review-page .create-form > button { justify-self: start; margin: 0; }
-.intake-review-hint { margin: -5px 0 0; font-size: 12px; }
-.intake-key-fields { display: grid; grid-template-columns: 1.1fr 1.1fr 1fr .85fr; align-items: end; gap: 10px; }
-.intake-key-fields label { min-width: 0; margin: 0; }
-.intake-readonly-field { display: grid; grid-template-rows: auto 42px; gap: 5px; min-width: 0; color: #344054; font-size: 13px; font-weight: 600; }
-.intake-readonly-field span { color: var(--ink); }
-.intake-readonly-field strong { display: flex; align-items: center; min-width: 0; padding: 0 10px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 9px; background: #f8fafc; color: #52627b; font-size: 13px; font-weight: 500; }
-.issue-intake-page { min-height: 100vh; display: grid; align-items: center; }
-.issue-intake-page .intake-page { width: 100%; }
-.intake-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
-.intake-heading h1 { margin: 0; font-size: 22px; }
-.intake-heading-actions { display: flex; align-items: center; gap: 8px; }
-.intake-heading-actions button { margin: 0; white-space: nowrap; }
-.intake-back-link { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; color: #52627b; background: #fff; font-size: 13px; font-weight: 650; }
-.intake-back-link:hover { border-color: #b6c9f3; color: var(--blue); background: var(--blue-soft); }
-.intake-form { padding: 14px; margin: 0; }
-.intake-form > textarea { min-height: min(38vh, 340px); margin: 0; padding: 14px; resize: vertical; }
-.intake-form > textarea::placeholder { color: #98a2b3; }
-.intake-form > textarea.drag-active { border-color: #155eef; background: #eff4ff; box-shadow: 0 0 0 3px #dce8ff; }
-.intake-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 9px; }
-.intake-actions button { min-width: 88px; margin: 0; font-weight: 700; }
-.intake-queue { margin: 0; }
-.intake-queue select { width: auto; max-width: 220px; min-height: 40px; margin: 0; padding: 7px 28px 7px 10px; font-size: 13px; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.image-upload-control.intake-image-control { position: relative; margin: 0 auto 0 0; }
-.intake-image-control > label { display: inline-flex; align-items: center; min-height: 40px; margin: 0; padding: 7px 11px; border: 1px solid var(--line); border-radius: 9px; color: #34445d; background: #fff; font-weight: 650; cursor: pointer; }
-.intake-image-control > label:hover { background: #f8fafc; border-color: #98a2b3; }
-.intake-image-control > label:focus-within { outline: 3px solid #dce8ff; border-color: #789af2; }
-.intake-image-control .intake-image-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.intake-image-control .image-upload-list { margin: 8px 0 0; }
-.intake-image-control .image-upload-error { max-width: 420px; margin: 5px 0 0; }
-.intake-form .draft-submit-status { margin-bottom: 0; }
-.image-upload-control { margin: 12px 0; }
-.image-upload-control > label { margin-bottom: 5px; }
-.image-upload-control input[type="file"] { margin-top: 0; }
-.image-drop-zone { margin-top: 8px; padding: 18px; border: 1px dashed #98a2b3; border-radius: 10px; background: #fbfcff; color: #667085; text-align: center; }
-.image-drop-zone.drag-active { border-color: #155eef; background: #eff4ff; color: #155eef; }
-.intake-source { margin: 0; padding: 0 12px; box-shadow: none; }
-.intake-source summary { padding: 10px 0; color: var(--blue); font-size: 13px; font-weight: 700; cursor: pointer; }
-.intake-source[open] summary { border-bottom: 1px solid var(--line); }
-.intake-source-content { padding: 8px 0 10px; }
-.intake-source-content > .muted { margin: 0 0 8px; }
-.intake-part { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
-.intake-image { display: block; max-height: 420px; margin: 10px auto; object-fit: contain; }
-.intake-secondary { margin-top: 16px; }
-.image-upload-hint { margin: 5px 0 0; font-size: 12px; }
-.image-upload-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
-.image-upload-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; font-size: 12px; }
-.image-upload-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.image-upload-remove { flex: 0 0 auto; min-height: 30px; margin: 0; padding: 4px 8px; font-size: 12px; }
-.image-upload-error { margin: 7px 0 0; color: var(--red); font-size: 12px; }
-.timeline-section { margin-top: 24px; }
-.section-heading { border-bottom: 1px solid var(--line); margin-bottom: 8px; }
-.timeline { position: relative; padding: 4px 0 4px 20px; }
-.timeline::before { content: ""; position: absolute; top: 11px; bottom: 20px; left: 5px; width: 2px; background: #e4eaf2; }
-.entry {
-  position: relative;
-  margin: 13px 0;
-  padding: 13px 15px;
-  border: 1px solid var(--line);
-  border-left: 3px solid #8fb5ff;
-  border-radius: 11px;
-  background: #fff;
-}
-.entry::before { content: ""; position: absolute; top: 17px; left: -22px; width: 9px; height: 9px; border: 2px solid #fff; border-radius: 50%; background: #5b85ed; box-shadow: 0 0 0 1px #b4c7f5; }
-.entry.side-dev { border-left-color: #47a87b; }
-.entry.side-dev::before { background: #26a269; box-shadow: 0 0 0 1px #a4d8bd; }
-.entry.system { border-left-color: #b3bdca; background: #f9fafc; }
-.entry.system::before { background: #8592a5; box-shadow: 0 0 0 1px #c4ccd7; }
-.entry-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.entry-author { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.entry-author strong { font-size: 13px; }
-.entry-author span, .entry-heading time { color: var(--muted); font-size: 11px; }
-.entry-heading time { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-.entry-chips { display: flex; gap: 5px; flex-wrap: wrap; margin: 7px 0; }
-.delivery-badge { padding: 3px 7px; font-size: 10px; }
-.delivery-pending { color: #805000; background: #fff2cc; }
-.delivery-sent { color: #087a54; background: #e5f7ef; }
-.delivery-failed { color: #b42318; background: #fee4e2; }
-.entry-intent { padding: 3px 7px; color: #52627b; background: #eef1f5; font-size: 10px; }
-.entry-description { margin: 6px 0 2px; color: #52627b; font-size: 12px; }
-.entry-content .part { margin: 8px 0; line-height: 1.65; overflow-wrap: anywhere; }
-.entry-content img { display: block; max-height: 460px; margin: 9px 0; object-fit: contain; }
-.status-queue-main { max-width: 1040px; margin: 0 auto; }
-.queue-section { padding: 18px 20px; margin: 14px 0; }
-.queue-stack, .status-history { display: grid; gap: 9px; }
-.queue-card, .status-change-card { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfe; }
-.queue-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.queue-card-heading a, .status-change-card a { color: var(--ink); font-size: 13px; font-weight: 750; overflow-wrap: anywhere; }
-.queue-card p, .status-change-card p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
-.queue-error { color: var(--red) !important; overflow-wrap: anywhere; }
-.draft-submit-status { display: flex; align-items: center; gap: 9px; margin: 11px 0 0; font-size: 13px; }
-.draft-submit-status[hidden] { display: none; }
-.draft-loading-spinner { width: 16px; height: 16px; flex: 0 0 auto; border: 2px solid #c8d7ff; border-top-color: var(--blue); border-radius: 50%; animation: draft-spin .8s linear infinite; }
-button.primary:disabled { opacity: .72; cursor: wait; }
-@keyframes draft-spin { to { transform: rotate(360deg); } }
-.queue-state { flex: 0 0 auto; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; }
-.queue-pending { color: #805000; background: #fff2cc; }
-.queue-processing { color: #155eef; background: #eaf1ff; }
-.queue-retry { color: #b42318; background: #fee4e2; }
-.queue-completed { color: #087a54; background: #e5f7ef; }
-.status-change-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.status-change-card > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.status-change-field { padding: 3px 7px; border-radius: 999px; color: #52627b; background: #eef1f5; font-size: 10px; font-weight: 700; }
-.status-change-card p { margin: 0; color: #34445d; white-space: nowrap; }
-.status-change-card small { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
-.action-panel { padding: 18px 20px; margin-top: 20px; }
-.action-panel section h2 { font-size: 16px; }
-.action-panel form { margin: 0; }
-.action-panel form + form { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
-.empty { padding: 28px 18px; border: 1px dashed #cbd5e1; border-radius: 12px; text-align: center; background: #fff; }
-.admin-main { max-width: 1160px; }
-.setup-card { border-color: var(--line); box-shadow: 0 14px 40px #203b690e; }
-button, .button-link { min-height: 40px; border-radius: 9px; }
-input, select, textarea { border-color: #cbd5e1; border-radius: 9px; }
-input:focus, select:focus, textarea:focus { outline: 3px solid #dce8ff; border-color: #789af2; }
-button.primary { background: var(--blue); }
-@media (max-width: 760px) {
-  body.event-page, body.case-detail-page, body.case-create-page, body.status-queue-page { padding: 18px 14px 34px; }
-  .topbar { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .topbar nav { justify-content: flex-start; margin: 0; }
-  .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-  .overview-card { padding: 12px; }
-  .case-titlebar { flex-direction: column; }
-  .case-state-badges { justify-content: flex-start; }
-  .case-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .transfer-control-grid, .deadline-control-grid { grid-template-columns: 1fr; }
-  .form-row { grid-template-columns: 1fr; gap: 0; }
-  .intake-key-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 480px) {
-  body { padding: 16px 12px; }
-  .topbar h1 { font-size: 26px; }
-  .topbar nav { gap: 2px; }
-  .topbar nav a { padding: 7px 8px; font-size: 12px; }
-  .priority-filters { gap: 2px; }
-  .priority-filters a { padding: 5px 7px; font-size: 12px; }
-  .case-card { padding: 14px; }
-  .case-meta-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .case-overview, .source-panel, .create-form, .action-panel, .transfer-controls, .deadline-controls { padding: 15px; }
-  .entry { padding: 11px 12px; }
-  .entry-heading { flex-direction: column; gap: 2px; }
-  .entry-heading time { font-size: 10px; }
-  .case-card-meta { align-items: flex-start; flex-direction: column; }
-  .status-change-card { align-items: flex-start; flex-direction: column; gap: 5px; }
-  .status-change-card p { white-space: normal; }
-}
-"""
 
 
-def _wecom_group_context_scripts(config_url: str) -> str:
-    """Return a best-effort WeCom toolbar lookup script for the intake form."""
-    config_url_literal = json.dumps(config_url).replace("<", "\\u003c")
-    return """
-    <script>
-    (() => {
-      const configEndpoint = __CONFIG_URL__;
-      const sdkScripts = [
-        'https://res.wx.qq.com/open/js/jweixin-1.2.0.js',
-        'https://open.work.weixin.qq.com/wwopen/js/jwxwork-1.0.0.js'
-      ];
-      const loadScript = (src) => new Promise((resolve, reject) => {
-        if (document.querySelector(`script[src="${src}"]`)) {
-          if (window.wx) { resolve(); return; }
-        }
-        const script = document.createElement('script');
-        script.src = src;
-        script.async = true;
-        script.onload = resolve;
-        script.onerror = reject;
-        document.head.appendChild(script);
-      });
-      const invoke = (method) => new Promise((resolve) => {
-        let finished = false;
-        const timer = window.setTimeout(() => finish(null), 4000);
-        const finish = (value) => {
-          if (finished) return;
-          finished = true;
-          window.clearTimeout(timer);
-          resolve(value);
-        };
-        try {
-          window.wx.invoke(method, {}, (result) => finish(result || null));
-        } catch (_) {
-          finish(null);
-        }
-      });
-      window.getWeComCustomerGroupId = () => {
-        const emptyResult = (status, error = '') => ({ chatId: '', status, error });
-        const sanitizeSdkError = (value) => typeof value === 'string'
-          ? value.replace(/[^A-Za-z0-9_.:-]+/g, '_').slice(0, 100)
-          : '';
-        const sdkErrorDetail = (result, method) => {
-          const value = result && (result.err_msg || result.errMsg || result.errmsg);
-          if (typeof value === 'string' && value) return sanitizeSdkError(value);
-          const keys = result && typeof result === 'object'
-            ? Object.keys(result).sort().slice(0, 8).join('_')
-            : 'no_result_object';
-          return `sdk_error_field_empty_keys_${sanitizeSdkError(keys) || 'none'}_${method}`;
-        };
-        const sdkCallSucceeded = (result, method) => Boolean(result && [
-          result.err_msg,
-          result.errMsg,
-          result.errmsg
-        ].includes(`${method}:ok`));
-        const reportResult = (result) => {
-          window.wecomCustomerGroupLookupStatus = result.status;
-          window.wecomCustomerGroupLookupError = result.error || '';
-          try {
-            if (window.console && typeof window.console.info === 'function') {
-              window.console.info('[wecom-group-context]', result.status, result.error || '');
-            }
-          } catch (_) {}
-          return result.chatId;
-        };
-        if (!/wxwork/i.test(navigator.userAgent || '')) {
-          return Promise.resolve(reportResult(emptyResult('not_wecom_client')));
-        }
-        const lookup = async () => {
-          try {
-            try {
-              for (const src of sdkScripts) await loadScript(src);
-            } catch (_) {
-              return emptyResult('sdk_script_load_failed');
-            }
-            if (!window.wx || typeof window.wx.agentConfig !== 'function') {
-              return emptyResult('sdk_api_unavailable');
-            }
-            const pageUrl = window.location.href.split('#', 1)[0];
-            let response;
-            try {
-              response = await fetch(
-                `${configEndpoint}?url=${encodeURIComponent(pageUrl)}`,
-                { credentials: 'same-origin' }
-              );
-            } catch (_) {
-              return emptyResult('js_sdk_config_fetch_failed');
-            }
-            if (!response.ok) return emptyResult('js_sdk_config_http_error');
-            let config;
-            try {
-              config = await response.json();
-            } catch (_) {
-              return emptyResult('js_sdk_config_invalid');
-            }
-            if (!config || !config.corpid || !config.agentid || !config.signature) {
-              return emptyResult('js_sdk_config_invalid');
-            }
-            let contextStatus = 'agent_config_timeout';
-            let contextError = '';
-            const context = await new Promise((resolve) => {
-              let finished = false;
-              const timer = window.setTimeout(() => finish(null), 5000);
-              const finish = (value) => {
-                if (finished) return;
-                finished = true;
-                window.clearTimeout(timer);
-                resolve(value);
-              };
-              try {
-                window.wx.agentConfig({
-                  corpid: config.corpid,
-                  agentid: config.agentid,
-                  timestamp: config.timestamp,
-                  nonceStr: config.nonceStr,
-                  signature: config.signature,
-                  jsApiList: ['getContext', 'getCurExternalChat'],
-                  success: async () => {
-                    const result = await invoke('getContext');
-                    contextStatus = sdkCallSucceeded(result, 'getContext')
-                      ? 'context_ready'
-                      : 'get_context_failed';
-                    if (contextStatus === 'get_context_failed') {
-                      contextError = sdkErrorDetail(result, 'getContext');
-                    }
-                    finish(sdkCallSucceeded(result, 'getContext') ? result : null);
-                  },
-                  fail: (error) => {
-                    contextStatus = 'agent_config_failed';
-                    contextError = sdkErrorDetail(error, 'agentConfig');
-                    finish(null);
-                  }
-                });
-              } catch (_) {
-                contextStatus = 'agent_config_failed';
-                finish(null);
-              }
-            });
-            if (!context) return emptyResult(contextStatus, contextError);
-            if (context.entry !== 'group_chat_tools') {
-              return emptyResult('not_group_chat_tools');
-            }
-            const group = await invoke('getCurExternalChat');
-            if (!group) return emptyResult('get_cur_external_chat_timeout');
-            if (!sdkCallSucceeded(group, 'getCurExternalChat')) {
-              return emptyResult(
-                'get_cur_external_chat_failed',
-                sdkErrorDetail(group, 'getCurExternalChat')
-              );
-            }
-            if (typeof group.chatId !== 'string' || !group.chatId.trim()) {
-              return emptyResult('chat_id_missing');
-            }
-            return { chatId: group.chatId, status: 'success' };
-          } catch (_) {
-            return emptyResult('lookup_exception');
-          }
-        };
-        return Promise.race([
-          lookup(),
-          new Promise((resolve) => window.setTimeout(
-            () => resolve(emptyResult('lookup_timeout')),
-            9000
-          ))
-        ]).then(reportResult);
-      };
-    })();
-    </script>
-    """.replace("__CONFIG_URL__", config_url_literal)
 
 
-def _page(title: str, body: str, *, body_class: str = "") -> str:
-    return f"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(title)}</title><style>
-body{{font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:0 auto;padding:20px;color:#172033;background:#f5f7fb}}
-a{{color:#1769e0;text-decoration:none}}
-nav{{display:flex;gap:14px;margin-bottom:18px;flex-wrap:wrap}}
-h1,h2,h3,p{{margin-top:0}}
-h1{{font-size:28px;letter-spacing:-.02em;margin-bottom:6px}}
-h2{{font-size:20px;margin-bottom:6px}}
-h3{{font-size:17px;margin:3px 0 0}}
-.topbar{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:20px}}
-.topbar nav{{margin:10px 0 0;justify-content:flex-end}}
-.topbar nav a{{padding:7px 10px;border-radius:8px;color:#667085}}
-.topbar nav a.active,.topbar nav a:hover{{background:#eaf1ff;color:#155eef}}
-.inspection-run-button{{margin:0 0 0 4px;padding:7px 10px;white-space:nowrap}}
-.inspection-dialog{{width:min(420px,calc(100vw - 32px));padding:22px;border:1px solid #d0d5dd;border-radius:14px;box-shadow:0 18px 48px #10182833}}
-.inspection-dialog::backdrop{{background:#10182866}}
-.inspection-dialog h2{{margin:0 0 8px;font-size:20px}}
-.inspection-dialog p{{color:#667085;font-size:13px;line-height:1.5}}
-.inspection-dialog fieldset{{border:1px solid #eaecf0;border-radius:9px;padding:10px 12px}}
-.inspection-dialog legend{{padding:0 5px;color:#667085;font-size:12px}}
-.inspection-kind-option{{display:flex;align-items:center;gap:8px;margin:9px 0;font-weight:500}}
-.inspection-kind-option input{{width:auto;margin:0}}
-.inspection-dialog-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:16px}}
-.inspection-dialog-actions button{{margin:0}}
-.inspection-run-status{{max-width:680px;padding:0 4px;line-height:1.5}}
-.eyebrow{{font-size:11px;line-height:1.2;letter-spacing:.12em;text-transform:uppercase;color:#667085;font-weight:700}}
-.case-card{{display:block;border:1px solid #dbe3ef;border-radius:10px;padding:14px;margin:10px 0;color:inherit;background:#fff;box-shadow:0 2px 7px #1720330a}}
-.case-card small,.muted{{display:block;color:#667085;margin-top:4px}}
-.issue-fields{{margin:14px 0}}
-.issue-fields h2{{margin-bottom:12px}}
-.issue-fields-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}
-.issue-field{{padding:10px;border-radius:8px;background:#f8fafc;overflow-wrap:anywhere}}
-.issue-field span{{display:block;margin-bottom:4px;color:#667085;font-size:12px}}
-.issue-field strong,.issue-field p{{margin:0;white-space:pre-wrap;line-height:1.55}}
-.issue-field-wide{{grid-column:1 / -1}}
-.entry{{border-left:3px solid #8fb5ff;padding:8px 12px;margin:14px 0;background:#f8fbff}}
-.entry.system{{border-color:#a7b0be;background:#fafafa}}
-.part{{white-space:pre-wrap;margin:6px 0}}
-img{{max-width:100%;border-radius:8px}}
-label{{display:block;margin:12px 0;color:#344054;font-size:14px;font-weight:600}}
-input,select,textarea{{display:block;width:100%;box-sizing:border-box;padding:10px 11px;margin-top:5px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#172033;font:inherit}}
-textarea{{min-height:110px;resize:vertical}}
-button,.button-link{{display:inline-block;padding:9px 13px;margin:6px 4px 6px 0;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#344054;font:inherit;cursor:pointer}}
-button:hover,.button-link:hover{{border-color:#98a2b3;background:#f8fafc}}
-button.primary,.primary{{border-color:#155eef;background:#155eef;color:#fff}}
-button.primary:hover{{background:#004eeb}}
-.empty{{color:#667085}}
-.notice{{padding:12px 14px;border-radius:9px;background:#fff7e8;color:#8a4b08;border:1px solid #f6d28b;margin:16px 0}}
-.flash-notice{{position:fixed;top:16px;right:16px;z-index:1000;display:flex;align-items:flex-start;gap:12px;max-width:min(480px,calc(100vw - 32px));padding:13px 15px;border:1px solid #f6d28b;border-radius:10px;background:#fff7e8;color:#8a4b08;box-shadow:0 8px 24px #17203320;line-height:1.5}}
-.flash-notice button{{flex:0 0 auto;margin:0;padding:0 4px;border:0;background:transparent;color:inherit;font-size:20px;line-height:1.2}}
-.flash-notice button:hover{{border:0;background:transparent}}
-.setup-card{{max-width:540px;margin:10vh auto;background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:28px;box-shadow:0 12px 30px #17203312}}
-.setup-card .muted{{line-height:1.65}}
-.event-list{{max-width:680px}}
-.admin-page{{max-width:1160px;background:#f5f7fb}}
-.admin-main{{max-width:1160px;margin:0 auto}}
-.admin-topbar{{padding-bottom:6px}}
-.admin-topbar .muted{{font-size:13px}}
-.hero-banner{{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;padding:17px 20px;margin-bottom:18px;border:1px solid #c7d7fe;background:#eef4ff;border-radius:14px;color:#193b8f}}
-.hero-banner p{{margin:7px 0 0;color:#52618a;font-size:14px;line-height:1.55}}
-.status-dot{{display:inline-block;width:9px;height:9px;margin-right:8px;border-radius:50%;background:#12b76a;box-shadow:0 0 0 4px #d1fadf;vertical-align:1px}}
-.status-dot.small{{width:7px;height:7px;margin-right:7px;box-shadow:none;vertical-align:1px}}
-.status-dot.off{{background:#98a2b3}}
-.badge,.count-pill,.tag{{display:inline-flex;align-items:center;white-space:nowrap;border-radius:999px;font-size:12px;font-weight:700}}
-.badge{{padding:4px 8px;background:#f2f4f7;color:#475467}}
-.badge-blue{{background:#dbe8ff;color:#155eef}}
-.badge-green{{background:#d1fadf;color:#067647}}
-.badge-amber{{background:#fef0c7;color:#b54708}}
-.badge-gray{{background:#eaecf0;color:#667085}}
-.count-pill{{padding:4px 9px;background:#f2f4f7;color:#667085}}
-.stats-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}}
-.stat-card,.panel,.permission-note{{border:1px solid #e2e8f0;background:#fff;border-radius:14px;box-shadow:0 3px 10px #17203308}}
-.stat-card{{padding:15px 16px}}
-.stat-card span,.stat-card small{{display:block;color:#667085;font-size:13px}}
-.stat-card strong{{display:block;margin:8px 0 4px;font-size:28px;letter-spacing:-.03em}}
-.admin-grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}}
-.panel{{padding:20px}}
-.inspection-settings{{margin-bottom:18px}}
-.inspection-schedule-form{{display:flex;align-items:flex-end;gap:10px}}
-.inspection-schedule-form label{{flex:1;margin:0}}
-.inspection-schedule-form button{{margin:0;white-space:nowrap}}
-.panel-heading,.team-header,.member-heading{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}
-.panel-intro{{color:#667085;font-size:13px;line-height:1.6;margin:12px 0 16px}}
-.search-form{{display:flex;gap:8px;margin-bottom:13px}}
-.search-form input{{margin:0;min-width:0}}
-.search-form button{{margin:0}}
-.button-link{{margin:0;padding:9px 10px}}
-.add-box{{border:1px dashed #b8c4d6;border-radius:10px;padding:0 12px;margin:13px 0 15px;background:#fbfcfe}}
-.add-box summary{{padding:12px 0;cursor:pointer;font-weight:700;color:#155eef}}
-.form-grid{{display:grid;grid-template-columns:1fr 1fr;gap:0 12px;padding-bottom:9px}}
-.form-grid label:first-child{{grid-column:1/-1}}
-.form-grid .primary,.form-grid button{{grid-column:1/-1;justify-self:start}}
-.check-label{{display:flex;align-items:center;gap:7px;font-size:13px!important;font-weight:500!important}}
-.check-label input{{width:auto;margin:0}}
-.managed-list{{display:flex;flex-direction:column;gap:8px}}
-.managed-row{{border:1px solid #e6eaf0;border-radius:10px;background:#fff;overflow:hidden}}
-.managed-row summary{{display:flex;align-items:center;gap:8px;list-style:none;padding:11px 12px;cursor:pointer}}
-.managed-row summary::-webkit-details-marker{{display:none}}
-.avatar{{display:inline-grid;place-items:center;flex:0 0 31px;width:31px;height:31px;border-radius:9px;background:#eaf1ff;color:#155eef;font-weight:800}}
-.user-summary{{display:flex;flex:1;min-width:0;flex-direction:column}}
-.user-summary strong{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.user-summary small,.member-row small{{display:block;color:#98a2b3;font-size:11px;margin-top:2px}}
-.chevron{{color:#98a2b3;font-size:18px}}
-.managed-detail{{padding:0 12px 12px;border-top:1px solid #eef0f3}}
-.tag-list{{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}}
-.tag{{padding:4px 7px;background:#ecfdf3;color:#067647;font-weight:600}}
-.tag-muted{{background:#f2f4f7;color:#98a2b3}}
-.edit-form{{display:grid;grid-template-columns:1fr auto auto;align-items:end;gap:7px;margin-top:7px}}
-.edit-form label{{margin-bottom:0}}
-.edit-form .check-label{{margin-bottom:10px}}
-.edit-form button{{margin:0}}
-.team-card{{border:1px solid #e6eaf0;border-radius:10px;padding:13px;margin-bottom:10px}}
-.team-header h3{{margin-top:4px}}
-.team-edit-form{{display:flex;gap:7px;align-items:center;margin:11px 0 3px}}
-.team-edit-form input{{margin:0;min-width:0;flex:1}}
-.team-edit-form .check-label{{margin:0;white-space:nowrap}}
-.team-edit-form button{{margin:0}}
-.team-delete-form{{margin:7px 0 12px}}
-.team-delete-form .danger-button{{min-height:34px}}
-.content-delete-control{{display:flex;justify-content:flex-end;margin:0 0 12px}}
-.subtle-button{{padding:7px 9px;font-size:12px}}
-.danger-button{{padding:7px 9px;font-size:12px;color:#b42318;border-color:#fecdca;background:#fffafa}}
-.channel-box{{margin:12px 0;padding:11px;border-radius:9px;background:#f8fafc}}
-.channel-box strong,.channel-box .muted,.channel-box .warning-text{{display:block;font-size:12px}}
-.warning-text{{color:#b54708;margin-top:4px}}
-.inline-form{{display:flex;gap:6px;align-items:center;margin-top:8px}}
-.inline-form input{{margin:0;min-width:0;flex:1}}
-.inline-form button{{margin:0}}
-.team-inspection-form{{display:grid;grid-template-columns:auto 1fr minmax(150px,1fr) auto;align-items:end;gap:8px;margin:12px 0;padding:11px;border-radius:9px;background:#f8fafc}}
-.team-inspection-form>strong{{grid-column:1/-1;font-size:12px;color:#475467}}
-.team-inspection-form label{{margin:0;font-size:12px}}
-.team-inspection-form label input,.team-inspection-form label select{{margin-top:4px}}
-.team-inspection-form .inspection-age-toggle{{display:flex;align-items:center;gap:6px;white-space:nowrap}}
-.team-inspection-form .inspection-age-toggle input{{width:auto;margin:0}}
-.team-inspection-form button{{margin:0;white-space:nowrap}}
-.member-heading{{margin-top:13px;padding-bottom:7px;border-bottom:1px solid #eef0f3;font-size:13px}}
-.member-heading span{{color:#98a2b3;font-size:12px}}
-.member-list{{margin-bottom:8px}}
-.member-row{{display:flex;justify-content:space-between;gap:7px;align-items:center;padding:9px 0;border-bottom:1px solid #f1f3f5}}
-.member-row>div:first-child{{display:flex;align-items:center;min-width:0}}
-.member-row>div:first-child>span:last-child{{min-width:0}}
-.member-row strong{{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}}
-.member-actions{{display:flex;gap:4px;align-items:center;flex-shrink:0}}
-.member-actions form{{margin:0}}
-.role-form{{display:flex;gap:4px;align-items:center}}
-.role-form select{{margin:0;padding:6px 7px;font-size:12px}}
-.role-form button,.member-actions .danger-button{{margin:0}}
-.add-member-form{{display:grid;grid-template-columns:1.5fr 1fr auto;gap:5px;margin-top:10px}}
-.add-member-form select{{margin:0;min-width:0;padding:8px 7px;font-size:12px}}
-.add-member-form button{{margin:0;padding:8px 10px;font-size:12px}}
-.permission-note{{display:flex;gap:12px;align-items:flex-start;margin-top:18px;padding:14px 17px;color:#667085;font-size:13px;line-height:1.6}}
-.permission-note strong{{color:#344054;white-space:nowrap}}
-@media (max-width:800px){{body{{padding:14px}}.admin-grid{{grid-template-columns:1fr}}.stats-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.team-inspection-form{{grid-template-columns:1fr 1fr}}.team-inspection-form>strong{{grid-column:1/-1}}}}
-@media (max-width:520px){{.topbar{{flex-direction:column}}.topbar nav{{justify-content:flex-start;margin-top:0}}.hero-banner{{padding:14px}}.form-grid,.edit-form{{grid-template-columns:1fr}}.form-grid label:first-child,.form-grid .primary,.form-grid button{{grid-column:auto}}.edit-form button{{justify-self:start}}.member-row{{align-items:flex-start;flex-direction:column}}.member-actions{{width:100%;justify-content:flex-end}}.add-member-form{{grid-template-columns:1fr 1fr}}.add-member-form button{{grid-column:1/-1;justify-self:start}}.permission-note{{flex-direction:column;gap:3px}}.inspection-schedule-form{{align-items:stretch;flex-direction:column}}.team-inspection-form{{grid-template-columns:1fr}}.team-inspection-form>strong{{grid-column:auto}}.topbar nav{{flex-wrap:wrap}}}}
-body.setup-page{{background:#eef4ff}}
-{_WORKBENCH_CSS}
-</style></head><body class="{escape(body_class)}">
-<script>
-(() => {{
-  const recoveryParameter = {_FORBIDDEN_RETURN_MARKER!r};
-  try {{
-    const currentUrl = new URL(window.location.href);
-    if (currentUrl.searchParams.has(recoveryParameter)) {{
-      currentUrl.searchParams.delete(recoveryParameter);
-      window.history.replaceState(null, '', currentUrl.pathname + currentUrl.search + currentUrl.hash);
-    }}
-  }} catch (_) {{}}
-
-  if (window.__kefuForbiddenFetchInstalled || typeof window.fetch !== 'function') return;
-  window.__kefuForbiddenFetchInstalled = true;
-  const originalFetch = window.fetch.bind(window);
-  window.fetch = async (...args) => {{
-    const response = await originalFetch(...args);
-    if (response.status === 403) {{
-      const input = args[0];
-      let sameOrigin = false;
-      try {{
-        const requestUrl = typeof Request !== 'undefined' && input instanceof Request
-          ? input.url
-          : String(input);
-        sameOrigin = new URL(requestUrl, window.location.href).origin === window.location.origin;
-      }} catch (_) {{}}
-      if (sameOrigin) {{
-        const payload = await response.clone().json().catch(() => null);
-        const detail = typeof payload?.detail === 'string' && payload.detail.trim()
-          ? payload.detail
-          : '当前身份无权执行此操作。';
-        window.alert(detail);
-      }}
-    }}
-    return response;
-  }};
-}})();
-</script>
-{body}</body></html>"""
 
 
-def _image_upload_controls(*, compact: bool = False) -> str:
-    controls = (
-        """
-    <div class="image-upload-control intake-image-control" data-image-uploader="true" data-max-image-bytes="20971520">
-      <label for="issue-images">＋ 图片
-        <input id="issue-images" class="intake-image-input" name="images" type="file" accept="image/*" multiple
-          data-image-input="true" aria-label="添加问题图片">
-      </label>
-      <ul class="image-upload-list" data-image-list="true" aria-live="polite"></ul>
-      <p class="image-upload-error" data-image-error="true" role="alert" hidden></p>
-    </div>
-    """
-        if compact
-        else """
-    <div class="image-upload-control" data-image-uploader="true" data-max-image-bytes="20971520">
-      <label for="issue-images">问题图片（可拖拽、多选或粘贴，单张不超过 20 MiB）</label>
-      <input id="issue-images" name="images" type="file" accept="image/*" multiple
-        data-image-input="true" aria-describedby="issue-images-hint">
-      <div class="image-drop-zone" data-image-drop-zone="true">
-        将图片拖到此处，或用上方按钮选择文件
-      </div>
-      <p id="issue-images-hint" class="muted image-upload-hint">
-        图片会按 [图片] 占位符顺序匹配；未匹配的多余图片会追加到末尾。
-      </p>
-      <ul class="image-upload-list" data-image-list="true" aria-live="polite"></ul>
-      <p class="image-upload-error" data-image-error="true" role="alert" hidden></p>
-    </div>
-    """
-    )
-    return controls + """
-    <script>
-    (() => {
-      const uploader = document.querySelector('[data-image-uploader="true"]');
-      if (!uploader) return;
-      const input = uploader.querySelector('[data-image-input="true"]');
-      const list = uploader.querySelector('[data-image-list="true"]');
-      const error = uploader.querySelector('[data-image-error="true"]');
-      const form = input && input.form;
-      const dropZone = form?.querySelector('[data-image-drop-zone="true"]')
-        || uploader.querySelector('[data-image-drop-zone="true"]');
-      if (!input || !list || !error || !form) return;
-
-      const maxBytes = Number(uploader.dataset.maxImageBytes);
-      let selectedFiles = [];
-      let canSynchronizeFiles = typeof DataTransfer !== "undefined";
-
-      const fileKey = (file) =>
-        [file.name, file.size, file.lastModified, file.type].join(":");
-
-      const showError = (message) => {
-        error.textContent = message;
-        error.hidden = !message;
-      };
-
-      const syncInputFiles = () => {
-        if (!canSynchronizeFiles) return false;
-        try {
-          const transfer = new DataTransfer();
-          selectedFiles.forEach((file) => transfer.items.add(file));
-          input.files = transfer.files;
-          return true;
-        } catch (_error) {
-          canSynchronizeFiles = false;
-          return false;
-        }
-      };
-
-      const renderFiles = () => {
-        list.replaceChildren();
-        selectedFiles.forEach((file, index) => {
-          const item = document.createElement("li");
-          item.className = "image-upload-item";
-          const name = document.createElement("span");
-          name.textContent = file.name || `图片 ${index + 1}`;
-          const remove = document.createElement("button");
-          remove.type = "button";
-          remove.className = "image-upload-remove";
-          remove.textContent = "移除";
-          remove.setAttribute("aria-label", `移除 ${name.textContent}`);
-          remove.addEventListener("click", () => {
-            selectedFiles.splice(index, 1);
-            syncInputFiles();
-            renderFiles();
-          });
-          item.append(name, remove);
-          list.append(item);
-        });
-      };
-
-      const addFiles = (incoming) => {
-        const existing = new Set(selectedFiles.map(fileKey));
-        const rejected = [];
-        for (const file of incoming) {
-          if (!file || !file.type.startsWith("image/")) {
-            rejected.push(`${file?.name || "文件"} 不是图片`);
-            continue;
-          }
-          if (file.size > maxBytes) {
-            rejected.push(`${file.name || "图片"} 超过 20 MiB`);
-            continue;
-          }
-          const key = fileKey(file);
-          if (!existing.has(key)) {
-            existing.add(key);
-            selectedFiles.push(file);
-          }
-        }
-        syncInputFiles();
-        renderFiles();
-        showError(rejected.length ? rejected.join("；") : "");
-      };
-
-      input.addEventListener("change", () => {
-        const picked = Array.from(input.files || []);
-        if (!picked.length) return;
-        if (canSynchronizeFiles) {
-          input.value = "";
-          addFiles(picked);
-        } else {
-          selectedFiles = picked;
-          renderFiles();
-        }
-      });
-
-      if (dropZone) {
-        ["dragenter", "dragover"].forEach((name) => {
-          dropZone.addEventListener(name, (event) => {
-            event.preventDefault();
-            dropZone.classList.add("drag-active");
-          });
-        });
-        ["dragleave", "drop"].forEach((name) => {
-          dropZone.addEventListener(name, (event) => {
-            event.preventDefault();
-            dropZone.classList.remove("drag-active");
-          });
-        });
-        dropZone.addEventListener("drop", (event) => {
-          addFiles(Array.from(event.dataTransfer?.files || []));
-        });
-      }
-
-      form.addEventListener("paste", (event) => {
-        const items = Array.from(event.clipboardData?.items || []);
-        const pastedFiles = items
-          .filter((item) => item.kind === "file")
-          .map((item) => item.getAsFile())
-          .filter(Boolean);
-        if (!pastedFiles.length) return;
-        event.preventDefault();
-        addFiles(pastedFiles);
-      });
-
-      form.addEventListener("submit", () => {
-        syncInputFiles();
-      });
-    })();
-    </script>
-    """
 
 
-def _format_datetime(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=ZoneInfo("UTC"))
-    return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
 
 
 def _datetime_local_value(value: datetime) -> str:
@@ -4014,16 +2674,8 @@ def _datetime_local_value(value: datetime) -> str:
     return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%dT%H:%M")
 
 
-def _date_local_value(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=ZoneInfo("UTC"))
-    return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
 
 
-def _time_local_value(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=ZoneInfo("UTC"))
-    return value.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
 
 
 def _parse_local_deadline(value: str | None) -> datetime | None:
@@ -4055,16 +2707,8 @@ def _half_hour_hours_to_minutes(value: str, label: str) -> int:
         raise ValidationError(f"{label}无效") from error
 
 
-def _hours_value(minutes: int) -> str:
-    return format((Decimal(minutes) / 60).normalize(), "f")
 
 
-def _duration_label(minutes: int) -> str:
-    hours, remaining_minutes = divmod(minutes, 60)
-    parts = [f"{hours}小时"] if hours else []
-    if remaining_minutes:
-        parts.append(f"{remaining_minutes}分钟")
-    return "".join(parts) or "0分钟"
 
 
 def _case_status_label(status: CaseStatus) -> str:
@@ -4077,190 +2721,22 @@ def _case_status_label(status: CaseStatus) -> str:
     }[status]
 
 
-def _status_queue_card(item: Any, path_for: Callable[[str], str]) -> str:
-    case_ref = escape(item.case_ref)
-    issue_path = path_for(f"/issues/{case_ref}")
-    state_label, state_class = (
-        ("处理中", "queue-processing")
-        if item.state == "processing"
-        else (("等待重试", "queue-retry") if item.attempts else ("排队中", "queue-pending"))
-    )
-    retry = (
-        f'<p class="queue-error">最近错误：{escape(item.last_error[:300])}</p>'
-        if item.last_error
-        else ""
-    )
-    attempts = f" · 已重试 {item.attempts} 次" if item.attempts else ""
-    retry_at = f" · 下次重试 {_format_datetime(item.next_attempt_at)}" if item.attempts else ""
-    return (
-        '<article class="queue-card">'
-        f'<div class="queue-card-heading"><a href="{issue_path}">'
-        f'{_status_queue_issue_label(item)} · {escape(item.title)}</a>'
-        f'<span class="queue-state {state_class}">{state_label}</span></div>'
-        f'<p>触发沟通序号 {item.entry_sequence} · 入队 {_format_datetime(item.created_at)}'
-        f'{attempts}{retry_at}</p>{retry}</article>'
-    )
 
 
-def _status_queue_issue_label(item: Any) -> str:
-    bug_number = escape(item.bug_number or "待生成")
-    customer_name = escape(item.customer_name or "未录入")
-    return f"BUG 编号 {bug_number} · 客户 {customer_name}"
 
 
-def _issue_draft_queue_card(item: Any) -> str:
-    return (
-        '<article class="queue-card">'
-        '<div class="queue-card-heading"><strong>Agent 整理问题草稿</strong>'
-        '<span class="queue-state queue-processing">处理中</span></div>'
-        f'<p>快速上传 · 开始时间 {_format_datetime(item.started_at)}</p>'
-        '</article>'
-    )
 
 
-def _deletion_queue_card(item: Any) -> str:
-    target_kind = "问题" if item.target_kind.value == "issue" else "团队"
-    outcome, outcome_class = (
-        ("已删除", "queue-completed")
-        if item.outcome.value == "succeeded"
-        else ("失败", "queue-retry")
-    )
-    cascade = " · 团队级联" if item.parent_record_id is not None else ""
-    error = (
-        f'<p class="queue-error">{escape(item.error_message[:300])}</p>'
-        if item.error_message
-        else ""
-    )
-    return (
-        '<article class="queue-card">'
-        f'<div class="queue-card-heading"><strong>{target_kind} · '
-        f'{escape(item.target_label)}</strong>'
-        f'<span class="queue-state {outcome_class}">{outcome}</span></div>'
-        f'<p>{escape(item.actor_name)}{cascade} · {_format_datetime(item.created_at)}</p>'
-        f'{error}</article>'
-    )
 
 
-def _recent_status_change_card(item: Any, path_for: Callable[[str], str]) -> str:
-    case_ref = escape(item.case_ref)
-    issue_path = path_for(f"/issues/{case_ref}")
-    previous = item.from_status
-    updated = item.to_status
-    if item.field_label == "协作流程状态":
-        try:
-            previous = _case_status_label(CaseStatus(previous))
-            updated = _case_status_label(CaseStatus(updated))
-        except ValueError:
-            pass
-    return (
-        '<article class="status-change-card">'
-        f'<div><a href="{issue_path}">{_status_queue_issue_label(item)} · {escape(item.title)}</a>'
-        f'<span class="status-change-field">{escape(item.field_label)}</span></div>'
-        f'<p>{escape(previous)} <span aria-hidden="true">→</span> {escape(updated)}</p>'
-        f'<small>{escape(item.actor_name)} · {_format_datetime(item.created_at)}</small>'
-        '</article>'
-    )
 
 
-def _deadline_badge(status: DeadlineStatus | None) -> str:
-    if status is None:
-        return ""
-    label, color = {
-        DeadlineStatus.APPROACHING: ("临近期限", "deadline-approaching"),
-        DeadlineStatus.OVERDUE: ("已超时", "deadline-overdue"),
-    }[status]
-    return f'<span class="status-badge {color}">{label}</span>'
 
 
-def _priority_badge(priority: CasePriority) -> str:
-    label, color = {
-        CasePriority.NORMAL: ("普通", "priority-normal"),
-        CasePriority.URGENT: ("紧急", "priority-urgent"),
-        CasePriority.SEVERE: ("严重", "priority-severe"),
-    }[priority]
-    return f'<span class="status-badge {color}">优先级 · {label}</span>'
 
 
-def _entry_kind_label(kind: CaseEntryKind) -> str:
-    return {
-        CaseEntryKind.FORMAL_MESSAGE: "正式沟通",
-        CaseEntryKind.TRANSFER_CONSULTANT: "咨询处理人变更",
-        CaseEntryKind.TRANSFER_DEVELOPER: "研发处理人变更",
-        CaseEntryKind.TRANSFER_DEV_TEAM: "研发团队变更",
-        CaseEntryKind.CLOSED: "问题关闭",
-        CaseEntryKind.REOPENED: "问题重新打开",
-        CaseEntryKind.STATUS_CHANGED: "状态变更",
-        CaseEntryKind.CORRECTION: "消息纠错",
-        CaseEntryKind.CASE_METADATA_UPDATED: "问题资料变更",
-    }[kind]
 
 
-def _entry_description(entry: EntryView) -> str:
-    metadata = entry.metadata
-    if entry.kind is CaseEntryKind.CASE_METADATA_UPDATED:
-        changes = metadata.get("changes", {})
-        labels = {
-            "customer_name": "客户/企业",
-            "customer_contact_name": "联系人",
-            "customer_contact_method": "联系方式",
-            "priority": "紧急程度",
-            "deadline": "截止时间",
-            "approaching_window_minutes": "临近期限提醒提前量",
-        }
-        descriptions = []
-        if isinstance(changes, Mapping):
-            for key, change in changes.items():
-                if not isinstance(change, Mapping):
-                    continue
-                before = change.get("from") or "未填写"
-                after = change.get("to") or "未填写"
-                if key == "priority":
-                    before = _priority_label_value(str(before))
-                    after = _priority_label_value(str(after))
-                elif key == "deadline":
-                    before = _format_datetime(datetime.fromisoformat(str(before)))
-                    after = _format_datetime(datetime.fromisoformat(str(after)))
-                elif key == "approaching_window_minutes":
-                    before = _duration_label(int(before))
-                    after = _duration_label(int(after))
-                descriptions.append(f"{labels.get(str(key), str(key))}：{before} → {after}")
-        return "；".join(descriptions) or "问题资料已更新"
-    if entry.kind is CaseEntryKind.TRANSFER_CONSULTANT:
-        return (
-            f"咨询处理人由 {metadata.get('from_consultant') or '未指定'} "
-            f"调整为 {metadata.get('to_consultant') or '未指定'}"
-        )
-    if entry.kind is CaseEntryKind.TRANSFER_DEVELOPER:
-        return (
-            f"研发处理人由 {metadata.get('from_developer') or '未指定'} "
-            f"调整为 {metadata.get('to_developer') or '未指定'}"
-        )
-    if entry.kind is CaseEntryKind.TRANSFER_DEV_TEAM:
-        from_team = metadata.get("from_dev_team") or "未知团队"
-        to_team = metadata.get("to_dev_team") or "未知团队"
-        from_developer = metadata.get("from_developer") or "未指定"
-        to_developer = metadata.get("to_developer") or "未指定"
-        return (
-            f"研发团队由 {from_team} 调整为 {to_team}；"
-            f"研发处理人由 {from_developer} 调整为 {to_developer}"
-        )
-    if entry.kind is CaseEntryKind.CLOSED:
-        return "咨询侧已确认客户问题闭环"
-    if entry.kind is CaseEntryKind.REOPENED:
-        waiting = metadata.get("waiting_on")
-        next_step = "研发" if waiting == WaitingOn.DEV.value else "咨询"
-        return f"问题重新打开并进入“处理中”，下一步由{next_step}处理"
-    if entry.kind is CaseEntryKind.STATUS_CHANGED:
-        try:
-            previous = CaseStatus(str(metadata.get("from_status")))
-            updated = CaseStatus(str(metadata.get("to_status")))
-        except ValueError:
-            return "问题状态已更新"
-        return f"问题状态由“{_case_status_label(previous)}”变更为“{_case_status_label(updated)}”"
-    if entry.kind is CaseEntryKind.CORRECTION:
-        target = metadata.get("corrected_to_case_ref") or metadata.get("corrected_from_case_ref")
-        return f"消息关联已更正{f'，目标问题 {target}' if target else ''}"
-    return ""
 
 
 def _priority_label_value(value: str) -> str:
@@ -4271,381 +2747,34 @@ def _priority_label_value(value: str) -> str:
     }.get(value, value)
 
 
-def _render_delivery_badges(deliveries: tuple[Any, ...] | list[Any], entry_side: EntrySide) -> str:
-    if not deliveries:
-        return ""
-    chips: list[str] = []
-    for delivery in deliveries:
-        if delivery.destination_type is DeliveryDestination.CHAT:
-            target = "咨询群" if entry_side is EntrySide.DEV else "研发群"
-        else:
-            target = "咨询处理人" if entry_side is EntrySide.DEV else "咨询侧"
-        label, color = {
-            DeliveryStatus.PENDING: ("投递中", "delivery-pending"),
-            DeliveryStatus.SENT: ("已送达", "delivery-sent"),
-            DeliveryStatus.FAILED: ("投递失败", "delivery-failed"),
-        }[delivery.status]
-        chips.append(f'<span class="delivery-badge {color}">{target} · {label}</span>')
-    return "".join(chips)
 
 
-def _render_entry(
-    case_ref: str,
-    entry: EntryView,
-    path_for: Callable[[str], str],
-    deliveries: tuple[Any, ...] | list[Any] = (),
-) -> str:
-    kind = "system" if entry.side is EntrySide.SYSTEM else f"side-{entry.side.value}"
-    side_label = {
-        EntrySide.CONSULT: "咨询侧",
-        EntrySide.DEV: "研发侧",
-        EntrySide.SYSTEM: "问题记录",
-    }[entry.side]
-    heading = (
-        f'<div class="entry-author"><strong>{escape(entry.actor_name_snapshot)}</strong>'
-        f"<span>{side_label} · {_entry_kind_label(entry.kind)}</span></div>"
-    )
-    description = _entry_description(entry)
-    detail = f'<p class="entry-description">{escape(description)}</p>' if description else ""
-    intent_badge = (
-        '<span class="entry-intent">仅同步</span>'
-        if entry.message_intent is MessageIntent.SYNC
-        else ""
-    )
-    delivery_badges = _render_delivery_badges(deliveries, entry.side)
-    return (
-        f'<article class="entry {kind}"><div class="entry-heading">{heading}'
-        f'<time datetime="{escape(entry.created_at.isoformat())}">{_format_datetime(entry.created_at)}</time></div>'
-        f'<div class="entry-chips">{intent_badge}{delivery_badges}</div>{detail}'
-        f'<div class="entry-content">{_render_parts(entry.parts, case_ref, path_for)}</div></article>'
-    )
 
 
-def _render_parts(
-    parts: tuple[Any, ...], case_ref: str | None, path_for: Callable[[str], str] | None = None
-) -> str:
-    rendered: list[str] = []
-    for part in parts:
-        if part.kind is PartKind.TEXT:
-            rendered.append(f'<p class="part">{escape(part.text or "")}</p>')
-        elif part.media_id is not None and case_ref is not None:
-            assert path_for is not None
-            media_path = path_for(f"/issues/{escape(case_ref)}/media/{part.media_id}")
-            rendered.append(f'<img alt="问题图片" src="{media_path}">')
-        else:
-            rendered.append('<p class="part">[图片]</p>')
-    return "".join(rendered)
 
 
-def _issue_module_options(selected: str) -> str:
-    values = tuple(module.value for module in IssueModule)
-    options = []
-    if selected not in values:
-        options.append('<option value="" selected disabled>请选择问题所属模块</option>')
-    for module in IssueModule:
-        is_selected = ' selected' if selected == module.value else ''
-        options.append(f'<option value="{escape(module.value)}"{is_selected}>{escape(module.value)}</option>')
-    return "".join(options)
 
 
-def _issue_status_options(selected: str) -> str:
-    values = tuple(status.value for status in IssueCurrentStatus)
-    options = []
-    if selected not in values:
-        label = f"历史状态：{selected}（请选择新状态）" if selected else "请选择问题状态"
-        options.append(f'<option value="" selected disabled>{escape(label)}</option>')
-    for status in IssueCurrentStatus:
-        is_selected = ' selected' if selected == status.value else ''
-        options.append(f'<option value="{escape(status.value)}"{is_selected}>{escape(status.value)}</option>')
-    return "".join(options)
 
 
-def _issue_current_status_control(case: Any, path_for: Callable[[str], str]) -> str:
-    if not case.can_edit_metadata:
-        return f"<strong>{escape(case.issue_current_status)}</strong>"
-    action = path_for(f"/issues/{escape(case.case_ref)}/issue-current-status")
-    options = _issue_status_options(case.issue_current_status)
-    return f"""
-    <form method="post" action="{action}" class="issue-status-editor">
-      <input type="hidden" name="version" value="{case.version}">
-      <select name="issue_current_status" required aria-label="选择问题状态">{options}</select>
-      <button type="submit">保存状态</button>
-    </form>
-    """
 
 
-def _metadata_form(case: Any, path_for: Callable[[str], str]) -> str:
-    if not case.can_edit_metadata:
-        return ""
-    action = path_for(f"/issues/{escape(case.case_ref)}/metadata")
-    priority_options = "".join(
-        f'<option value="{level.value}"{" selected" if case.priority is level else ""}>'
-        f"{label}</option>"
-        for level, label in (
-            (CasePriority.NORMAL, "普通"),
-            (CasePriority.URGENT, "紧急"),
-            (CasePriority.SEVERE, "严重"),
-        )
-    )
-    return f"""
-    <details class="metadata-editor panel">
-      <summary>编辑客户资料与紧急程度</summary>
-      <form method="post" action="{action}">
-        <input type="hidden" name="version" value="{case.version}">
-        <div class="form-row">
-          <label>客户 / 企业名称
-            <input name="customer_name" required maxlength="256" value="{escape(case.customer_name or "")}">
-          </label>
-          <label>客户群聊名称（选填）
-            <input name="customer_group_name" maxlength="256" value="{escape(case.customer_group_name or "")}">
-          </label>
-          <label>联系人（选填）
-            <input name="customer_contact_name" maxlength="256" value="{escape(case.customer_contact_name or "")}">
-          </label>
-        </div>
-        <div class="form-row">
-          <label>联系方式（选填）
-            <input name="customer_contact_method" maxlength="256" value="{escape(case.customer_contact_method or "")}">
-          </label>
-          <label>紧急程度 <select name="priority">{priority_options}</select></label>
-        </div>
-        <button class="primary" type="submit">保存变更</button>
-      </form>
-    </details>
-    """
 
 
-def _transfer_controls(case: Any, path_for: Callable[[str], str]) -> str:
-    sections: list[str] = []
-    if case.can_transfer:
-        consultant_action = path_for(f"/issues/{escape(case.case_ref)}/transfer-consultant")
-        consultant_control = _transfer_person_control(
-            case=case,
-            action=consultant_action,
-            field_name="new_consultant_id",
-            heading="转交咨询处理人",
-            team_name=case.consult_queue_name,
-            current_id=case.current_consultant_id,
-            people=case.transferable_consultants,
-            button_label="转交咨询处理人",
-        )
-        sections.append(f"""
-        <section class="transfer-controls panel" aria-label="咨询经办人转交">
-          <h2>咨询经办人转交</h2>
-          <p class="transfer-controls-intro">当前咨询经办人、咨询队列管理员或研发团队管理员可以转交；
-            接收人必须是当前咨询队列中的在岗成员。</p>
-          <div class="transfer-control-grid">{consultant_control}</div>
-        </section>
-        """)
-    if case.can_transfer_dev_team:
-        dev_team_action = path_for(f"/issues/{escape(case.case_ref)}/transfer-dev-team")
-        dev_team_control = _transfer_dev_team_control(
-            case=case,
-            action=dev_team_action,
-            teams=case.transferable_dev_teams,
-        )
-        sections.append(f"""
-        <section class="transfer-controls panel" aria-label="研发归属团队变更">
-          <h2>研发归属团队变更</h2>
-          <p class="transfer-controls-intro">当前研发团队成员、当前咨询经办人、咨询队列管理员或总管理员可以变更；提交后会记录在时间线，并通知新旧研发群。</p>
-          <div class="transfer-control-grid">{dev_team_control}</div>
-        </section>
-        """)
-    return "".join(sections)
 
 
-def _transfer_dev_team_control(*, case: Any, action: str, teams: tuple[Any, ...]) -> str:
-    if not teams:
-        return """
-        <div class="transfer-control-card">
-          <h3>更改研发归属团队</h3>
-          <p class="transfer-control-empty">当前没有其他已绑定研发群的启用团队可选。</p>
-        </div>
-        """
-    options = "".join(
-        f'<option value="{escape(str(team.id))}">{escape(team.name)}</option>'
-        for team in teams
-    )
-    return f"""
-    <div class="transfer-control-card">
-      <h3>更改研发归属团队</h3>
-      <p>当前归属：{escape(case.current_dev_team_name)}；仅显示已启用并绑定研发群的团队。</p>
-      <form method="post" action="{action}" aria-label="更改研发归属团队">
-        <input type="hidden" name="version" value="{case.version}">
-        <label>新的研发归属团队
-          <select name="new_dev_team_id" required>
-            <option value="" selected disabled>请选择研发团队</option>{options}
-          </select>
-        </label>
-        <button class="primary" type="submit">更改研发归属团队</button>
-      </form>
-    </div>
-    """
 
 
-def _transfer_person_control(
-    *,
-    case: Any,
-    action: str,
-    field_name: str,
-    heading: str,
-    team_name: str,
-    current_id: UUID | None,
-    people: tuple[Any, ...],
-    button_label: str,
-) -> str:
-    candidates = tuple(person for person in people if person.id != current_id)
-    if not candidates:
-        return f"""
-        <div class="transfer-control-card">
-          <h3>{escape(heading)}</h3>
-          <p>目标范围：{escape(team_name)}</p>
-          <p class="transfer-control-empty">当前团队没有其他在岗成员可选。</p>
-        </div>
-        """
-    options = "".join(
-        f'<option value="{escape(str(person.id))}">{escape(person.display_name)}</option>'
-        for person in candidates
-    )
-    return f"""
-    <div class="transfer-control-card">
-      <h3>{escape(heading)}</h3>
-      <p>目标范围：{escape(team_name)}；仅显示本团队其他在岗成员。</p>
-      <form method="post" action="{action}" aria-label="{escape(heading)}">
-        <input type="hidden" name="version" value="{case.version}">
-        <label>新的处理人
-          <select name="{field_name}" required>
-            <option value="" selected disabled>请选择本团队成员</option>{options}
-          </select>
-        </label>
-        <button class="primary" type="submit">{escape(button_label)}</button>
-      </form>
-    </div>
-    """
 
 
-def _deadline_controls(case: Any, path_for: Callable[[str], str]) -> str:
-    if not case.can_extend_deadline or case.lifecycle_status is LifecycleStatus.CLOSED:
-        return ""
-    adjust_action = path_for(f"/issues/{escape(case.case_ref)}/deadline/adjust")
-    approaching_action = path_for(f"/issues/{escape(case.case_ref)}/deadline/approaching-window")
-    approaching_hours = _hours_value(case.approaching_window_minutes)
-    deadline_date = _date_local_value(case.deadline)
-    deadline_time = _time_local_value(case.deadline)
-    return f"""
-    <section class="deadline-controls panel" aria-label="期限管理">
-      <h2>期限管理</h2>
-      <p class="deadline-controls-intro">截止时间和临近期限提醒是两项独立设置，分别保存，互不改变。</p>
-      <div class="deadline-control-grid">
-        <div class="deadline-control-card">
-          <h3>调整当前截止时间</h3>
-          <p>选择新的截止日期和时间，不会修改临近期限提醒。</p>
-          <form method="post" action="{adjust_action}" aria-label="调整截止时间">
-            <input type="hidden" name="version" value="{case.version}">
-            <label>截止日期
-              <input type="date" name="deadline_date" value="{deadline_date}" required>
-            </label>
-            <label>截止时间（24小时制）
-              <input type="time" name="deadline_time" step="60" value="{deadline_time}" required>
-            </label>
-            <p class="muted">此操作只改变截止时间，不会改变临近期限提醒设置。</p>
-            <button class="primary" type="submit">保存截止时间</button>
-          </form>
-        </div>
-        <div class="deadline-control-card">
-          <h3>设置临近期限提醒</h3>
-          <p>设置距截止时间多久时开始显示“临近期限”，不改变截止时间。</p>
-          <form method="post" action="{approaching_action}" aria-label="设置临近期限提醒">
-            <input type="hidden" name="version" value="{case.version}">
-            <label>提前多久进入临近期限（小时）
-              <input type="number" name="approaching_hours" min="0.5" step="0.5" value="{approaching_hours}" required>
-            </label>
-            <p class="muted">默认提前 24 小时，按至少 30 分钟递增。</p>
-            <p class="muted">此操作只改变临近期限提醒设置，不会调整截止时间。</p>
-            <button class="primary" type="submit">保存提醒设置</button>
-          </form>
-        </div>
-      </div>
-    </section>
-    """
 
 
-def _top_close_control(case: Any, path_for: Callable[[str], str]) -> str:
-    if (
-        case.lifecycle_status is LifecycleStatus.CLOSED
-        or not case.can_change_consult_status
-    ):
-        return ""
-    close_action = path_for(f"/issues/{escape(case.case_ref)}/close")
-    return f"""
-    <form class="top-close-control" method="post" action="{close_action}">
-      <input type="hidden" name="version" value="{case.version}">
-      <button type="submit" class="status-action-close">关闭问题</button>
-    </form>
-    """
 
 
-def _issue_delete_control(
-    case: Any,
-    path_for: Callable[[str], str],
-    *,
-    is_global_admin: bool,
-) -> str:
-    if not is_global_admin or case.lifecycle_status is not LifecycleStatus.CLOSED:
-        return ""
-    action = path_for(f"/issues/{escape(case.case_ref)}/delete")
-    return f"""
-    <form class="content-delete-control" method="post" action="{action}"
-      onsubmit="return confirm('永久删除该已关闭问题及其时间线和附件？此操作不可恢复。')">
-      <button type="submit" class="danger-button">删除已关闭问题</button>
-    </form>
-    """
 
 
-def _message_form(
-    case_ref: str,
-    version: int,
-    lifecycle: LifecycleStatus,
-    path_for: Callable[[str], str],
-    *,
-    show_side: bool = False,
-) -> str:
-    if lifecycle is LifecycleStatus.CLOSED:
-        return ""
-    message_path = path_for(f"/issues/{escape(case_ref)}/messages")
-    side_selector = (
-        '<label>发送身份<select name="side">'
-        '<option value="consult">咨询</option><option value="dev">研发</option>'
-        "</select></label>"
-        if show_side
-        else ""
-    )
-    return f"""
-    <section><h2>发送正式消息</h2>
-    <form method="post" action="{message_path}">
-      <input type="hidden" name="version" value="{version}">
-      <label>内容<textarea name="text" required></textarea></label>
-      {side_selector}
-      <label><input type="checkbox" name="intent" value="sync"> 仅同步进展</label>
-      <button type="submit">发送</button>
-    </form></section>
-    """
 
 
-def _lifecycle_forms(case: Any, path_for: Callable[[str], str]) -> str:
-    if case.lifecycle_status is LifecycleStatus.OPEN or not case.can_change_consult_status:
-        return ""
-    reopen_path = path_for(f"/issues/{escape(case.case_ref)}/reopen")
-    return f"""
-    <form method="post" action="{reopen_path}">
-      <input type="hidden" name="version" value="{case.version}">
-      <label>重新打开后由谁处理
-        <select name="waiting_on"><option value="dev">待研发处理</option>
-          <option value="consult">待咨询处理</option></select>
-      </label>
-      <button type="submit">重新打开</button>
-    </form>
-    """
 
 
 def _summary_json(summary: Any) -> dict[str, Any]:
@@ -4656,6 +2785,7 @@ def _summary_json(summary: Any) -> dict[str, Any]:
         "customer_name": summary.customer_name,
         "issue_current_status": summary.issue_current_status,
         "workflow_status": summary.status.value,
+        "can_accept": summary.can_accept,
         "priority": summary.priority.value,
         "status": summary.issue_current_status,
         "lifecycle_status": summary.lifecycle_status.value,
@@ -4668,59 +2798,8 @@ def _summary_json(summary: Any) -> dict[str, Any]:
     }
 
 
-def _case_card(summary: Any, path_for: Callable[[str], str]) -> str:
-    case_ref = escape(summary.case_ref)
-    title = escape(summary.title)
-    customer_name = escape(summary.customer_name or "未录入")
-    human_number = escape(summary.bug_number or "编号待生成")
-    updated_at = _format_datetime(summary.updated_at)
-    case_path = path_for(f"/issues/{case_ref}")
-    can_auto_accept = (
-        summary.lifecycle_status is LifecycleStatus.OPEN
-        and summary.status
-        in {
-            CaseStatus.PENDING_CONFIRMATION,
-            CaseStatus.WAITING_CUSTOMER,
-            CaseStatus.SUSPENDED,
-        }
-        and (summary.status is not CaseStatus.PENDING_CONFIRMATION or summary.can_accept)
-    )
-    card_content = (
-        f'<div class="case-card-top"><strong class="case-card-title">{title}</strong>'
-        f'<div class="case-card-badges">{_priority_badge(summary.priority)}'
-        f"{_case_list_status_badge(summary)}"
-        f"{_deadline_badge(summary.deadline_status)}</div></div>"
-        f'<div class="case-customer">客户 / 企业：{customer_name}</div>'
-        f'<div class="case-card-meta"><span class="case-ref">{human_number}</span>'
-        f"<span>截止 {_format_datetime(summary.deadline)}</span>"
-        f"<span>最近更新 {updated_at}</span></div>"
-    )
-    if can_auto_accept:
-        open_action = path_for(f"/issues/{case_ref}/open")
-        return (
-            f'<form class="case-card case-card-auto-accept" method="post" action="{open_action}">'
-            f'<button type="submit" class="case-card-hitbox" '
-            f'aria-label="受理并打开问题 {human_number}"></button>'
-            f'<div class="case-card-content">{card_content}</div></form>'
-        )
-    return (
-        '<article class="case-card">'
-        f'<a class="case-card-link" href="{case_path}">{card_content}</a></article>'
-    )
 
 
-def _case_list_status_badge(summary: Any) -> str:
-    status = escape(summary.issue_current_status or "问题未回复")
-    status_class = {
-        IssueCurrentStatus.NO_REPLY.value: "issue-status-no-reply",
-        IssueCurrentStatus.RESOLVED.value: "issue-status-resolved",
-        IssueCurrentStatus.DATA_PENDING.value: "issue-status-pending-info",
-        IssueCurrentStatus.FOLLOW_UP_ON_UPGRADE.value: "issue-status-upgrade-follow-up",
-        IssueCurrentStatus.REQUEST_PENDING.value: "issue-status-request-pending",
-        IssueCurrentStatus.CURRENTLY_UNRESOLVABLE.value: "issue-status-unresolvable",
-    }.get(summary.issue_current_status or IssueCurrentStatus.NO_REPLY.value, "")
-    classes = f"status-badge issue-current-status {status_class}".strip()
-    return f'<span class="{classes}">{status}</span>'
 
 
 def _can_auto_accept_case(case: Any) -> bool:
@@ -4782,6 +2861,11 @@ def _case_json(case: Any) -> dict[str, Any]:
         "current_dev_team_id": str(case.current_dev_team_id),
         "current_dev_team_name": case.current_dev_team_name,
         "current_dev_team_lead_display_name": case.current_dev_team_lead_display_name,
+        "can_transfer": case.can_transfer,
+        "transferable_consultants": [
+            {"id": str(user.id), "display_name": user.display_name}
+            for user in case.transferable_consultants
+        ],
         "can_transfer_dev_team": case.can_transfer_dev_team,
         "transferable_dev_teams": [
             {"id": str(team.id), "name": team.name} for team in case.transferable_dev_teams

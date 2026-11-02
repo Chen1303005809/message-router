@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -9,10 +10,10 @@ from fastapi.testclient import TestClient
 from kefu.admin.service import Administration, initialize_global_admin
 from kefu.case_desk.contracts import Actor, CreateCase, TextPart
 from kefu.case_desk.errors import Conflict, Forbidden
-from kefu.persistence.models import TeamKind
+from kefu.persistence.models import TeamKind, WeComChannel
 from kefu.web.app import create_app
 from tests.conftest import DeskContext
-from tests.web.test_app import settings
+from tests.web.test_issue_intake_access import _settings as settings
 
 
 def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
@@ -36,18 +37,13 @@ def test_visual_setup_creates_global_admin_and_manages_members_and_teams(
     headers = {"X-WeCom-UserId": "center-admin"}
     page = client.get("/admin", headers=headers)
     assert page.status_code == 200
-    assert "组织与授权" in page.text
-    assert "咨询队列" in page.text
-    assert "研发一组" in page.text
-    team_create_form = page.text.split(
-        '<form method="post" action="/admin/teams" class="form-grid team-create-form">',
-        maxsplit=1,
-    )[1].split("</form>", maxsplit=1)[0]
-    assert 'data-team-kind-select="true"' in team_create_form
-    assert 'class="team-lead-display-name-field" hidden' in team_create_form
-    assert 'data-team-lead-input="true"' in team_create_form
-    assert 'disabled></label>' in team_create_form
-    assert 'addEventListener("change"' in page.text
+    assert 'src="static/app.js"' in page.text
+    assert "组织与授权" not in page.text
+    app_script = client.get("/static/app.js")
+    assert 'data-team-kind-select="true"' in app_script.text
+    assert 'class="team-lead-display-name-field" hidden' in app_script.text
+    assert 'data-team-lead-input="true"' in app_script.text
+    assert 'addEventListener("change"' in app_script.text
 
     created_user = client.post(
         "/api/admin/users",
@@ -126,12 +122,26 @@ def test_global_admin_can_see_all_events_and_cannot_remove_last_admin(
     assert created_team.kind is TeamKind.DEV
     assert created_team.lead_display_name == "新研发负责人"
 
+    with desk_context.session_factory() as session, session.begin():
+        session.add_all(
+            [
+                WeComChannel(
+                    team_id=desk_context.teams["consult"],
+                    chatid="chat-admin-test-consult",
+                    initialized_at=datetime.now(UTC),
+                    active=True,
+                ),
+            ]
+        )
+
     case = desk_context.desk.execute(
         CreateCase(
             title="总管理员可见性",
             consult_queue_id=desk_context.teams["consult"],
             dev_team_id=desk_context.teams["dev_a"],
             parts=(TextPart("内容"),),
+            suspected_type="盘中",
+            issue_current_status="问题未回复",
         ),
         Actor(desk_context.users["consult_a"]),
     )
@@ -160,8 +170,10 @@ def test_configured_admin_is_initialized_on_web_startup(desk_context: DeskContex
 
     page = client.get("/settings/routing", headers={"X-WeCom-UserId": "env-admin"})
     assert page.status_code == 200
-    assert "部署管理员" in page.text
-    assert "组织与授权" in page.text
+    assert 'src="static/app.js"' in page.text
+    context = client.get("/api/ui/context", headers={"X-WeCom-UserId": "env-admin"})
+    assert context.status_code == 200
+    assert context.json()["is_global_admin"] is True
     assert client.get("/api/admin/overview", headers={"X-WeCom-UserId": "env-admin"}).json()[
         "global_admin_count"
     ] == 1

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <base href="__KEFU_BASE_PATH__/">
+    <title>权限不足</title>
+    <link rel="stylesheet" href="static/app.css">
+    <script type="module" src="static/forbidden.js"></script>
+  </head>
+  <body class="forbidden-page"
+        data-target="__KEFU_FORBIDDEN_TARGET__"
+        data-should-return="__KEFU_FORBIDDEN_RETURN__"
+        data-issue-list="__KEFU_ISSUE_LIST__">
+    <main class="forbidden-card">
+      <h1>权限不足</h1>
+      <p id="forbidden-message" data-message="__KEFU_FORBIDDEN_MESSAGE__"></p>
+      <nav id="forbidden-actions"></nav>
+    </main>
+  </body>
+</html>

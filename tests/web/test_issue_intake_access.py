@@ -78,8 +78,31 @@ def test_consultant_keeps_new_issue_as_default_landing_page(desk_context: DeskCo
     )
 
     assert response.status_code == 200
-    assert "新建问题" in response.text
+    assert 'src="static/app.js"' in response.text
+    assert "新建问题" not in response.text
     assert 'data-flash-notice="true"' not in response.text
+    context = client.get("/api/ui/context", headers={"X-WeCom-UserId": "consult-a"})
+    assert context.status_code == 200
+    assert context.json()["can_create_issue"] is True
+
+
+def test_static_shell_and_assets_keep_the_kefu_mount_prefix(desk_context: DeskContext) -> None:
+    _bind_consult_queue(desk_context)
+    client = _client(desk_context, web_base_url="https://events.example.test/kefu")
+
+    page = client.get("/issues", headers={"X-WeCom-UserId": "consult-a"})
+    stylesheet = client.get("/static/app.css")
+    script = client.get("/static/app.js")
+
+    assert page.status_code == 200
+    assert '<base href="/kefu/">' in page.text
+    assert 'href="static/app.css"' in page.text
+    assert 'src="static/app.js"' in page.text
+    assert "客户甲" not in page.text
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["content-type"].startswith("text/css")
+    assert script.status_code == 200
+    assert script.headers["content-type"].startswith("text/javascript")
 
 
 def test_user_without_consult_queue_is_redirected_to_issue_list_with_notice(
@@ -97,11 +120,12 @@ def test_user_without_consult_queue_is_redirected_to_issue_list_with_notice(
 
     listing = client.get(blocked.headers["location"], headers=headers)
     assert listing.status_code == 200
-    assert "问题中心" in listing.text
-    assert "没有可用的咨询队列" in listing.text
-    assert 'data-flash-notice="true"' in listing.text
-    assert 'data-flash-notice-close="true"' in listing.text
-    assert "setTimeout(() => notice.remove(), 5000)" in listing.text
+    assert 'src="static/app.js"' in listing.text
+    assert "没有可用的咨询队列" not in listing.text
+    client_script = client.get("/static/app.js")
+    assert client_script.status_code == 200
+    assert "missing_consult_queue" in client_script.text
+    assert "已为你打开问题列表" in client_script.text
 
     injected_notice = client.get(
         "/issues?notice=%3Cscript%3Ealert(1)%3C%2Fscript%3E",
@@ -109,7 +133,7 @@ def test_user_without_consult_queue_is_redirected_to_issue_list_with_notice(
     )
     assert injected_notice.status_code == 200
     assert "<script>alert(1)</script>" not in injected_notice.text
-    assert 'data-flash-notice="true"' not in injected_notice.text
+    assert "%3Cscript%3Ealert(1)%3C%2Fscript%3E" not in injected_notice.text
 
 
 def test_global_admin_without_consult_queue_can_reach_authorization_page(
@@ -125,9 +149,11 @@ def test_global_admin_without_consult_queue_can_reach_authorization_page(
     listing = client.get("/issues/new", headers=headers, follow_redirects=True)
 
     assert listing.status_code == 200
-    assert "没有可用的咨询队列" in listing.text
-    assert 'href="/admin"' in listing.text
+    assert 'src="static/app.js"' in listing.text
     assert client.get("/admin", headers=headers).status_code == 200
+    context = client.get("/api/ui/context", headers=headers)
+    assert context.status_code == 200
+    assert context.json()["is_global_admin"] is True
 
 
 def test_user_without_routable_dev_team_is_redirected_with_specific_notice(
@@ -157,7 +183,10 @@ def test_user_without_routable_dev_team_is_redirected_with_specific_notice(
         headers={"X-WeCom-UserId": "consult-a"},
     )
     assert listing.status_code == 200
-    assert "没有已绑定群聊的研发受理组" in listing.text
+    assert 'src="static/app.js"' in listing.text
+    client_script = client.get("/static/app.js")
+    assert "missing_dev_team" in client_script.text
+    assert "没有已绑定群聊的研发受理组" in client_script.text
 
 
 def test_login_and_issue_creation_authorization_are_unchanged(
@@ -205,10 +234,14 @@ def test_browser_forbidden_response_alerts_and_returns_to_same_origin_page(
     assert response.status_code == 403
     assert response.headers["content-type"].startswith("text/html")
     assert "只有问题中心总管理员可以管理组织和授权" in response.text
-    assert "window.alert(" in response.text
-    assert 'window.location.replace("/kefu/issues?state=closed' in response.text
+    assert 'src="static/forbidden.js"' in response.text
+    assert 'data-target="/kefu/issues?state=closed&amp;_kefu_forbidden_return=1"' in response.text
     assert "_kefu_forbidden_return=1" in response.text
     assert response.headers["cache-control"] == "no-store"
+    forbidden_script = client.get("/static/forbidden.js")
+    assert forbidden_script.status_code == 200
+    assert "window.alert(detail)" in forbidden_script.text
+    assert "window.location.replace(target)" in forbidden_script.text
 
 
 def test_browser_forbidden_response_uses_issue_list_for_unsafe_or_missing_referer(
@@ -231,7 +264,7 @@ def test_browser_forbidden_response_uses_issue_list_for_unsafe_or_missing_refere
 
     for response in (cross_origin, missing_referer, self_referer):
         assert response.status_code == 403
-        assert 'window.location.replace("/issues?_kefu_forbidden_return=1")' in response.text
+        assert 'data-target="/issues?_kefu_forbidden_return=1"' in response.text
 
 
 def test_forbidden_recovery_marker_stops_redirect_loops(desk_context: DeskContext) -> None:
@@ -244,10 +277,10 @@ def test_forbidden_recovery_marker_stops_redirect_loops(desk_context: DeskContex
     )
 
     assert response.status_code == 403
-    assert "window.alert(" in response.text
-    assert "window.location.replace(" not in response.text
-    assert "window.history.back()" in response.text
-    assert 'href="/issues"' in response.text
+    assert 'data-should-return="false"' in response.text
+    assert 'src="static/forbidden.js"' in response.text
+    forbidden_script = client.get("/static/forbidden.js")
+    assert "window.history.back()" in forbidden_script.text
 
 
 def test_api_forbidden_response_remains_json_and_h5_installs_fetch_alert(
@@ -263,9 +296,11 @@ def test_api_forbidden_response_remains_json_and_h5_installs_fetch_alert(
     assert api_response.headers["content-type"].startswith("application/json")
     assert api_response.json()["detail"] == "只有问题中心总管理员可以管理组织和授权"
     assert page_response.status_code == 200
-    assert "__kefuForbiddenFetchInstalled" in page_response.text
-    assert "response.status === 403" in page_response.text
-    assert "response.clone().json()" in page_response.text
+    assert 'src="static/app.js"' in page_response.text
+    client_script = client.get("/static/client.js")
+    assert client_script.status_code == 200
+    assert "response.status === 403" in client_script.text
+    assert "window.alert(message)" in client_script.text
 
 
 def test_browser_forbidden_form_submission_returns_to_intake_page(
@@ -289,8 +324,8 @@ def test_browser_forbidden_form_submission_returns_to_intake_page(
 
     assert response.status_code == 403
     assert response.headers["content-type"].startswith("text/html")
-    assert "window.alert(" in response.text
-    assert 'window.location.replace("/issues/new?_kefu_forbidden_return=1")' in response.text
+    assert 'src="static/forbidden.js"' in response.text
+    assert 'data-target="/issues/new?_kefu_forbidden_return=1"' in response.text
 
 
 def test_non_403_html_errors_keep_default_json_responses(desk_context: DeskContext) -> None:
@@ -328,4 +363,7 @@ def test_non_403_html_errors_keep_default_json_responses(desk_context: DeskConte
     )
     assert forbidden_response.status_code == 403
     assert "</script><script>alert('unsafe')</script>" not in forbidden_response.text
-    assert "\\u003c/script\\u003e\\u003cscript\\u003e" in forbidden_response.text
+    safe_message = (
+        'data-message="&lt;/script&gt;&lt;script&gt;alert(&#x27;unsafe&#x27;)&lt;/script&gt;"'
+    )
+    assert safe_message in forbidden_response.text
