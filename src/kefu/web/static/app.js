@@ -110,20 +110,27 @@ function flashNoticeFromUrl() {
   }
 }
 
-function inspectionDialog(context) {
+function inspectionTrigger(context, className = "primary inspection-run-button") {
+  const action = context.is_global_admin
+    ? 'data-inspection-open="true"'
+    : 'data-action="inspect"';
+  return `<button class="${className}" type="button" ${action}>立刻巡检</button>`;
+}
+
+function inspectionDialog(context, { includeTrigger = true } = {}) {
   if (!context.can_inspect) return "";
-  const options = context.is_global_admin
-    ? `<fieldset><legend>群聊类型（至少选择一种）</legend>
+  const trigger = includeTrigger ? inspectionTrigger(context) : "";
+  const status = '<p class="muted inspection-run-status" data-inspection-status="true" role="status" aria-live="polite" hidden></p>';
+  if (!context.is_global_admin) return `${trigger}${status}`;
+  const options = `<fieldset><legend>群聊类型（至少选择一种）</legend>
         <label class="inspection-kind-option"><input type="checkbox" name="team_kinds" value="consult_queue" checked> 咨询团队</label>
-        <label class="inspection-kind-option"><input type="checkbox" name="team_kinds" value="dev" checked> 研发团队</label></fieldset>`
-    : "";
-  return `<button class="primary inspection-run-button" type="button" data-inspection-open="true">立刻巡检</button>
-    <dialog class="inspection-dialog" data-inspection-dialog="true">
+        <label class="inspection-kind-option"><input type="checkbox" name="team_kinds" value="dev" checked> 研发团队</label></fieldset>`;
+  return `${trigger}<dialog class="inspection-dialog" data-inspection-dialog="true">
       <h2>选择巡检群聊类型</h2><p>每个群仍按该团队设置的巡检规则筛选问题。</p>${options}
       <p class="inspection-choice-error form-error" hidden>请至少选择一种群聊类型。</p>
       <div class="inspection-dialog-actions"><button type="button" data-inspection-cancel="true">取消</button>
       <button class="primary" type="button" data-inspection-submit="true">开始巡检</button></div>
-    </dialog><p class="muted inspection-run-status" data-inspection-status="true" role="status" aria-live="polite" hidden></p>`;
+    </dialog>${status}`;
 }
 
 function renderIssueCard(issue) {
@@ -196,8 +203,8 @@ async function renderNewIssue() {
     ? `<input type="hidden" name="consult_queue_id" value="${h(options.queues[0].id)}">`
     : `<label class="intake-queue"><span class="visually-hidden">咨询队列</span><select name="consult_queue_id" required aria-label="咨询队列"><option value="" disabled selected>选择队列</option>${options.queues.map((queue) => `<option value="${h(queue.id)}">${h(queue.name)}</option>`).join("")}</select></label>`;
   const images = privateIntake?.images?.map((image) => `<img class="intake-image" alt="私聊图片" src="${h(image.url)}" loading="lazy">`).join("") || "";
-  root.innerHTML = `<main class="create-main intake-page"><header class="page-heading intake-heading"><h1>新建问题</h1><div class="intake-heading-actions">${options.can_inspect ? '<button type="button" class="primary" data-action="inspect">立刻巡检</button>' : ""}<a class="intake-back-link" href="${url("/issues")}">返回问题列表</a></div></header>
-    ${inspectionDialog(options)}<form class="panel create-form intake-form" data-api-form="true" data-form-kind="issue-draft" data-private-intake="${privateIntake ? "true" : "false"}" enctype="multipart/form-data">
+  root.innerHTML = `<main class="create-main intake-page"><header class="page-heading intake-heading"><h1>新建问题</h1><div class="intake-heading-actions">${options.can_inspect ? inspectionTrigger(options, "primary") : ""}<a class="intake-back-link" href="${url("/issues")}">返回问题列表</a></div></header>
+    ${inspectionDialog(options, { includeTrigger: false })}<form class="panel create-form intake-form" data-api-form="true" data-form-kind="issue-draft" data-private-intake="${privateIntake ? "true" : "false"}" enctype="multipart/form-data">
       ${privateIntake ? '<p class="muted">已带入机器人私聊内容及图片。提交后会进入现有问题整理和审核流程。</p>' : ""}
       <textarea name="pasted_text" required maxlength="50000" rows="8" autofocus aria-label="粘贴问题内容，也可将图片拖入此处" data-image-drop-zone="true" placeholder="粘贴问题内容；图片可拖入此处…">${h(privateIntake?.raw_text || "")}</textarea>
       <div class="private-intake-images">${images}</div><input type="hidden" name="source_chat_id" value=""><input type="hidden" name="source_chat_status" value="not_reported"><input type="hidden" name="source_chat_error" value="">
