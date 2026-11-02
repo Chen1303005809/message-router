@@ -113,7 +113,7 @@ configure_logging("WEB")
 # httpx's built-in INFO log prints full request URLs, including access_token query values.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-_PRIVATE_INTAKE_COOKIE = "kefu_private_intake"
+_PRIVATE_INTAKE_HEADER = "X-Private-Intake-Token"
 _STATIC_DIR = Path(__file__).with_name("static")
 
 
@@ -372,17 +372,10 @@ def create_app(
             raise _http_error(error) from error
         except ValueError as error:
             raise _http_error(ValidationError("私聊交接令牌无效")) from error
-        response = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store, private"})
-        response.set_cookie(
-            _PRIVATE_INTAKE_COOKIE,
-            token,
-            max_age=2 * 60 * 60,
-            path="/",
-            secure=urlsplit(settings.web_base_url).scheme == "https",
-            httponly=True,
-            samesite="strict",
+        return JSONResponse(
+            {"ok": True},
+            headers={"Cache-Control": "no-store, private"},
         )
-        return response
 
     @app.get("/api/wecom/agent-js-sdk-config", include_in_schema=False)
     async def agent_js_sdk_config(request: Request, url: str) -> JSONResponse:
@@ -513,8 +506,12 @@ def create_app(
     @app.get("/api/issues/intake-options", include_in_schema=False)
     async def intake_options_api(request: Request) -> JSONResponse:
         actor = actor_or_error(request)
-        private_token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
         try:
+            private_token = (
+                _private_intake_token(request)
+                if _private_intake_requested(request)
+                else None
+            )
             queues = issue_management.list_consult_queues(actor)
             dev_teams = issue_management.list_dev_teams(actor)
             private_handoff = (
@@ -597,13 +594,8 @@ def create_app(
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        private_token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
+        private_intake_requested = _private_intake_requested(request)
         try:
-            private_handoff = (
-                issue_management.get_private_intake_handoff(private_token, actor)
-                if private_token
-                else None
-            )
             queues = issue_management.list_consult_queues(actor)
             dev_teams = issue_management.list_dev_teams(actor)
             issue_management.cleanup_expired_drafts()
@@ -621,7 +613,7 @@ def create_app(
             )
         headers = (
             {"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"}
-            if private_handoff is not None
+            if private_intake_requested
             else None
         )
         return static_page(headers=headers)
@@ -658,8 +650,10 @@ def create_app(
             return actor
         form = await request.form()
         draft_processing_task_id: UUID | None = None
-        private_intake_token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
+        private_intake_token = None
         try:
+            if _private_intake_requested(request):
+                private_intake_token = _private_intake_token(request)
             private_handoff = None
             if private_intake_token:
                 existing_draft_id = issue_management.get_existing_private_intake_draft(
@@ -674,7 +668,6 @@ def create_app(
                             external_path(f"/issues/drafts/{existing_draft_id}"),
                             status_code=303,
                         )
-                    response.delete_cookie(_PRIVATE_INTAKE_COOKIE, path="/")
                     return response
                 private_handoff = issue_management.get_private_intake_handoff(
                     private_intake_token, actor
@@ -933,8 +926,6 @@ def create_app(
                 external_path(f"/issues/drafts/{draft.id}"),
                 status_code=303,
             )
-        if private_intake_token:
-            response.delete_cookie(_PRIVATE_INTAKE_COOKIE, path="/")
         return response
 
     @app.get("/issues/private-intakes/media/{media_id}", include_in_schema=False)
@@ -942,8 +933,10 @@ def create_app(
         actor = page_actor_or_login(request)
         if isinstance(actor, RedirectResponse):
             return actor
-        token = request.cookies.get(_PRIVATE_INTAKE_COOKIE)
+        token = request.headers.get(_PRIVATE_INTAKE_HEADER, "").strip()
         if not token:
+            raise HTTPException(status_code=404, detail="私聊图片不存在")
+        if len(token) > 64:
             raise HTTPException(status_code=404, detail="私聊图片不存在")
         try:
             access = issue_management.get_private_intake_media_access(token, media_id, actor)
@@ -2379,6 +2372,17 @@ def _payload_text(payload: Mapping[str, Any], key: str) -> str:
     if not isinstance(value, str):
         raise ValidationError(f"字段 {key} 必须是文本")
     return value
+
+
+def _private_intake_requested(request: Request) -> bool:
+    return request.query_params.get("private_intake") == "1"
+
+
+def _private_intake_token(request: Request) -> str:
+    token = request.headers.get(_PRIVATE_INTAKE_HEADER, "").strip()
+    if not token or len(token) > 64:
+        raise ValidationError("私聊交接令牌无效")
+    return token
 
 
 def _admin_overview_json(overview: AdminOverview) -> dict[str, int]:

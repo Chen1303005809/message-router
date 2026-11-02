@@ -9,6 +9,7 @@ const status = document.getElementById("private-intake-status");
 if (localPath === "/issues/private-intake") {
   const token = window.location.hash.slice(1);
   if (token) sessionStorage.setItem(key, token);
+  else sessionStorage.removeItem(key);
   history.replaceState(null, "", window.location.pathname + window.location.search);
   navigate("/issues/private-intake/continue");
 } else {
@@ -21,8 +22,7 @@ if (localPath === "/issues/private-intake") {
         method: "POST",
         body: { token },
       });
-      sessionStorage.removeItem(key);
-      navigate("/issues/new");
+      navigate("/issues/new?private_intake=1");
     } catch (_) {
       if (status) status.textContent = "交接链接已过期或账号不匹配，请重新从机器人私聊打开卡片。";
     }

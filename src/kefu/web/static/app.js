@@ -2,6 +2,7 @@ import {
   api,
   bindImageUploader,
   escapeHtml as h,
+  fetchBlob,
   formValues,
   formatDate,
   localDateTime,
@@ -14,6 +15,11 @@ import {
 const root = document.getElementById("app");
 const path = currentPath();
 const params = new URLSearchParams(window.location.search);
+const privateIntakeStorageKey = "kefu_private_intake_token";
+const privateIntakeMode = path === "/issues/new" && params.get("private_intake") === "1";
+if (path === "/issues/new" && !privateIntakeMode) {
+  sessionStorage.removeItem(privateIntakeStorageKey);
+}
 const issueNumber = path.match(/^\/issues\/([^/]+)$/)?.[1] || "";
 const draftId = path.match(/^\/issues\/drafts\/([^/]+)$/)?.[1] || "";
 
@@ -185,8 +191,21 @@ function imageUploader({ compact = false } = {}) {
 
 async function renderNewIssue() {
   setPage("上传问题材料", "issue-intake-page");
+  const privateIntakeToken = privateIntakeMode
+    ? sessionStorage.getItem(privateIntakeStorageKey)
+    : null;
+  if (privateIntakeMode && !privateIntakeToken) {
+    root.innerHTML = `<main class="panel"><h1>私聊交接不可用</h1><p class="notice">请重新从机器人私聊打开交接卡片。</p><a class="button-link" href="${url("/issues/new")}">改为普通建单</a></main>`;
+    return;
+  }
+  const intakeOptionsPath = privateIntakeMode
+    ? "/api/issues/intake-options?private_intake=1"
+    : "/api/issues/intake-options";
+  const privateHeaders = privateIntakeMode
+    ? { "X-Private-Intake-Token": privateIntakeToken }
+    : {};
   const [options, context] = await Promise.all([
-    api("/api/issues/intake-options"),
+    api(intakeOptionsPath, { headers: privateHeaders }),
     api("/api/ui/context"),
   ]);
   if (!options.queues.length) {
@@ -198,11 +217,14 @@ async function renderNewIssue() {
     return;
   }
   const privateIntake = options.private_intake;
+  if (privateIntakeMode && !privateIntake) {
+    throw new Error("私聊交接内容不可用，请重新从机器人私聊打开交接卡片。");
+  }
   if (options.wecom_group_context_enabled) await import("./wecom.js");
   const queueControl = options.queues.length === 1
     ? `<input type="hidden" name="consult_queue_id" value="${h(options.queues[0].id)}">`
     : `<label class="intake-queue"><span class="visually-hidden">咨询队列</span><select name="consult_queue_id" required aria-label="咨询队列"><option value="" disabled selected>选择队列</option>${options.queues.map((queue) => `<option value="${h(queue.id)}">${h(queue.name)}</option>`).join("")}</select></label>`;
-  const images = privateIntake?.images?.map((image) => `<img class="intake-image" alt="私聊图片" src="${h(image.url)}" loading="lazy">`).join("") || "";
+  const images = privateIntake?.images?.map((_, index) => `<img class="intake-image" alt="私聊图片" data-private-image="${index}" loading="lazy">`).join("") || "";
   root.innerHTML = `<main class="create-main intake-page"><header class="page-heading intake-heading"><h1>新建问题</h1><div class="intake-heading-actions">${options.can_inspect ? inspectionTrigger(options, "primary") : ""}<a class="intake-back-link" href="${url("/issues")}">返回问题列表</a></div></header>
     ${inspectionDialog(options, { includeTrigger: false })}<form class="panel create-form intake-form" data-api-form="true" data-form-kind="issue-draft" data-private-intake="${privateIntake ? "true" : "false"}" enctype="multipart/form-data">
       ${privateIntake ? '<p class="muted">已带入机器人私聊内容及图片。提交后会进入现有问题整理和审核流程。</p>' : ""}
@@ -211,6 +233,29 @@ async function renderNewIssue() {
       <div class="intake-actions">${imageUploader({ compact: true })}${queueControl}<button class="primary" type="submit" data-issue-draft-submit="true">上传</button></div>
       <p class="draft-submit-status muted" data-issue-draft-status="true" role="status" aria-live="polite" hidden><span class="draft-loading-spinner" aria-hidden="true"></span>正在整理…</p></form></main>`;
   bindImageUploader(root);
+  if (privateIntake) await loadPrivateIntakeImages(privateIntake.images, privateIntakeToken);
+}
+
+async function loadPrivateIntakeImages(images, token) {
+  const results = await Promise.allSettled(images.map((image) =>
+    fetchBlob(image.url, {
+      headers: { "X-Private-Intake-Token": token },
+    }).then((blob) => URL.createObjectURL(blob))));
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) {
+    results.forEach((result) => {
+      if (result.status === "fulfilled") URL.revokeObjectURL(result.value);
+    });
+    throw failed.reason;
+  }
+
+  const objectUrls = results.map((result) => result.value);
+  root.querySelectorAll("[data-private-image]").forEach((image, index) => {
+    image.src = objectUrls[index];
+  });
+  window.addEventListener("pagehide", () => {
+    objectUrls.forEach((objectUrl) => URL.revokeObjectURL(objectUrl));
+  }, { once: true });
 }
 
 function renderEntry(entry, number) {
@@ -499,10 +544,24 @@ function bindEvents() {
           status.lastChild.textContent = "正在整理…";
         }
         if (submit) submit.textContent = "正在上传…";
-        const response = await api("/api/issues/drafts", {
-          method: "POST",
-          body: await collectDraftForm(form),
-        });
+        const privateIntake = form.dataset.privateIntake === "true";
+        const privateIntakeToken = privateIntake
+          ? sessionStorage.getItem(privateIntakeStorageKey)
+          : null;
+        if (privateIntake && !privateIntakeToken) {
+          throw new Error("私聊交接已失效，请重新从机器人私聊打开交接卡片。");
+        }
+        const response = await api(
+          privateIntake ? "/api/issues/drafts?private_intake=1" : "/api/issues/drafts",
+          {
+            method: "POST",
+            headers: privateIntake
+              ? { "X-Private-Intake-Token": privateIntakeToken }
+              : {},
+            body: await collectDraftForm(form),
+          },
+        );
+        if (privateIntake) sessionStorage.removeItem(privateIntakeStorageKey);
         navigate(`/issues/drafts/${response.draft_id}`);
         return;
       }

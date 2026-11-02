@@ -92,6 +92,35 @@ export async function api(path, options = {}) {
   return payload;
 }
 
+export async function fetchBlob(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  let response;
+  try {
+    response = await fetch(url(path), {
+      ...options,
+      headers,
+      credentials: "same-origin",
+    });
+  } catch (error) {
+    throw new Error(error?.message || "网络连接失败，请检查网络后重试。");
+  }
+
+  if (response.status === 401) {
+    const next = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(`${url("/auth/login")}?next=${encodeURIComponent(next)}`);
+    throw new Error("登录状态已失效，正在重新登录。");
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message = typeof payload.detail === "string" && payload.detail.trim()
+      ? payload.detail
+      : `请求失败（${response.status}）`;
+    if (response.status === 403) window.alert(message);
+    throw new Error(message);
+  }
+  return response.blob();
+}
+
 export function navigate(path) {
   window.location.assign(url(path));
 }
